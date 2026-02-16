@@ -147,15 +147,15 @@ class ResearchGateScraper(BaseScraper):
             resp = self.fetch(url)
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Full description
+            # Full description (larger for parsing)
             desc_el = soup.select_one(
                 "div.job-description, "
                 "div.nova-legacy-o-stack, "
                 "div[itemprop='description'], "
                 "div.research-detail-middle-section"
             )
-            if desc_el and not job.get("description"):
-                job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+            if desc_el:
+                job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
 
             # Institute
             if not job.get("institute"):
@@ -184,6 +184,14 @@ class ResearchGateScraper(BaseScraper):
             )
             if dl_el:
                 job["deadline"] = self._parse_date(dl_el.get_text(strip=True))
+
+            # Department
+            dept_el = soup.select_one(
+                "span[itemprop='department'], span.department, "
+                "div.department"
+            )
+            if dept_el and not job.get("department"):
+                job["department"] = dept_el.get_text(strip=True)
 
         except Exception:
             self.logger.debug("Could not fetch detail for %s", url)

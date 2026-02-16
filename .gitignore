@@ -14,6 +14,7 @@ env/
 # Data
 data/jobs.db
 data/cv_keywords.json
+data/*.xlsx
 logs/*.log
 
 # OS

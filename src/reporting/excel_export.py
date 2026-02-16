@@ -16,17 +16,24 @@ JOB_COLUMNS = [
     "Institute",
     "Tier",
     "Country",
+    "Department",
     "Field",
+    "Keywords",
+    "Requirements",
+    "Conditions",
     "h-index",
     "Citations",
     "Posted Date",
     "Deadline",
+    "Description",
+    "PI Research",
     "Job URL",
     "Lab URL",
     "Scholar URL",
     "Match Score",
     "Status",
     "Notes",
+    "Source",
 ]
 
 PI_COLUMNS = [
@@ -45,22 +52,31 @@ PI_COLUMNS = [
 
 
 def _job_to_row(job: dict) -> dict:
+    tier = job.get("tier")
+    desc = job.get("description") or ""
     return {
-        "PI Name": job.get("pi_name", ""),
-        "Institute": job.get("institute", ""),
-        "Tier": f"T{job.get('tier', 4)}",
-        "Country": job.get("country", ""),
-        "Field": job.get("field", ""),
-        "h-index": job.get("h_index", ""),
-        "Citations": job.get("citations", ""),
-        "Posted Date": job.get("posted_date", ""),
-        "Deadline": job.get("deadline", ""),
-        "Job URL": job.get("url", ""),
-        "Lab URL": job.get("lab_url", ""),
-        "Scholar URL": job.get("scholar_url", ""),
+        "PI Name": job.get("pi_name") or "",
+        "Institute": job.get("institute") or "",
+        "Tier": f"T{tier}" if tier else "",
+        "Country": job.get("country") or "",
+        "Department": job.get("department") or "",
+        "Field": job.get("field") or "",
+        "Keywords": job.get("keywords") or "",
+        "Requirements": job.get("requirements") or "",
+        "Conditions": job.get("conditions") or "",
+        "h-index": job.get("h_index") or "",
+        "Citations": job.get("citations") or "",
+        "Posted Date": job.get("posted_date") or "",
+        "Deadline": job.get("deadline") or "",
+        "Description": desc[:500] if desc else "",
+        "PI Research": job.get("pi_research_summary") or "",
+        "Job URL": job.get("url") or "",
+        "Lab URL": job.get("lab_url") or "",
+        "Scholar URL": job.get("scholar_url") or "",
         "Match Score": job.get("match_score", 0),
-        "Status": job.get("status", ""),
-        "Notes": job.get("notes", ""),
+        "Status": job.get("status") or "",
+        "Notes": job.get("notes") or "",
+        "Source": job.get("source") or "",
     }
 
 

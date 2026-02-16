@@ -7,9 +7,9 @@
   h1 { color: #1a1a2e; border-bottom: 2px solid #16213e; padding-bottom: 10px; }
   h2 { color: #16213e; margin-top: 30px; }
   .summary { background: #f0f4f8; padding: 15px; border-radius: 8px; margin: 15px 0; }
-  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13px; }
-  th { background: #16213e; color: white; padding: 8px 12px; text-align: left; }
-  td { padding: 6px 12px; border-bottom: 1px solid #e0e0e0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12px; }
+  th { background: #16213e; color: white; padding: 6px 8px; text-align: left; white-space: nowrap; }
+  td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
   tr:hover { background: #f5f5f5; }
   .tier1 { color: #d4af37; font-weight: bold; }
   .tier2 { color: #1e88e5; }
@@ -20,11 +20,17 @@
   .flag { font-size: 16px; }
   .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #ddd; color: #888; font-size: 12px; }
   .recommendation { background: #fff3e0; border-left: 4px solid #ff9800; padding: 10px; margin: 10px 0; }
+  .detail { font-size: 11px; color: #555; max-width: 400px; }
+  .kw { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 1px 5px; border-radius: 3px; margin: 1px; font-size: 10px; }
+  .req { color: #666; font-size: 11px; }
+  .cond { color: #2e7d32; font-size: 11px; font-weight: 500; }
+  .research { color: #6a1b9a; font-size: 11px; font-style: italic; }
+  .expand { cursor: pointer; color: #1565c0; font-size: 11px; }
 </style>
 </head>
 <body>
 
-<h1>🔬 Postdoc Job Search Report — {{ date }}</h1>
+<h1>Postdoc Job Search Report — {{ date }}</h1>
 
 <div class="summary">
   <strong>{{ total_new }} new postdoc positions</strong>
@@ -32,83 +38,74 @@
   {% if rec_count %} + <strong>{{ rec_count }} new PI recommendations</strong>{% endif %}
 </div>
 
-{% if us_jobs %}
-<h2><span class="flag">🇺🇸</span> United States ({{ us_count }})</h2>
+{# ── Macro for a job details row ── #}
+{% macro job_table(jobs, show_country=false) %}
 <table>
-<tr><th>#</th><th>PI</th><th>Institute (Tier)</th><th>h-index</th><th>Field</th><th>Posted</th><th>Deadline</th><th>Links</th><th>Note</th></tr>
-{% for job in us_jobs %}
+<tr>
+  <th>#</th><th>PI</th><th>Institute (Tier)</th>
+  {% if show_country %}<th>Country</th>{% endif %}
+  <th>Field / Keywords</th><th>Requirements</th><th>Conditions</th>
+  <th>Posted</th><th>Deadline</th><th>Links</th>
+</tr>
+{% for job in jobs %}
 <tr class="{{ 'new' if job.status == 'new' else '' }}">
   <td>{{ loop.index }}</td>
   <td>{{ job.pi_name or '-' }}</td>
-  <td>{{ job.institute or '-' }} <span class="tier{{ job.tier }}">(T{{ job.tier }})</span></td>
-  <td>{{ job.h_index or '-' }}</td>
-  <td>{{ job.field or '-' }}</td>
+  <td>{{ job.institute or '-' }}{% if job.department %}<br><span class="detail">{{ job.department }}</span>{% endif %}
+    {% if job.tier %}<span class="tier{{ job.tier }}">(T{{ job.tier }})</span>{% endif %}
+    {% if job.h_index %}<br><span class="detail">h={{ job.h_index }}</span>{% endif %}
+  </td>
+  {% if show_country %}<td>{{ job.country or '-' }}</td>{% endif %}
+  <td>
+    {{ job.field or '-' }}
+    {% if job.keywords %}<br>{% for kw in job.keywords.split(', ')[:6] %}<span class="kw">{{ kw }}</span>{% endfor %}{% endif %}
+    {% if job.pi_research_summary %}<br><span class="research">{{ job.pi_research_summary[:150] }}</span>{% endif %}
+  </td>
+  <td class="req">{{ (job.requirements or '-')[:200] }}{% if job.requirements and job.requirements|length > 200 %}...{% endif %}</td>
+  <td class="cond">{{ (job.conditions or '-')[:150] }}{% if job.conditions and job.conditions|length > 150 %}...{% endif %}</td>
   <td>{{ job.posted_date or '-' }}</td>
   <td>{{ job.deadline or '-' }}</td>
-  <td>{% if job.url %}<a href="{{ job.url }}">📄</a>{% endif %} {% if job.lab_url %}<a href="{{ job.lab_url }}">🏠</a>{% endif %} {% if job.scholar_url %}<a href="{{ job.scholar_url }}">🎓</a>{% endif %}</td>
-  <td>{{ job.status }}</td>
+  <td>{% if job.url %}<a href="{{ job.url }}">Job</a>{% endif %}{% if job.lab_url %} <a href="{{ job.lab_url }}">Lab</a>{% endif %}{% if job.scholar_url %} <a href="{{ job.scholar_url }}">Scholar</a>{% endif %}</td>
 </tr>
 {% endfor %}
 </table>
+{% endmacro %}
+
+{% if us_jobs %}
+<h2><span class="flag">🇺🇸</span> United States ({{ us_count }})</h2>
+{{ job_table(us_jobs) }}
 {% endif %}
 
 {% if eu_jobs %}
 <h2><span class="flag">🇪🇺</span> Europe ({{ eu_count }})</h2>
-<table>
-<tr><th>#</th><th>PI</th><th>Institute (Tier)</th><th>h-index</th><th>Field</th><th>Posted</th><th>Deadline</th><th>Links</th><th>Note</th></tr>
-{% for job in eu_jobs %}
-<tr class="{{ 'new' if job.status == 'new' else '' }}">
-  <td>{{ loop.index }}</td>
-  <td>{{ job.pi_name or '-' }}</td>
-  <td>{{ job.institute or '-' }} <span class="tier{{ job.tier }}">(T{{ job.tier }})</span></td>
-  <td>{{ job.h_index or '-' }}</td>
-  <td>{{ job.field or '-' }}</td>
-  <td>{{ job.posted_date or '-' }}</td>
-  <td>{{ job.deadline or '-' }}</td>
-  <td>{% if job.url %}<a href="{{ job.url }}">📄</a>{% endif %} {% if job.lab_url %}<a href="{{ job.lab_url }}">🏠</a>{% endif %} {% if job.scholar_url %}<a href="{{ job.scholar_url }}">🎓</a>{% endif %}</td>
-  <td>{{ job.status }}</td>
-</tr>
-{% endfor %}
-</table>
+{{ job_table(eu_jobs) }}
 {% endif %}
 
 {% if asia_jobs or other_jobs %}
 <h2><span class="flag">🌏</span> Asia / Other ({{ asia_count + other_count }})</h2>
+{{ job_table(asia_jobs + other_jobs, show_country=true) }}
+{% endif %}
+
+{% if recommendations %}
+<h2>New PI Recommendations ({{ rec_count }})</h2>
 <table>
-<tr><th>#</th><th>PI</th><th>Institute (Tier)</th><th>Country</th><th>h-index</th><th>Field</th><th>Posted</th><th>Deadline</th><th>Links</th><th>Note</th></tr>
-{% for job in asia_jobs + other_jobs %}
-<tr class="{{ 'new' if job.status == 'new' else '' }}">
-  <td>{{ loop.index }}</td>
-  <td>{{ job.pi_name or '-' }}</td>
-  <td>{{ job.institute or '-' }} <span class="tier{{ job.tier }}">(T{{ job.tier }})</span></td>
-  <td>{{ job.country or '-' }}</td>
-  <td>{{ job.h_index or '-' }}</td>
-  <td>{{ job.field or '-' }}</td>
-  <td>{{ job.posted_date or '-' }}</td>
-  <td>{{ job.deadline or '-' }}</td>
-  <td>{% if job.url %}<a href="{{ job.url }}">📄</a>{% endif %} {% if job.lab_url %}<a href="{{ job.lab_url }}">🏠</a>{% endif %} {% if job.scholar_url %}<a href="{{ job.scholar_url }}">🎓</a>{% endif %}</td>
-  <td>{{ job.status }}</td>
+<tr><th>PI</th><th>Institute</th><th>h-index</th><th>Connected Seeds</th><th>Research Fields</th><th>Score</th><th>Links</th></tr>
+{% for pi in recommendations %}
+<tr>
+  <td><strong>{{ pi.name }}</strong></td>
+  <td>{{ pi.institute or '-' }}{% if pi.country %} ({{ pi.country }}){% endif %}{% if pi.tier %} <span class="tier{{ pi.tier }}">T{{ pi.tier }}</span>{% endif %}</td>
+  <td>{{ pi.h_index or '-' }}</td>
+  <td class="detail">{{ pi.connected_seeds or '-' }}</td>
+  <td class="detail">{{ pi.fields or '-' }}</td>
+  <td>{{ "%.2f"|format(pi.recommendation_score) if pi.recommendation_score else '-' }}</td>
+  <td>{% if pi.lab_url %}<a href="{{ pi.lab_url }}">Lab</a> {% endif %}{% if pi.scholar_url %}<a href="{{ pi.scholar_url }}">Scholar</a>{% endif %}</td>
 </tr>
 {% endfor %}
 </table>
 {% endif %}
 
-{% if recommendations %}
-<h2>🔍 새로 발견된 PI 추천 ({{ rec_count }})</h2>
-{% for pi in recommendations %}
-<div class="recommendation">
-  <strong>{{ pi.name }}</strong> — {{ pi.institute or 'Unknown' }}
-  {% if pi.h_index %}(h={{ pi.h_index }}){% endif %}<br>
-  연결된 PI: {{ pi.connected_seeds or '-' }}<br>
-  연구분야: {{ pi.fields or '-' }}<br>
-  {% if pi.lab_url %}<a href="{{ pi.lab_url }}">🏠 Lab</a> {% endif %}
-  {% if pi.scholar_url %}<a href="{{ pi.scholar_url }}">🎓 Scholar</a>{% endif %}
-</div>
-{% endfor %}
-{% endif %}
-
 <div class="footer">
-  Generated by Job Search Pipeline • {{ date }} • {{ total_sources }} sources scraped
+  Generated by Job Search Pipeline &bull; {{ date }} &bull; {{ total_sources }} sources scraped
 </div>
 
 </body>

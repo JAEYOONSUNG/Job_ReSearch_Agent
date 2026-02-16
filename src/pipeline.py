@@ -184,11 +184,20 @@ def print_summary(jobs: list[dict]) -> None:
                 inst = j.get("institute") or "-"
                 tier = j.get("tier")
                 tier_str = f"T{tier}" if tier else ""
+                pi = j.get("pi_name") or ""
                 country = j.get("country") or ""
                 title = (j.get("title") or "-")[:50]
                 source = j.get("source") or ""
+                keywords = j.get("keywords") or ""
+                conditions = j.get("conditions") or ""
                 print(f"  {i}. {title}")
                 print(f"     {inst} {tier_str} | {country} [{source}]")
+                if pi:
+                    print(f"     PI: {pi}")
+                if keywords:
+                    print(f"     Keywords: {keywords[:80]}")
+                if conditions:
+                    print(f"     Conditions: {conditions[:80]}")
             if len(region_jobs) > 10:
                 print(f"  ... and {len(region_jobs) - 10} more")
 

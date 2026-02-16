@@ -166,7 +166,7 @@ class ScholarshipDBScraper(BaseScraper):
                 "div.entry-content"
             )
             if desc_el:
-                job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+                job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
 
             # Institute
             if not job.get("institute"):

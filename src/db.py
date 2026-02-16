@@ -110,12 +110,31 @@ CREATE INDEX IF NOT EXISTS idx_pis_name ON pis(name);
 CREATE INDEX IF NOT EXISTS idx_pis_is_seed ON pis(is_seed);
 """
 
+# Columns added after initial schema — applied via ALTER TABLE if missing
+_MIGRATIONS = [
+    ("jobs", "requirements", "TEXT"),
+    ("jobs", "conditions", "TEXT"),
+    ("jobs", "keywords", "TEXT"),
+    ("jobs", "pi_research_summary", "TEXT"),
+]
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Add columns that may be missing from an older schema."""
+    for table, column, col_type in _MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            logger.info("Migration: added %s.%s", table, column)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
 
 def init_db() -> None:
     """Initialize database with schema."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        _run_migrations(conn)
     logger.info("Database initialized at %s", DB_PATH)
 
 

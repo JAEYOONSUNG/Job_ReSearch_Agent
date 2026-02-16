@@ -25,7 +25,7 @@ def render_report(jobs: list[dict], recommendations: list[dict] = None) -> str:
     us_jobs = [j for j in jobs if j.get("region") == "US"]
     eu_jobs = [j for j in jobs if j.get("region") == "EU"]
     asia_jobs = [j for j in jobs if j.get("region") == "Asia"]
-    other_jobs = [j for j in jobs if j.get("region") == "Other"]
+    other_jobs = [j for j in jobs if j.get("region") not in ("US", "EU", "Asia")]
 
     return template.render(
         date=datetime.now().strftime("%b %d, %Y"),

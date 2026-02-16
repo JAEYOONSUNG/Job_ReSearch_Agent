@@ -294,7 +294,7 @@ class BaseScraper(abc.ABC):
         return None
 
     def enrich(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Fill in region, tier, and source if missing."""
+        """Fill in region, tier, source, and parse structured fields."""
         job.setdefault("source", self.name)
 
         # Try to detect country if missing
@@ -321,6 +321,22 @@ class BaseScraper(abc.ABC):
             tier = self.resolve_tier(institute)
             if tier is not None:
                 job["tier"] = tier
+
+        # Parse structured fields from description
+        desc = job.get("description", "")
+        if desc and not job.get("requirements"):
+            from src.matching.job_parser import parse_job_posting
+            parsed = parse_job_posting(desc)
+            # Only fill fields that aren't already set
+            if parsed.get("pi_name") and not job.get("pi_name"):
+                job["pi_name"] = parsed["pi_name"]
+            if parsed.get("requirements"):
+                job["requirements"] = parsed["requirements"]
+            if parsed.get("conditions"):
+                job["conditions"] = parsed["conditions"]
+            if parsed.get("keywords"):
+                job["keywords"] = parsed["keywords"]
+
         return job
 
     # ── Dedup ─────────────────────────────────────────────────────────────

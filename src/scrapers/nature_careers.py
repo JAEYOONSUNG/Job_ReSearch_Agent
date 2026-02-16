@@ -191,16 +191,16 @@ class NatureCareersScraper(BaseScraper):
             resp = self.fetch(url)
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Description
+            # Full description (keep up to 5000 chars for parsing, store 3000)
             for sel in (
                 "div.job-description", "div.content-body",
                 "div[class*='Description']", "article", "main",
             ):
                 desc_el = soup.select_one(sel)
                 if desc_el:
-                    text = desc_el.get_text(separator=" ", strip=True)
+                    text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 50:
-                        job["description"] = text[:2000]
+                        job["description"] = text[:3000]
                         break
 
             # Institute
@@ -219,6 +219,23 @@ class NatureCareersScraper(BaseScraper):
                         job["country"] = self._extract_country_from_location(
                             el.get_text(strip=True)
                         )
+                        break
+
+            # Department
+            if not job.get("department"):
+                for sel in ("span.department", "div.department"):
+                    el = soup.select_one(sel)
+                    if el:
+                        job["department"] = el.get_text(strip=True)
+                        break
+
+            # Deadline
+            if not job.get("deadline"):
+                for sel in ("span.deadline", "time.deadline", "div.closing-date"):
+                    el = soup.select_one(sel)
+                    if el:
+                        raw = el.get("datetime") or el.get_text(strip=True)
+                        job["deadline"] = _parse_date(raw)
                         break
 
         except Exception:

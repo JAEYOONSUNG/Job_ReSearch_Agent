@@ -21,14 +21,7 @@ DB_PATH = DATA_DIR / "jobs.db"
 RANKINGS_PATH = DATA_DIR / "institution_rankings.json"
 CV_KEYWORDS_PATH = DATA_DIR / "cv_keywords.json"
 
-EXCEL_OUTPUT_DIR = (
-    Path.home()
-    / "Dropbox"
-    / "0.Personal folder"
-    / "1. CV"
-    / "0. Postdoc"
-    / "Putative list"
-)
+EXCEL_OUTPUT_DIR = Path.home() / "Desktop"
 
 # ── Email ──────────────────────────────────────────────────────────────────
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")

@@ -103,15 +103,32 @@ class JobSpyScraper(BaseScraper):
         # Attempt to extract country from location
         country = self._guess_country(location)
 
+        # Extract additional fields from jobspy DataFrame
+        salary_min = _safe_str(getattr(row, "min_amount", None))
+        salary_max = _safe_str(getattr(row, "max_amount", None))
+        interval = _safe_str(getattr(row, "interval", None))
+        job_type = _safe_str(getattr(row, "job_type", None))
+
+        conditions_parts = []
+        if salary_min and salary_max:
+            conditions_parts.append(f"Salary: ${salary_min}-${salary_max}")
+            if interval:
+                conditions_parts[-1] += f"/{interval}"
+        elif salary_min:
+            conditions_parts.append(f"Salary: ${salary_min}+")
+        if job_type:
+            conditions_parts.append(f"Type: {job_type}")
+
         return {
             "title": title,
             "institute": company,
             "country": country,
-            "description": (description or "")[:2000],
+            "description": (description or "")[:3000],
             "url": url,
             "posted_date": date_posted,
             "source": f"jobspy_{site}" if site else "jobspy",
             "field": None,
+            "conditions": " | ".join(conditions_parts) if conditions_parts else None,
         }
 
     @staticmethod

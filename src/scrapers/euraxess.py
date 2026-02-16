@@ -152,7 +152,7 @@ class EuraxessScraper(BaseScraper):
             resp = self.fetch(url)
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Description - try multiple selectors
+            # Full description (keep more for structured parsing)
             for sel in (
                 "div.field--name-field-eo-job-description",
                 "div.field--name-body",
@@ -163,7 +163,7 @@ class EuraxessScraper(BaseScraper):
             ):
                 desc_el = soup.select_one(sel)
                 if desc_el:
-                    job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+                    job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
                     break
 
             # Organisation if still missing
@@ -213,6 +213,30 @@ class EuraxessScraper(BaseScraper):
                 field_el = soup.select_one(sel)
                 if field_el:
                     job["field"] = field_el.get_text(strip=True)
+                    break
+
+            # EURAXESS-specific: Research profile (R1-R4)
+            for sel in (
+                "div.field--name-field-research-profile",
+                "span.research-profile",
+            ):
+                rp_el = soup.select_one(sel)
+                if rp_el:
+                    rp_text = rp_el.get_text(strip=True)
+                    existing = job.get("conditions") or ""
+                    job["conditions"] = f"{existing} | Research profile: {rp_text}".strip(" |")
+                    break
+
+            # EURAXESS-specific: Type of contract
+            for sel in (
+                "div.field--name-field-type-of-contract",
+                "span.contract-type",
+            ):
+                ct_el = soup.select_one(sel)
+                if ct_el:
+                    ct_text = ct_el.get_text(strip=True)
+                    existing = job.get("conditions") or ""
+                    job["conditions"] = f"{existing} | Contract: {ct_text}".strip(" |")
                     break
 
         except Exception:

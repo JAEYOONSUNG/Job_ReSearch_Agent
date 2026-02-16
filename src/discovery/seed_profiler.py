@@ -8,6 +8,7 @@ everything back to the database.
 import json
 import logging
 import time
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -237,7 +238,7 @@ def profile_single_pi(name: str, institute: Optional[str] = None) -> dict:
         if institute:
             pi_record["institute"] = institute
         pi_record.update(profile)
-        pi_record["last_scraped"] = "datetime('now')"
+        pi_record["last_scraped"] = datetime.now().isoformat()
         pi_id, is_new = db.upsert_pi(pi_record)
         logger.info(
             "PI %s (id=%d) %s",

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; color: #333; }
+  h1 { color: #1a1a2e; border-bottom: 2px solid #16213e; padding-bottom: 10px; }
+  h2 { color: #16213e; margin-top: 30px; }
+  .summary { background: #f0f4f8; padding: 15px; border-radius: 8px; margin: 15px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13px; }
+  th { background: #16213e; color: white; padding: 8px 12px; text-align: left; }
+  td { padding: 6px 12px; border-bottom: 1px solid #e0e0e0; }
+  tr:hover { background: #f5f5f5; }
+  .tier1 { color: #d4af37; font-weight: bold; }
+  .tier2 { color: #1e88e5; }
+  .tier3 { color: #43a047; }
+  .new { background: #e8f5e9; }
+  a { color: #1565c0; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .flag { font-size: 16px; }
+  .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #ddd; color: #888; font-size: 12px; }
+  .recommendation { background: #fff3e0; border-left: 4px solid #ff9800; padding: 10px; margin: 10px 0; }
+</style>
+</head>
+<body>
+
+<h1>🔬 Postdoc Job Search Report — {{ date }}</h1>
+
+<div class="summary">
+  <strong>{{ total_new }} new postdoc positions</strong>
+  ({{ us_count }} US, {{ eu_count }} EU, {{ asia_count }} Asia, {{ other_count }} Other)
+  {% if rec_count %} + <strong>{{ rec_count }} new PI recommendations</strong>{% endif %}
+</div>
+
+{% if us_jobs %}
+<h2><span class="flag">🇺🇸</span> United States ({{ us_count }})</h2>
+<table>
+<tr><th>#</th><th>PI</th><th>Institute (Tier)</th><th>h-index</th><th>Field</th><th>Posted</th><th>Deadline</th><th>Links</th><th>Note</th></tr>
+{% for job in us_jobs %}
+<tr class="{{ 'new' if job.status == 'new' else '' }}">
+  <td>{{ loop.index }}</td>
+  <td>{{ job.pi_name or '-' }}</td>
+  <td>{{ job.institute or '-' }} <span class="tier{{ job.tier }}">(T{{ job.tier }})</span></td>
+  <td>{{ job.h_index or '-' }}</td>
+  <td>{{ job.field or '-' }}</td>
+  <td>{{ job.posted_date or '-' }}</td>
+  <td>{{ job.deadline or '-' }}</td>
+  <td>{% if job.url %}<a href="{{ job.url }}">📄</a>{% endif %} {% if job.lab_url %}<a href="{{ job.lab_url }}">🏠</a>{% endif %} {% if job.scholar_url %}<a href="{{ job.scholar_url }}">🎓</a>{% endif %}</td>
+  <td>{{ job.status }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
+{% if eu_jobs %}
+<h2><span class="flag">🇪🇺</span> Europe ({{ eu_count }})</h2>
+<table>
+<tr><th>#</th><th>PI</th><th>Institute (Tier)</th><th>h-index</th><th>Field</th><th>Posted</th><th>Deadline</th><th>Links</th><th>Note</th></tr>
+{% for job in eu_jobs %}
+<tr class="{{ 'new' if job.status == 'new' else '' }}">
+  <td>{{ loop.index }}</td>
+  <td>{{ job.pi_name or '-' }}</td>
+  <td>{{ job.institute or '-' }} <span class="tier{{ job.tier }}">(T{{ job.tier }})</span></td>
+  <td>{{ job.h_index or '-' }}</td>
+  <td>{{ job.field or '-' }}</td>
+  <td>{{ job.posted_date or '-' }}</td>
+  <td>{{ job.deadline or '-' }}</td>
+  <td>{% if job.url %}<a href="{{ job.url }}">📄</a>{% endif %} {% if job.lab_url %}<a href="{{ job.lab_url }}">🏠</a>{% endif %} {% if job.scholar_url %}<a href="{{ job.scholar_url }}">🎓</a>{% endif %}</td>
+  <td>{{ job.status }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
+{% if asia_jobs or other_jobs %}
+<h2><span class="flag">🌏</span> Asia / Other ({{ asia_count + other_count }})</h2>
+<table>
+<tr><th>#</th><th>PI</th><th>Institute (Tier)</th><th>Country</th><th>h-index</th><th>Field</th><th>Posted</th><th>Deadline</th><th>Links</th><th>Note</th></tr>
+{% for job in asia_jobs + other_jobs %}
+<tr class="{{ 'new' if job.status == 'new' else '' }}">
+  <td>{{ loop.index }}</td>
+  <td>{{ job.pi_name or '-' }}</td>
+  <td>{{ job.institute or '-' }} <span class="tier{{ job.tier }}">(T{{ job.tier }})</span></td>
+  <td>{{ job.country or '-' }}</td>
+  <td>{{ job.h_index or '-' }}</td>
+  <td>{{ job.field or '-' }}</td>
+  <td>{{ job.posted_date or '-' }}</td>
+  <td>{{ job.deadline or '-' }}</td>
+  <td>{% if job.url %}<a href="{{ job.url }}">📄</a>{% endif %} {% if job.lab_url %}<a href="{{ job.lab_url }}">🏠</a>{% endif %} {% if job.scholar_url %}<a href="{{ job.scholar_url }}">🎓</a>{% endif %}</td>
+  <td>{{ job.status }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
+{% if recommendations %}
+<h2>🔍 새로 발견된 PI 추천 ({{ rec_count }})</h2>
+{% for pi in recommendations %}
+<div class="recommendation">
+  <strong>{{ pi.name }}</strong> — {{ pi.institute or 'Unknown' }}
+  {% if pi.h_index %}(h={{ pi.h_index }}){% endif %}<br>
+  연결된 PI: {{ pi.connected_seeds or '-' }}<br>
+  연구분야: {{ pi.fields or '-' }}<br>
+  {% if pi.lab_url %}<a href="{{ pi.lab_url }}">🏠 Lab</a> {% endif %}
+  {% if pi.scholar_url %}<a href="{{ pi.scholar_url }}">🎓 Scholar</a>{% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+<div class="footer">
+  Generated by Job Search Pipeline • {{ date }} • {{ total_sources }} sources scraped
+</div>
+
+</body>
+</html>

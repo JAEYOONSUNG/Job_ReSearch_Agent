@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jaeyoon.jobsearch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>
+            cd ~/github/job-search-pipeline &amp;&amp;
+            DOW=$(date +%u) &amp;&amp;
+            HOUR=$(date +%H) &amp;&amp;
+            if [ "$DOW" = "7" ] &amp;&amp; [ "$HOUR" = "02" ]; then
+                ./run.sh --weekly --email
+            else
+                ./run.sh --email
+            fi
+        </string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <!-- Daily at 08:00 -->
+        <dict>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <!-- Daily at 20:00 -->
+        <dict>
+            <key>Hour</key>
+            <integer>20</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <!-- Sunday at 02:00 for weekly PI network analysis -->
+        <dict>
+            <key>Weekday</key>
+            <integer>0</integer>
+            <key>Hour</key>
+            <integer>2</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/JaeYoon/github/job-search-pipeline/logs/launchd_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/JaeYoon/github/job-search-pipeline/logs/launchd_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Users/JaeYoon/miniconda3/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

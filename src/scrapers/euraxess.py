@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlencode
 
 from bs4 import BeautifulSoup, Tag
 
@@ -17,20 +17,38 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://euraxess.ec.europa.eu"
 
-# EURAXESS search URL for postdoc positions in Biological Sciences
-SEARCH_URL = (
-    f"{BASE_URL}/jobs/search"
-)
+# EURAXESS (redesigned ~2025) uses faceted filters: f[0]=type:value&f[1]=type:value
+# Filter format discovered from their current site
+SEARCH_URL = f"{BASE_URL}/jobs/search"
 
-# Filters passed as query parameters
-SEARCH_PARAMS = {
-    "keywords": "",
-    "research_field[]": "3",            # Biological Sciences
-    "research_profile[]": "2",          # Recognised Researcher (R2) = postdoc level
-    "sort": "publicationDateDesc",      # newest first
+# We build multiple filter combos to cover postdoc positions in life sciences
+# Each entry is a list of f[] filters to combine
+FILTER_COMBOS = [
+    # Job offers only, sorted by newest
+    [
+        "offer_type:job_offer",
+    ],
+]
+
+# Sort params
+SORT_PARAMS = {
+    "sort[name]": "created",
+    "sort[direction]": "DESC",
 }
 
-MAX_PAGES = 5  # scrape up to 5 pages of results
+# We rely on keyword-based search since faceted filters may 403
+# These are appended as 'keywords' param
+SEARCH_KEYWORDS_EURAXESS = [
+    "postdoc biology",
+    "postdoctoral life sciences",
+    "postdoc CRISPR",
+    "postdoc protein engineering",
+    "postdoc synthetic biology",
+    "postdoctoral microbiology",
+    "postdoc chemistry biology",
+]
+
+MAX_PAGES = 3
 
 
 class EuraxessScraper(BaseScraper):
@@ -49,21 +67,24 @@ class EuraxessScraper(BaseScraper):
         soup = BeautifulSoup(html, "html.parser")
         jobs: list[dict[str, Any]] = []
 
-        # EURAXESS renders results as article blocks or div.views-row
+        # EURAXESS renders results as article blocks, views-rows, or generic cards
         result_items = soup.select(
-            "div.views-row, article.node--type-job-offer, div.result-item"
+            "div.views-row, article.node--type-job-offer, div.result-item, "
+            "div.teaser, article.teaser, div[class*='search-result'], "
+            "div.card, li.result"
         )
         if not result_items:
-            # Fallback: look for any links containing /jobs/
-            result_items = soup.select("div.view-content a[href*='/jobs/']")
-            for link in result_items:
+            # Fallback: look for any links to job detail pages
+            for link in soup.select("a[href*='/jobs/']"):
                 href = link.get("href", "")
-                if not href:
+                if not href or "/jobs/search" in href:
                     continue
-                full_url = urljoin(BASE_URL, href)
-                title = link.get_text(strip=True)
-                if title:
-                    jobs.append({"title": title, "url": full_url})
+                # Must look like a detail page (has a numeric ID or slug)
+                if re.search(r"/jobs/\d+|/jobs/[a-z].*-\d+", href):
+                    full_url = urljoin(BASE_URL, href)
+                    title = link.get_text(strip=True)
+                    if title and len(title) > 5:
+                        jobs.append({"title": title, "url": full_url, "source": self.name})
             return jobs
 
         for item in result_items:
@@ -89,7 +110,7 @@ class EuraxessScraper(BaseScraper):
         org_el = item.select_one(
             "span.field--name-field-organisation, "
             "div.field--name-field-organisation, "
-            ".organisation, .company"
+            ".organisation, .company, span.employer"
         )
         institute = org_el.get_text(strip=True) if org_el else None
 
@@ -97,18 +118,18 @@ class EuraxessScraper(BaseScraper):
         country_el = item.select_one(
             "span.field--name-field-country, "
             "div.field--name-field-country, "
-            ".country, .location"
+            ".country, .location, span.country"
         )
         country = country_el.get_text(strip=True) if country_el else None
 
         # Deadline
         deadline_el = item.select_one(
             "span.field--name-field-application-deadline, "
-            "div.date, .deadline"
+            "div.date, .deadline, time"
         )
         deadline = None
         if deadline_el:
-            raw = deadline_el.get_text(strip=True)
+            raw = deadline_el.get("datetime") or deadline_el.get_text(strip=True)
             deadline = self._parse_date_text(raw)
 
         return {
@@ -131,52 +152,68 @@ class EuraxessScraper(BaseScraper):
             resp = self.fetch(url)
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Description
-            desc_el = soup.select_one(
-                "div.field--name-field-eo-job-description, "
-                "div.field--name-body, "
-                "div.job-description, "
-                "article .field--name-body"
-            )
-            if desc_el:
-                job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+            # Description - try multiple selectors
+            for sel in (
+                "div.field--name-field-eo-job-description",
+                "div.field--name-body",
+                "div.job-description",
+                "article .field--name-body",
+                "div[class*='description']",
+                "main article",
+            ):
+                desc_el = soup.select_one(sel)
+                if desc_el:
+                    job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+                    break
 
             # Organisation if still missing
             if not job.get("institute"):
-                org_el = soup.select_one(
-                    "div.field--name-field-organisation a, "
-                    "span.field--name-field-organisation"
-                )
-                if org_el:
-                    job["institute"] = org_el.get_text(strip=True)
+                for sel in (
+                    "div.field--name-field-organisation a",
+                    "span.field--name-field-organisation",
+                    "span.employer",
+                    "div.organisation",
+                ):
+                    org_el = soup.select_one(sel)
+                    if org_el:
+                        job["institute"] = org_el.get_text(strip=True)
+                        break
 
             # Country if still missing
             if not job.get("country"):
-                country_el = soup.select_one(
-                    "div.field--name-field-country, "
-                    "span.field--name-field-country"
-                )
-                if country_el:
-                    job["country"] = country_el.get_text(strip=True)
+                for sel in (
+                    "div.field--name-field-country",
+                    "span.field--name-field-country",
+                    "span.country",
+                ):
+                    country_el = soup.select_one(sel)
+                    if country_el:
+                        job["country"] = country_el.get_text(strip=True)
+                        break
 
             # Deadline
             if not job.get("deadline"):
-                dl_el = soup.select_one(
-                    "div.field--name-field-application-deadline, "
-                    "span.date-display-single"
-                )
-                if dl_el:
-                    job["deadline"] = self._parse_date_text(
-                        dl_el.get_text(strip=True)
-                    )
+                for sel in (
+                    "div.field--name-field-application-deadline",
+                    "span.date-display-single",
+                    "time.deadline",
+                ):
+                    dl_el = soup.select_one(sel)
+                    if dl_el:
+                        raw = dl_el.get("datetime") or dl_el.get_text(strip=True)
+                        job["deadline"] = self._parse_date_text(raw)
+                        break
 
             # Research field
-            field_el = soup.select_one(
-                "div.field--name-field-research-field, "
-                "span.field--name-field-research-field"
-            )
-            if field_el:
-                job["field"] = field_el.get_text(strip=True)
+            for sel in (
+                "div.field--name-field-research-field",
+                "span.field--name-field-research-field",
+                "span.research-field",
+            ):
+                field_el = soup.select_one(sel)
+                if field_el:
+                    job["field"] = field_el.get_text(strip=True)
+                    break
 
         except Exception:
             self.logger.debug("Could not enrich detail for %s", url)
@@ -188,29 +225,45 @@ class EuraxessScraper(BaseScraper):
     def scrape(self) -> list[dict[str, Any]]:
         all_jobs: list[dict[str, Any]] = []
 
-        for page in range(MAX_PAGES):
-            params = dict(SEARCH_PARAMS)
-            params["page"] = str(page)
+        for keyword in SEARCH_KEYWORDS_EURAXESS:
+            self.logger.info("EURAXESS search: %s", keyword)
 
-            try:
-                resp = self.fetch(SEARCH_URL, params=params)
-            except Exception:
-                self.logger.exception("Failed to fetch EURAXESS page %d", page)
-                break
+            for page in range(MAX_PAGES):
+                params = dict(SORT_PARAMS)
+                params["keywords"] = keyword
+                params["page"] = str(page)
 
-            page_jobs = self._parse_listing_page(resp.text)
-            if not page_jobs:
-                self.logger.info("No more results on page %d, stopping", page)
-                break
+                try:
+                    resp = self.fetch(SEARCH_URL, params=params)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to fetch EURAXESS '%s' page %d", keyword, page
+                    )
+                    break
 
-            self.logger.info("Page %d: %d results", page, len(page_jobs))
-            all_jobs.extend(page_jobs)
+                page_jobs = self._parse_listing_page(resp.text)
+                if not page_jobs:
+                    self.logger.info(
+                        "No results for '%s' page %d, stopping", keyword, page
+                    )
+                    break
 
-        # Optionally enrich top results with detail pages
+                self.logger.info(
+                    "'%s' page %d: %d results", keyword, page, len(page_jobs)
+                )
+                all_jobs.extend(page_jobs)
+
+        # Enrich top results with detail pages (limit to avoid hammering)
         enriched: list[dict[str, Any]] = []
-        for job in all_jobs:
+        for job in all_jobs[:40]:
             job = self._enrich_from_detail(job)
             # Keyword filter on enriched description
+            blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
+            if self._keyword_match(blob):
+                enriched.append(job)
+
+        # Add remaining (no detail enrichment) with keyword filter
+        for job in all_jobs[40:]:
             blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
             if self._keyword_match(blob):
                 enriched.append(job)
@@ -226,6 +279,9 @@ class EuraxessScraper(BaseScraper):
     def _keyword_match(text: str) -> bool:
         """Return True if text matches any CV keyword."""
         lower = text.lower()
+        # Always match postdoc-related terms
+        if any(term in lower for term in ("postdoc", "postdoctoral", "post-doc")):
+            return True
         return any(kw.lower() in lower for kw in CV_KEYWORDS)
 
     @staticmethod
@@ -238,6 +294,7 @@ class EuraxessScraper(BaseScraper):
             "%d %b %Y",
             "%Y-%m-%d",
             "%B %d, %Y",
+            "%Y-%m-%dT%H:%M:%S",
         ):
             try:
                 return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")

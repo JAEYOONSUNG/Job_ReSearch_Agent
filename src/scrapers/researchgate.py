@@ -193,6 +193,8 @@ class ResearchGateScraper(BaseScraper):
     # ── Main scrape ───────────────────────────────────────────────────────
 
     def scrape(self) -> list[dict[str, Any]]:
+        import requests as _requests
+
         all_jobs: list[dict[str, Any]] = []
 
         for term in SEARCH_TERMS:
@@ -206,13 +208,6 @@ class ResearchGateScraper(BaseScraper):
                     }
                     resp = self.fetch(JOBS_URL, params=params)
 
-                    # ResearchGate may return a 403/captcha page
-                    if resp.status_code == 403:
-                        self.logger.warning(
-                            "ResearchGate returned 403 for '%s'; stopping", term
-                        )
-                        break
-
                     page_jobs = self._parse_listing_page(resp.text)
                     if not page_jobs:
                         break
@@ -222,6 +217,20 @@ class ResearchGateScraper(BaseScraper):
                     )
                     all_jobs.extend(page_jobs)
 
+                except _requests.exceptions.HTTPError as e:
+                    # ResearchGate aggressively blocks bots with 403
+                    if e.response is not None and e.response.status_code == 403:
+                        self.logger.warning(
+                            "ResearchGate returned 403 for '%s'; skipping term", term
+                        )
+                    else:
+                        self.logger.warning(
+                            "ResearchGate HTTP %s for '%s' page %d",
+                            e.response.status_code if e.response else "?",
+                            term,
+                            page + 1,
+                        )
+                    break
                 except Exception:
                     self.logger.exception(
                         "ResearchGate search failed: '%s' page %d",

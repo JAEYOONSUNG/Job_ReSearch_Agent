@@ -103,12 +103,17 @@ LAB_HIRING_KEYWORDS = [
 REGION_PRIORITY = {"US": 1, "EU": 2, "Asia": 3, "Other": 4}
 
 COUNTRY_TO_REGION = {
+    # North America
     "United States": "US",
     "USA": "US",
     "US": "US",
     "Canada": "US",  # grouped with US for priority
+    # UK
     "United Kingdom": "EU",
     "UK": "EU",
+    "England": "EU",
+    "Scotland": "EU",
+    # Western Europe
     "Germany": "EU",
     "France": "EU",
     "Netherlands": "EU",
@@ -123,6 +128,29 @@ COUNTRY_TO_REGION = {
     "Italy": "EU",
     "Ireland": "EU",
     "Israel": "EU",
+    "Portugal": "EU",
+    "Luxembourg": "EU",
+    "Iceland": "EU",
+    # Central/Eastern Europe (common on EURAXESS)
+    "Czech Republic": "EU",
+    "Czechia": "EU",
+    "Poland": "EU",
+    "Hungary": "EU",
+    "Romania": "EU",
+    "Croatia": "EU",
+    "Greece": "EU",
+    "Slovenia": "EU",
+    "Slovakia": "EU",
+    "Estonia": "EU",
+    "Latvia": "EU",
+    "Lithuania": "EU",
+    "Bulgaria": "EU",
+    "Cyprus": "EU",
+    "Malta": "EU",
+    "Serbia": "EU",
+    # Direct region values (for guess_country fallback)
+    "EU": "EU",
+    # Asia
     "South Korea": "Asia",
     "Korea": "Asia",
     "Japan": "Asia",
@@ -131,8 +159,18 @@ COUNTRY_TO_REGION = {
     "Taiwan": "Asia",
     "Hong Kong": "Asia",
     "India": "Asia",
+    "Thailand": "Asia",
+    "Vietnam": "Asia",
+    "Malaysia": "Asia",
+    "Indonesia": "Asia",
+    "Philippines": "Asia",
+    # Other
     "Australia": "Other",
     "New Zealand": "Other",
+    "Brazil": "Other",
+    "Mexico": "Other",
+    "South Africa": "Other",
+    "Saudi Arabia": "Other",
 }
 
 # ── PI Recommender Weights ─────────────────────────────────────────────────

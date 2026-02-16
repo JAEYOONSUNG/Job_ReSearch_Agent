@@ -167,7 +167,7 @@ def print_summary(jobs: list[dict]) -> None:
     us = [j for j in new_jobs if j.get("region") == "US"]
     eu = [j for j in new_jobs if j.get("region") == "EU"]
     asia = [j for j in new_jobs if j.get("region") == "Asia"]
-    other = [j for j in new_jobs if j.get("region") == "Other"]
+    other = [j for j in new_jobs if j.get("region") not in ("US", "EU", "Asia")]
 
     print(f"\n{'='*70}")
     print(f" Job Search Pipeline Results — {datetime.now().strftime('%b %d, %Y')}")
@@ -181,11 +181,14 @@ def print_summary(jobs: list[dict]) -> None:
         if region_jobs:
             print(f"\n── {region_name} ({len(region_jobs)}) ──")
             for i, j in enumerate(region_jobs[:10], 1):
-                pi = j.get("pi_name", "-")
-                inst = j.get("institute", "-")
-                tier = j.get("tier", 4)
-                field = j.get("field", "-")
-                print(f"  {i}. {pi} | {inst} (T{tier}) | {field}")
+                inst = j.get("institute") or "-"
+                tier = j.get("tier")
+                tier_str = f"T{tier}" if tier else ""
+                country = j.get("country") or ""
+                title = (j.get("title") or "-")[:50]
+                source = j.get("source") or ""
+                print(f"  {i}. {title}")
+                print(f"     {inst} {tier_str} | {country} [{source}]")
             if len(region_jobs) > 10:
                 print(f"  ... and {len(region_jobs) - 10} more")
 

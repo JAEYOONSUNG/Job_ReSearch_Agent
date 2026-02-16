@@ -17,6 +17,88 @@ from urllib3.util.retry import Retry
 
 from src.config import COUNTRY_TO_REGION, RANKINGS_PATH, load_rankings
 
+# Extended country detection: maps common substrings to COUNTRY_TO_REGION keys
+_COUNTRY_ALIASES = {
+    # US
+    "united states": "United States",
+    "usa": "United States",
+    "u.s.a": "United States",
+    "u.s.": "United States",
+    # UK
+    "united kingdom": "United Kingdom",
+    "england": "United Kingdom",
+    "scotland": "United Kingdom",
+    "wales": "United Kingdom",
+    # Common EU
+    "germany": "Germany",
+    "deutschland": "Germany",
+    "france": "France",
+    "netherlands": "Netherlands",
+    "holland": "Netherlands",
+    "switzerland": "Switzerland",
+    "sweden": "Sweden",
+    "denmark": "Denmark",
+    "norway": "Norway",
+    "finland": "Finland",
+    "belgium": "Belgium",
+    "austria": "Austria",
+    "spain": "Spain",
+    "italy": "Italy",
+    "ireland": "Ireland",
+    "israel": "Israel",
+    "czech republic": "EU",
+    "czechia": "EU",
+    "poland": "EU",
+    "portugal": "EU",
+    "hungary": "EU",
+    "greece": "EU",
+    "romania": "EU",
+    "croatia": "EU",
+    "luxembourg": "EU",
+    "estonia": "EU",
+    "latvia": "EU",
+    "lithuania": "EU",
+    "slovenia": "EU",
+    "slovakia": "EU",
+    "cyprus": "EU",
+    "malta": "EU",
+    "iceland": "EU",
+    # Asia
+    "south korea": "South Korea",
+    "korea": "South Korea",
+    "japan": "Japan",
+    "china": "China",
+    "singapore": "Singapore",
+    "taiwan": "Taiwan",
+    "hong kong": "Hong Kong",
+    "india": "India",
+    # Other
+    "canada": "Canada",
+    "australia": "Australia",
+    "new zealand": "New Zealand",
+    "brazil": "Other",
+    "mexico": "Other",
+}
+
+# US state abbreviations for detecting US locations like "Boston, MA"
+_US_STATES = {
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga",
+    "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md",
+    "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
+    "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc",
+    "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy",
+    "dc",
+}
+
+# Well-known US cities for heuristic matching
+_US_CITIES = {
+    "boston", "new york", "san francisco", "los angeles", "chicago",
+    "houston", "philadelphia", "san diego", "seattle", "berkeley",
+    "stanford", "cambridge", "princeton", "baltimore", "atlanta",
+    "pittsburgh", "ann arbor", "madison", "durham", "chapel hill",
+    "pasadena", "bethesda", "nih", "mit", "caltech",
+}
+
 logger = logging.getLogger(__name__)
 
 # Rotating user-agents to reduce detection
@@ -151,7 +233,22 @@ class BaseScraper(abc.ABC):
         """Map a country string to a region."""
         if not country:
             return "Other"
-        return COUNTRY_TO_REGION.get(country, "Other")
+        # Exact match first
+        if country in COUNTRY_TO_REGION:
+            return COUNTRY_TO_REGION[country]
+        # Case-insensitive match
+        lower = country.strip().lower()
+        for key, region in COUNTRY_TO_REGION.items():
+            if key.lower() == lower:
+                return region
+        # Check aliases
+        for alias, canonical in _COUNTRY_ALIASES.items():
+            if alias in lower or lower in alias:
+                # canonical might be a region directly (e.g. "EU") or a country name
+                if canonical in COUNTRY_TO_REGION:
+                    return COUNTRY_TO_REGION[canonical]
+                return canonical  # "EU", "Other" etc.
+        return "Other"
 
     def resolve_tier(self, institute: str | None) -> int | None:
         """Map an institution name to a ranking tier (1/2/3) or None."""
@@ -166,12 +263,59 @@ class BaseScraper(abc.ABC):
                 return tier
         return None
 
+    @staticmethod
+    def guess_country(text: str | None) -> str | None:
+        """Try to detect a country from free-form text (title, description, institute)."""
+        if not text:
+            return None
+        lower = text.lower()
+
+        # Check US state abbreviations in patterns like "City, MA" or "City, MA, USA"
+        import re
+        state_pattern = re.findall(r",\s*([a-z]{2})\b", lower)
+        for abbr in state_pattern:
+            if abbr in _US_STATES:
+                return "United States"
+
+        # Check US cities
+        for city in _US_CITIES:
+            if city in lower:
+                return "United States"
+
+        # Check country aliases (longest match first to avoid false positives)
+        for alias in sorted(_COUNTRY_ALIASES, key=len, reverse=True):
+            if alias in lower:
+                canonical = _COUNTRY_ALIASES[alias]
+                if canonical in COUNTRY_TO_REGION:
+                    return canonical
+                # For direct region values like "EU", return a placeholder country
+                return canonical
+
+        return None
+
     def enrich(self, job: dict[str, Any]) -> dict[str, Any]:
         """Fill in region, tier, and source if missing."""
         job.setdefault("source", self.name)
+
+        # Try to detect country if missing
         country = job.get("country")
+        if not country:
+            # Try from title, institute, description
+            blob = " ".join(filter(None, [
+                job.get("title"),
+                job.get("institute"),
+                job.get("description", "")[:500],
+                job.get("field"),
+            ]))
+            country = self.guess_country(blob)
+            if country:
+                job["country"] = country
+
+        # Set region
         if country and not job.get("region"):
             job["region"] = self.resolve_region(country)
+
+        # Set tier from institute name
         institute = job.get("institute")
         if institute and not job.get("tier"):
             tier = self.resolve_tier(institute)

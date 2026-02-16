@@ -156,11 +156,30 @@ def _is_valid_name(name: str) -> bool:
     # Must start with a capital letter
     if not name[0].isupper():
         return False
+    # Reject names starting with common non-name words
+    first_word = name.split()[0].lower()
+    non_name_starters = {
+        "the", "a", "an", "this", "that", "our", "their", "his", "her",
+        "new", "old", "full", "part", "more", "all", "any", "each",
+        "perform", "conduct", "manage", "develop", "lead", "apply",
+        "research", "senior", "junior", "assistant", "associate",
+        "earth", "life", "data", "cell", "gene", "protein",
+        "biological", "biomedical", "clinical", "computational",
+        "discovery", "priming", "romanian", "european", "american",
+        "molecular", "synthetic", "structural", "functional",
+        "advanced", "applied", "basic", "general", "specific",
+        "medical", "pharmaceutical", "chemical", "physical",
+        "national", "international", "regional", "global",
+    }
+    if first_word in non_name_starters:
+        return False
     # Reject if all words are common English words (not names)
     common_words = {
         "the", "a", "an", "and", "or", "in", "on", "at", "to", "of",
         "for", "with", "this", "that", "our", "their", "his", "her",
         "new", "old", "full", "part", "more", "less", "all", "any",
+        "science", "biology", "chemistry", "engineering", "medicine",
+        "research", "advanced", "scientists", "researchers",
     }
     words = [w.lower().rstrip(".,;:") for w in name.split()]
     if all(w in common_words for w in words):

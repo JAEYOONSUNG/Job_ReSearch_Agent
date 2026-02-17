@@ -360,18 +360,22 @@ class BaseScraper(abc.ABC):
 
         # Parse structured fields from description
         desc = job.get("description", "")
-        if desc and not job.get("requirements"):
-            from src.matching.job_parser import parse_job_posting
-            parsed = parse_job_posting(desc)
-            # Only fill fields that aren't already set
-            if parsed.get("pi_name") and not job.get("pi_name"):
-                job["pi_name"] = parsed["pi_name"]
-            if parsed.get("requirements"):
-                job["requirements"] = parsed["requirements"]
-            if parsed.get("conditions"):
-                job["conditions"] = parsed["conditions"]
-            if parsed.get("keywords"):
-                job["keywords"] = parsed["keywords"]
+        if desc:
+            from src.matching.job_parser import parse_job_posting, extract_pi_name
+            # Always try PI name extraction, even if requirements are set
+            if not job.get("pi_name"):
+                pi = extract_pi_name(desc)
+                if pi:
+                    job["pi_name"] = pi
+            # Parse requirements/conditions/keywords if not already set
+            if not job.get("requirements"):
+                parsed = parse_job_posting(desc)
+                if parsed.get("requirements"):
+                    job["requirements"] = parsed["requirements"]
+                if parsed.get("conditions") and not job.get("conditions"):
+                    job["conditions"] = parsed["conditions"]
+                if parsed.get("keywords") and not job.get("keywords"):
+                    job["keywords"] = parsed["keywords"]
 
         # Infer research field if still empty
         if not job.get("field"):

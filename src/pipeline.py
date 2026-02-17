@@ -47,11 +47,11 @@ def _build_scrapers() -> list:
     ]
 
     # Conditionally add scrapers that may have import issues
+    # Glassdoor disabled: consistently returns 0 results, blocks Playwright for ~3min
     for cls_path, label in [
         ("src.scrapers.jobs_ac_uk", "JobsAcUkScraper"),
         ("src.scrapers.jobs_ac_kr", "JobsAcKrScraper"),
         ("src.scrapers.wanted", "WantedScraper"),
-        ("src.scrapers.glassdoor", "GlassdoorScraper"),
     ]:
         try:
             import importlib
@@ -97,7 +97,7 @@ def run_scrapers(sequential: bool = False) -> list[dict]:
             all_jobs.extend(_run_single_scraper(scraper))
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-        with ThreadPoolExecutor(max_workers=5) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             futures = {pool.submit(_run_single_scraper, s): s for s in scrapers}
             for future in as_completed(futures, timeout=SCRAPER_TIMEOUT * 2):
                 scraper = futures[future]
@@ -298,23 +298,35 @@ def run_dept_enrichment(jobs: list[dict]) -> list[dict]:
     # Phase 2: DDG search for uncached (with circuit breaker)
     consecutive_failures = 0
     searched = 0
-    for inst, dept in uncached_keys:
-        if searched >= MAX_DEPT_LOOKUPS_PER_RUN:
-            logger.info("Reached per-run DDG limit (%d), rest deferred to next run", MAX_DEPT_LOOKUPS_PER_RUN)
-            break
-        if consecutive_failures >= 3:
-            logger.warning("DDG circuit breaker after %d failures, deferring rest", consecutive_failures)
-            break
+    # Parallel DDG lookups with circuit breaker
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    _ddg_failures = 0
+    _ddg_lock = __import__("threading").Lock()
+    _stop = False
 
+    def _search_one(key: tuple[str, str]) -> tuple[tuple, str | None]:
+        nonlocal _ddg_failures, _stop
+        if _stop:
+            return key, None
+        inst, dept = key
         url = _lookup_dept(inst, dept)
-        _save_dept_cache(inst, dept, url)
-        key_to_url[(inst, dept)] = url
-        searched += 1
+        with _ddg_lock:
+            if url:
+                _ddg_failures = 0
+            else:
+                _ddg_failures += 1
+                if _ddg_failures >= 5:
+                    _stop = True
+                    logger.warning("DDG circuit breaker after %d failures", _ddg_failures)
+        return key, url
 
-        if url:
-            consecutive_failures = 0
-        else:
-            consecutive_failures += 1
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_search_one, k): k for k in uncached_keys}
+        for future in as_completed(futures):
+            key, url = future.result()
+            _save_dept_cache(key[0], key[1], url)
+            key_to_url[key] = url
+            searched += 1
 
     # Phase 3: apply to jobs and persist to DB
     from src.db import get_connection

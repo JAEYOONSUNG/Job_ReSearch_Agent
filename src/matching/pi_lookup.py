@@ -6,6 +6,7 @@ adding a caching layer via the pis table and department URL search.
 
 import logging
 import signal
+import threading
 import time
 from typing import Optional
 
@@ -13,7 +14,6 @@ from src import db
 from src.discovery.lab_finder import (
     _institute_to_domain,
     _search_university_directory,
-    find_lab_url_for_pi,
 )
 from src.discovery.seed_profiler import _fetch_scholar_profile
 
@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT = 1.5  # seconds between external requests
 
 # Circuit breaker: after N consecutive Scholar failures, skip all further attempts
-_SCHOLAR_MAX_FAILURES = 2
+_SCHOLAR_MAX_FAILURES = 5
 _scholar_consecutive_failures = 0
 _scholar_disabled = False
+_scholar_lock = threading.Lock()
 
 
 class _ScholarTimeout(Exception):
@@ -113,6 +114,25 @@ def _safe_scholar_lookup(pi_name: str, institute: Optional[str]) -> Optional[dic
         signal.signal(signal.SIGALRM, old_handler)
 
 
+def _lab_url_from_scholar(scholar_data: dict, pi_name: str, institute: Optional[str]) -> Optional[str]:
+    """Extract lab/homepage URL from Scholar data, or fall back to DDG directory search."""
+    # Scholar profile homepage
+    homepage = scholar_data.get("homepage") if scholar_data else None
+    from src.discovery.lab_finder import _is_valid_lab_url
+    if homepage and _is_valid_lab_url(homepage):
+        return homepage
+
+    # Fall back: search institute directory
+    if institute:
+        domain = _institute_to_domain(institute)
+        if domain:
+            url = _search_university_directory(pi_name, domain, suffix="lab")
+            time.sleep(1.0)
+            if url:
+                return url
+    return None
+
+
 def lookup_pi_urls(
     pi_name: str,
     institute: Optional[str] = None,
@@ -120,8 +140,8 @@ def lookup_pi_urls(
 ) -> dict:
     """Look up Scholar URL, lab URL, and dept URL for a PI.
 
-    Uses the pis table as a cache.  External requests are rate-limited
-    to ~1.5 s each; cached lookups return instantly.
+    Uses the pis table as a cache.  External requests are rate-limited.
+    Thread-safe circuit breaker for Scholar failures.
 
     Returns
     -------
@@ -137,55 +157,53 @@ def lookup_pi_urls(
         "citations": None,
     }
 
-    # 1. Cache check
+    # 1. Cache check (including negative results — cached None means "already tried")
     cached = _get_cached_pi(pi_name, institute)
     if cached:
+        result.update({k: v for k, v in cached.items() if v})
         has_scholar = bool(cached.get("scholar_url"))
         has_lab = bool(cached.get("lab_url"))
         has_dept = bool(cached.get("dept_url"))
-        result.update({k: v for k, v in cached.items() if v})
-
         if has_scholar and has_lab and has_dept:
             logger.debug("Full cache hit for %s", pi_name)
             return result
 
-    # 2. Scholar search (if needed and not circuit-broken)
+    # 2. Scholar search (single call — also extracts homepage for lab URL)
+    scholar_data = None
     if not result.get("scholar_url") and not _scholar_disabled:
         logger.info("Fetching Scholar profile for %s", pi_name)
         scholar_data = _safe_scholar_lookup(pi_name, institute)
         time.sleep(_RATE_LIMIT)
-        if scholar_data:
-            _scholar_consecutive_failures = 0
-            result["scholar_url"] = scholar_data.get("scholar_url")
-            result["h_index"] = scholar_data.get("h_index")
-            result["citations"] = scholar_data.get("citations")
-        else:
-            _scholar_consecutive_failures += 1
-            if _scholar_consecutive_failures >= _SCHOLAR_MAX_FAILURES:
-                _scholar_disabled = True
-                logger.warning(
-                    "Scholar circuit breaker tripped after %d failures — "
-                    "skipping remaining Scholar lookups this run",
-                    _scholar_consecutive_failures,
-                )
 
-    # 3. Lab URL search (if needed)
+        with _scholar_lock:
+            if scholar_data:
+                _scholar_consecutive_failures = 0
+                result["scholar_url"] = scholar_data.get("scholar_url")
+                result["h_index"] = scholar_data.get("h_index")
+                result["citations"] = scholar_data.get("citations")
+            else:
+                _scholar_consecutive_failures += 1
+                if _scholar_consecutive_failures >= _SCHOLAR_MAX_FAILURES:
+                    _scholar_disabled = True
+                    logger.warning(
+                        "Scholar circuit breaker tripped after %d failures",
+                        _scholar_consecutive_failures,
+                    )
+
+    # 3. Lab URL (from Scholar homepage or directory search — no second Scholar call)
     if not result.get("lab_url"):
-        logger.info("Searching lab URL for %s", pi_name)
-        lab_url = find_lab_url_for_pi(pi_name, institute)
-        time.sleep(_RATE_LIMIT)
+        lab_url = _lab_url_from_scholar(scholar_data, pi_name, institute)
         if lab_url:
             result["lab_url"] = lab_url
 
     # 4. Dept URL search (if needed)
     if not result.get("dept_url") and department:
-        logger.info("Searching dept URL for %s at %s", department, institute)
         dept_url = _lookup_dept_url(department, institute)
         time.sleep(_RATE_LIMIT)
         if dept_url:
             result["dept_url"] = dept_url
 
-    # 5. Cache the results
+    # 5. Cache the results (including empty ones to avoid re-searching)
     _cache_pi_urls(
         name=pi_name,
         institute=institute,

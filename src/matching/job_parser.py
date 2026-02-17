@@ -47,6 +47,23 @@ _FALSE_POSITIVE_NAMES = {
     "gene therapy", "cell biology", "molecular biology",
     "the it", "the pi", "the role", "the post",
     "more information", "full time", "part time",
+    # Scientific fields often matching Pattern 6 ("X Lab/Group/Team")
+    "magnetic field", "electric field", "gravitational field",
+    "inflammation biology", "infection biology", "cancer biology",
+    "developmental biology", "evolutionary biology", "computational biology",
+    "structural biology", "chemical biology", "systems biology",
+    "synthetic biology", "marine biology", "plant biology",
+    "stem cell", "immune cell", "tumor biology",
+    "network development", "method development", "drug development",
+    "drug discovery", "target discovery", "gene discovery",
+    "protein engineering", "genome engineering", "tissue engineering",
+    "metabolic engineering", "genetic engineering",
+    "machine learning", "deep learning", "transfer learning",
+    "signal transduction", "electron microscopy", "mass spectrometry",
+    "precision medicine", "regenerative medicine", "translational medicine",
+    "climate change", "global health", "public health",
+    "organic chemistry", "physical chemistry", "analytical chemistry",
+    "prokaryotic gene", "eukaryotic gene",
 }
 
 
@@ -236,18 +253,40 @@ def _is_valid_name(name: str) -> bool:
         "advanced", "applied", "basic", "general", "specific",
         "medical", "pharmaceutical", "chemical", "physical",
         "national", "international", "regional", "global",
+        # Scientific terms that look like first names (capitalized)
+        "magnetic", "electric", "gravitational", "immune", "neural",
+        "inflammation", "infection", "cancer", "tumor", "tumour",
+        "developmental", "evolutionary", "marine", "plant", "animal",
+        "network", "method", "target", "signal", "electron",
+        "machine", "deep", "transfer", "precision", "regenerative",
+        "translational", "organic", "analytical", "metabolic",
+        "genetic", "genomic", "proteomic", "prokaryotic", "eukaryotic",
+        "human", "tissue", "stem", "drug", "vaccine",
+        "climate", "public", "global", "digital", "quantum",
     }
     if first_word in non_name_starters:
+        return False
+    # Reject if any word is a common science/non-name term
+    science_words = {
+        "biology", "chemistry", "physics", "engineering", "medicine",
+        "science", "sciences", "research", "studies", "technology",
+        "bioinformatics", "genomics", "proteomics", "metabolomics",
+        "immunology", "neuroscience", "oncology", "pathology",
+        "pharmacology", "physiology", "biochemistry", "biophysics",
+        "microbiology", "ecology", "genetics", "epigenetics",
+        "field", "development", "discovery", "learning", "transduction",
+        "microscopy", "spectrometry", "imaging",
+    }
+    words = [w.lower().rstrip(".,;:") for w in name.split()]
+    if any(w in science_words for w in words):
         return False
     # Reject if all words are common English words (not names)
     common_words = {
         "the", "a", "an", "and", "or", "in", "on", "at", "to", "of",
         "for", "with", "this", "that", "our", "their", "his", "her",
         "new", "old", "full", "part", "more", "less", "all", "any",
-        "science", "biology", "chemistry", "engineering", "medicine",
-        "research", "advanced", "scientists", "researchers",
+        "advanced", "scientists", "researchers",
     }
-    words = [w.lower().rstrip(".,;:") for w in name.split()]
     if all(w in common_words for w in words):
         return False
     return True

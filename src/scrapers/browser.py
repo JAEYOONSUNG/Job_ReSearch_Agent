@@ -89,7 +89,7 @@ def _do_close():
 def fetch_page(
     url: str,
     wait_selector: str = None,
-    wait_ms: int = 3000,
+    wait_ms: int = 1500,
     timeout: int = 20000,
 ) -> Optional[str]:
     """Fetch a page using headless Chromium.

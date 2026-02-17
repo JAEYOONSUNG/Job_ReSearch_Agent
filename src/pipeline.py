@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS dept_url_cache (
 )
 """
 
-MAX_DEPT_LOOKUPS_PER_RUN = 20
+MAX_DEPT_LOOKUPS_PER_RUN = 200  # effectively unlimited; circuit breaker handles abuse
 
 
 def _init_dept_cache() -> None:

@@ -174,6 +174,65 @@ def run_pi_enrichment(jobs: list[dict], max_workers: int = 3) -> list[dict]:
     return jobs
 
 
+def run_dept_enrichment(jobs: list[dict], max_workers: int = 4) -> list[dict]:
+    """Batch department URL lookup for jobs that have an institute but no dept_url.
+
+    Works independently of PI name — uses institute + department (or title)
+    to find the department/faculty homepage via DuckDuckGo site-scoped search.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    candidates = [
+        j for j in jobs
+        if j.get("institute") and not j.get("dept_url")
+    ]
+    if not candidates:
+        return jobs
+
+    logger.info("Dept URL enrichment: %d jobs to look up", len(candidates))
+
+    # Deduplicate by (institute, department) to avoid repeated searches
+    seen_keys: dict[tuple, str | None] = {}
+
+    def _make_key(job: dict) -> tuple:
+        return (
+            (job.get("institute") or "").strip().lower(),
+            (job.get("department") or job.get("field") or "").strip().lower(),
+        )
+
+    def _lookup_dept(institute: str, dept_hint: str) -> str | None:
+        from src.discovery.lab_finder import _institute_to_domain, _search_university_directory
+        domain = _institute_to_domain(institute)
+        if not domain:
+            return None
+        # Search for department/field page on the institute domain
+        query = dept_hint if dept_hint else "research"
+        return _search_university_directory(query, domain)
+
+    def _process_job(job: dict) -> None:
+        key = _make_key(job)
+        if key in seen_keys:
+            url = seen_keys[key]
+        else:
+            dept_hint = job.get("department") or job.get("field") or ""
+            url = _lookup_dept(job["institute"], dept_hint)
+            seen_keys[key] = url
+        if url:
+            job["dept_url"] = url
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_process_job, j): j for j in candidates}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            if done % 20 == 0:
+                logger.info("Dept enrichment progress: %d/%d", done, len(candidates))
+
+    filled = sum(1 for j in candidates if j.get("dept_url"))
+    logger.info("Dept URL enrichment complete: %d/%d filled", filled, len(candidates))
+    return jobs
+
+
 def run_weekly_discovery() -> None:
     """Run the weekly PI discovery pipeline."""
     logger.info("Starting weekly PI discovery pipeline...")
@@ -328,6 +387,7 @@ def main() -> None:
     # PI URL enrichment (batch, after scoring)
     if not args.skip_pi_lookup:
         jobs = run_pi_enrichment(jobs)
+        jobs = run_dept_enrichment(jobs)
 
     if args.summary:
         print_summary(jobs)

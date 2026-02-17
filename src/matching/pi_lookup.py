@@ -64,7 +64,7 @@ def _lookup_dept_url(
     if not domain:
         return None
 
-    return _search_university_directory(department, domain)
+    return _search_university_directory(department, domain, suffix="department")
 
 
 def _cache_pi_urls(

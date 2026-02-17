@@ -69,13 +69,15 @@ def _find_url_via_scholar(name: str, institute: Optional[str] = None) -> Optiona
 # ---------------------------------------------------------------------------
 
 def _search_university_directory(
-    name: str, domain: str
+    name: str, domain: str, suffix: str = "lab"
 ) -> Optional[str]:
-    """Try to find a lab page by searching ``site:<domain> <name> lab``.
+    """Search ``site:<domain> <name> <suffix>`` via DuckDuckGo.
 
     Uses a simple HTTP request to DuckDuckGo HTML search (no API key needed).
+    *suffix* defaults to ``"lab"`` but can be ``"department"`` or ``""``
+    to broaden the search.
     """
-    query = f"site:{domain} {name} lab"
+    query = f"site:{domain} {name} {suffix}".strip()
     url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
 
     try:
@@ -100,11 +102,16 @@ def _search_university_directory(
 
 def _extract_ddg_url(ddg_url: str) -> Optional[str]:
     """Extract the actual URL from a DuckDuckGo redirect link."""
+    from html import unescape
+    from urllib.parse import unquote
+
+    # DuckDuckGo HTML escapes & as &amp; in href attributes
+    ddg_url = unescape(ddg_url)
+
     # DuckDuckGo HTML search uses //duckduckgo.com/l/?uddg=<encoded_url>&...
     if "uddg=" in ddg_url:
         match = re.search(r"uddg=([^&]+)", ddg_url)
         if match:
-            from urllib.parse import unquote
             return unquote(match.group(1))
     # Sometimes URLs are direct
     if ddg_url.startswith("http"):
@@ -228,6 +235,7 @@ def _institute_to_domain(institute: str) -> Optional[str]:
 
     # Common mappings
     known: dict[str, str] = {
+        # US
         "mit": "mit.edu",
         "massachusetts institute of technology": "mit.edu",
         "stanford": "stanford.edu",
@@ -237,6 +245,13 @@ def _institute_to_domain(institute: str) -> Optional[str]:
         "caltech": "caltech.edu",
         "uc berkeley": "berkeley.edu",
         "university of california, berkeley": "berkeley.edu",
+        "university of california, san francisco": "ucsf.edu",
+        "ucsf": "ucsf.edu",
+        "university of california, los angeles": "ucla.edu",
+        "ucla": "ucla.edu",
+        "university of california, san diego": "ucsd.edu",
+        "ucsd": "ucsd.edu",
+        "university of california, davis": "ucdavis.edu",
         "yale": "yale.edu",
         "yale university": "yale.edu",
         "princeton": "princeton.edu",
@@ -245,20 +260,81 @@ def _institute_to_domain(institute: str) -> Optional[str]:
         "university of chicago": "uchicago.edu",
         "university of michigan": "umich.edu",
         "university of washington": "uw.edu",
+        "university of pennsylvania": "upenn.edu",
+        "upenn": "upenn.edu",
         "johns hopkins": "jhu.edu",
         "johns hopkins university": "jhu.edu",
-        "eth zurich": "ethz.ch",
-        "eth": "ethz.ch",
+        "cornell": "cornell.edu",
+        "cornell university": "cornell.edu",
+        "duke university": "duke.edu",
+        "duke": "duke.edu",
+        "northwestern university": "northwestern.edu",
+        "university of wisconsin": "wisc.edu",
+        "university of north carolina": "unc.edu",
+        "unc": "unc.edu",
+        "university of texas": "utexas.edu",
+        "iowa state university": "iastate.edu",
+        "baylor": "baylor.edu",
+        "emory university": "emory.edu",
+        "georgia tech": "gatech.edu",
+        "carnegie mellon": "cmu.edu",
+        "university of colorado": "colorado.edu",
+        "university of minnesota": "umn.edu",
+        "university of illinois": "illinois.edu",
+        "university of virginia": "virginia.edu",
+        "purdue": "purdue.edu",
+        "rice university": "rice.edu",
+        "scripps": "scripps.edu",
+        "rockefeller university": "rockefeller.edu",
+        "nih": "nih.gov",
+        "genentech": "gene.com",
+        "broad institute": "broadinstitute.org",
+        # UK
         "university of oxford": "ox.ac.uk",
         "oxford": "ox.ac.uk",
         "university of cambridge": "cam.ac.uk",
         "cambridge": "cam.ac.uk",
         "ucl": "ucl.ac.uk",
         "imperial college": "imperial.ac.uk",
-        "kaist": "kaist.ac.kr",
-        "university of tokyo": "u-tokyo.ac.jp",
+        "university of edinburgh": "ed.ac.uk",
+        "king's college london": "kcl.ac.uk",
+        "university of manchester": "manchester.ac.uk",
+        "university of bristol": "bristol.ac.uk",
+        "university of glasgow": "gla.ac.uk",
+        "university of birmingham": "birmingham.ac.uk",
+        "university of leeds": "leeds.ac.uk",
+        "university of sheffield": "sheffield.ac.uk",
+        "university of nottingham": "nottingham.ac.uk",
+        "institute of cancer research": "icr.ac.uk",
+        # EU
+        "eth zurich": "ethz.ch",
+        "eth": "ethz.ch",
+        "karolinska": "ki.se",
         "max planck": "mpg.de",
-        "nih": "nih.gov",
+        "epfl": "epfl.ch",
+        "university of helsinki": "helsinki.fi",
+        "wageningen": "wur.nl",
+        "tu delft": "tudelft.nl",
+        "ku leuven": "kuleuven.be",
+        "university of copenhagen": "ku.dk",
+        "sorbonne": "sorbonne-universite.fr",
+        "pasteur": "pasteur.fr",
+        # Asia
+        "kaist": "kaist.ac.kr",
+        "snu": "snu.ac.kr",
+        "seoul national university": "snu.ac.kr",
+        "postech": "postech.ac.kr",
+        "yonsei": "yonsei.ac.kr",
+        "korea university": "korea.ac.kr",
+        "university of tokyo": "u-tokyo.ac.jp",
+        "kyoto university": "kyoto-u.ac.jp",
+        "nus": "nus.edu.sg",
+        "nanyang technological": "ntu.edu.sg",
+        "tsinghua": "tsinghua.edu.cn",
+        "peking university": "pku.edu.cn",
+        # Australia
+        "university of melbourne": "unimelb.edu.au",
+        "university of sydney": "sydney.edu.au",
     }
 
     for key, domain in known.items():
@@ -270,6 +346,34 @@ def _institute_to_domain(institute: str) -> Optional[str]:
     if match:
         return f"{match.group(1)}.edu"
 
+    # Heuristic: "X University" -> x.edu
+    match = re.search(r"^(\w+)\s+university", inst_lower)
+    if match:
+        return f"{match.group(1)}.edu"
+
+    # Heuristic: "X Institute" or "X College" — search DuckDuckGo for the domain
+    return _ddg_find_domain(institute)
+
+
+def _ddg_find_domain(institute: str) -> Optional[str]:
+    """Search DuckDuckGo for the institute's main website domain."""
+    query = f"{institute} official website"
+    url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        time.sleep(1.0)
+        urls = re.findall(r'class="result__a"[^>]*href="([^"]+)"', resp.text)
+        for candidate in urls[:3]:
+            real = _extract_ddg_url(candidate)
+            if real and _is_valid_lab_url(real):
+                parsed = urlparse(real)
+                domain = parsed.netloc.lstrip("www.")
+                if domain:
+                    logger.debug("DDG domain for %s: %s", institute, domain)
+                    return domain
+    except Exception:
+        pass
     return None
 
 

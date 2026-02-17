@@ -82,8 +82,11 @@ def _search_university_directory(
 
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
+        if resp.status_code == 403:
+            logger.debug("DDG 403 for %s at %s", name, domain)
+            return None
         resp.raise_for_status()
-        time.sleep(1.0)  # be polite
+        time.sleep(2.0)  # be polite to DDG
 
         # Extract result URLs from DuckDuckGo HTML
         # Links are in <a class="result__a" href="...">
@@ -95,7 +98,7 @@ def _search_university_directory(
                 logger.debug("Directory search found %s for %s", real, name)
                 return real
     except Exception:
-        logger.exception("Directory search failed for %s at %s", name, domain)
+        logger.debug("Directory search failed for %s at %s", name, domain)
 
     return None
 
@@ -361,8 +364,10 @@ def _ddg_find_domain(institute: str) -> Optional[str]:
     url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
+        if resp.status_code == 403:
+            return None
         resp.raise_for_status()
-        time.sleep(1.0)
+        time.sleep(2.0)
         urls = re.findall(r'class="result__a"[^>]*href="([^"]+)"', resp.text)
         for candidate in urls[:3]:
             real = _extract_ddg_url(candidate)

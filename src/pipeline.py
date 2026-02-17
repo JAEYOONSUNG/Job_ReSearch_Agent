@@ -174,13 +174,55 @@ def run_pi_enrichment(jobs: list[dict], max_workers: int = 3) -> list[dict]:
     return jobs
 
 
-def run_dept_enrichment(jobs: list[dict], max_workers: int = 4) -> list[dict]:
+_DEPT_CACHE_TABLE = """
+CREATE TABLE IF NOT EXISTS dept_url_cache (
+    institute TEXT NOT NULL,
+    dept_hint TEXT NOT NULL DEFAULT '',
+    dept_url TEXT,
+    searched_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (institute, dept_hint)
+)
+"""
+
+MAX_DEPT_LOOKUPS_PER_RUN = 20
+
+
+def _init_dept_cache() -> None:
+    from src.db import get_connection
+    with get_connection() as conn:
+        conn.executescript(_DEPT_CACHE_TABLE)
+
+
+def _get_cached_dept(institute: str, dept_hint: str) -> tuple[bool, str | None]:
+    """Check cache. Returns (found_in_cache, url_or_none)."""
+    from src.db import get_connection
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT dept_url FROM dept_url_cache WHERE institute = ? AND dept_hint = ?",
+            (institute.strip().lower(), dept_hint.strip().lower()),
+        ).fetchone()
+        if row:
+            return True, row["dept_url"]
+        return False, None
+
+
+def _save_dept_cache(institute: str, dept_hint: str, url: str | None) -> None:
+    from src.db import get_connection
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO dept_url_cache (institute, dept_hint, dept_url) "
+            "VALUES (?, ?, ?)",
+            (institute.strip().lower(), dept_hint.strip().lower(), url),
+        )
+
+
+def run_dept_enrichment(jobs: list[dict]) -> list[dict]:
     """Batch department URL lookup for jobs that have an institute but no dept_url.
 
-    Works independently of PI name — uses institute + department (or title)
-    to find the department/faculty homepage via DuckDuckGo site-scoped search.
+    Uses a persistent SQLite cache so each (institute, dept) pair is only
+    searched once across all runs. Limits DDG requests per run to avoid 403s.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    _init_dept_cache()
 
     candidates = [
         j for j in jobs
@@ -189,46 +231,109 @@ def run_dept_enrichment(jobs: list[dict], max_workers: int = 4) -> list[dict]:
     if not candidates:
         return jobs
 
-    logger.info("Dept URL enrichment: %d jobs to look up", len(candidates))
-
-    # Deduplicate by (institute, department) to avoid repeated searches
-    seen_keys: dict[tuple, str | None] = {}
-
-    def _make_key(job: dict) -> tuple:
+    def _make_key(job: dict) -> tuple[str, str]:
         return (
             (job.get("institute") or "").strip().lower(),
             (job.get("department") or job.get("field") or "").strip().lower(),
         )
 
     def _lookup_dept(institute: str, dept_hint: str) -> str | None:
-        from src.discovery.lab_finder import _institute_to_domain, _search_university_directory
+        """Search DDG directly for '{institute} {dept_hint} department' (no site: operator)."""
+        import requests as _req
+        import re as _re
+        from src.discovery.lab_finder import _extract_ddg_url, _is_valid_lab_url, _institute_to_domain
+        import time as _time
+
         domain = _institute_to_domain(institute)
-        if not domain:
-            return None
-        # Search for department/field page on the institute domain
-        query = dept_hint if dept_hint else "research"
-        return _search_university_directory(query, domain)
+        query = f"{institute} {dept_hint} department".strip() if dept_hint else f"{institute} research department"
+        url = f"https://html.duckduckgo.com/html/?q={_req.utils.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        try:
+            resp = _req.get(url, headers=headers, timeout=15)
+            if resp.status_code == 403:
+                logger.debug("DDG 403 for dept lookup: %s", institute)
+                return None
+            resp.raise_for_status()
+            _time.sleep(2.5)
 
-    def _process_job(job: dict) -> None:
-        key = _make_key(job)
-        if key in seen_keys:
-            url = seen_keys[key]
+            urls = _re.findall(r'class="result__a"[^>]*href="([^"]+)"', resp.text)
+            for candidate in urls[:5]:
+                real = _extract_ddg_url(candidate)
+                if not real or not _is_valid_lab_url(real):
+                    continue
+                # Prefer results on the institute's own domain
+                if domain and domain in real:
+                    return real
+            # Fallback: return first valid result
+            for candidate in urls[:3]:
+                real = _extract_ddg_url(candidate)
+                if real and _is_valid_lab_url(real):
+                    return real
+        except Exception:
+            logger.debug("Dept DDG search failed for %s", institute)
+        return None
+
+    unique_keys = set(_make_key(j) for j in candidates)
+    logger.info(
+        "Dept URL enrichment: %d jobs, %d unique pairs", len(candidates), len(unique_keys),
+    )
+
+    # Phase 1: fill from cache
+    key_to_url: dict[tuple, str | None] = {}
+    uncached_keys: list[tuple[str, str]] = []
+    for key in unique_keys:
+        found, url = _get_cached_dept(key[0], key[1])
+        if found:
+            key_to_url[key] = url
         else:
-            dept_hint = job.get("department") or job.get("field") or ""
-            url = _lookup_dept(job["institute"], dept_hint)
-            seen_keys[key] = url
+            uncached_keys.append(key)
+
+    logger.info(
+        "Dept cache: %d hits, %d to search (max %d this run)",
+        len(unique_keys) - len(uncached_keys),
+        len(uncached_keys),
+        MAX_DEPT_LOOKUPS_PER_RUN,
+    )
+
+    # Phase 2: DDG search for uncached (with circuit breaker)
+    consecutive_failures = 0
+    searched = 0
+    for inst, dept in uncached_keys:
+        if searched >= MAX_DEPT_LOOKUPS_PER_RUN:
+            logger.info("Reached per-run DDG limit (%d), rest deferred to next run", MAX_DEPT_LOOKUPS_PER_RUN)
+            break
+        if consecutive_failures >= 3:
+            logger.warning("DDG circuit breaker after %d failures, deferring rest", consecutive_failures)
+            break
+
+        url = _lookup_dept(inst, dept)
+        _save_dept_cache(inst, dept, url)
+        key_to_url[(inst, dept)] = url
+        searched += 1
+
         if url:
-            job["dept_url"] = url
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_process_job, j): j for j in candidates}
-        done = 0
-        for future in as_completed(futures):
-            done += 1
-            if done % 20 == 0:
-                logger.info("Dept enrichment progress: %d/%d", done, len(candidates))
+    # Phase 3: apply to jobs and persist to DB
+    from src.db import get_connection
+    filled = 0
+    with get_connection() as conn:
+        for job in candidates:
+            key = _make_key(job)
+            url = key_to_url.get(key)
+            if url:
+                job["dept_url"] = url
+                filled += 1
+                # Persist to DB
+                job_url = job.get("url")
+                if job_url:
+                    conn.execute(
+                        "UPDATE jobs SET dept_url = ? WHERE url = ? AND (dept_url IS NULL OR dept_url = '')",
+                        (url, job_url),
+                    )
 
-    filled = sum(1 for j in candidates if j.get("dept_url"))
     logger.info("Dept URL enrichment complete: %d/%d filled", filled, len(candidates))
     return jobs
 
@@ -387,7 +492,9 @@ def main() -> None:
     # PI URL enrichment (batch, after scoring)
     if not args.skip_pi_lookup:
         jobs = run_pi_enrichment(jobs)
-        jobs = run_dept_enrichment(jobs)
+
+    # Dept URL enrichment (always runs, uses persistent cache)
+    jobs = run_dept_enrichment(jobs)
 
     if args.summary:
         print_summary(jobs)

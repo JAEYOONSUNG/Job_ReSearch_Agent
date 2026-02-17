@@ -22,14 +22,10 @@ SEARCH_KEYWORDS = [
     "postdoctoral CRISPR",
     "postdoc protein engineering",
     "postdoc microbiology",
-    "postdoctoral metabolic engineering",
-    "postdoc genome engineering",
-    "postdoctoral directed evolution",
-    "postdoc systems biology",
     "postdoc biotechnology",
 ]
 
-MAX_PAGES = 3
+MAX_PAGES = 2
 
 
 class JobsAcUkScraper(BaseScraper):
@@ -231,14 +227,10 @@ class JobsAcUkScraper(BaseScraper):
             if self._keyword_match(blob):
                 filtered.append(job)
 
-        # Enrich top results with detail pages
-        enriched: list[dict[str, Any]] = []
-        for job in filtered[:30]:
-            job = self._enrich_from_detail(job)
-            enriched.append(job)
-            import time
-            time.sleep(2.0)
-        enriched.extend(filtered[30:])
+        # Enrich top results with detail pages (parallel, skip already-in-DB)
+        enriched = self._parallel_enrich(
+            filtered, self._enrich_from_detail, max_workers=2, limit=30,
+        )
 
         self.logger.info("jobs.ac.uk: %d total, %d after filter, %d enriched", len(all_jobs), len(filtered), len(enriched))
         return enriched

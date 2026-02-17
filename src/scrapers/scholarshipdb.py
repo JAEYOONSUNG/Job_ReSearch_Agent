@@ -21,17 +21,13 @@ BASE_URL = "https://scholarshipdb.net"
 SEARCH_URL = f"{BASE_URL}/scholarships"
 SEARCH_QUERIES = [
     "postdoc biology",
-    "postdoctoral life sciences",
     "postdoc synthetic biology",
     "postdoc CRISPR",
     "postdoc protein engineering",
     "postdoc microbiology",
-    "postdoc biotechnology",
-    "postdoctoral chemistry biology",
-    "postdoc metabolic engineering",
 ]
 
-MAX_PAGES = 3
+MAX_PAGES = 2
 
 
 class ScholarshipDBScraper(BaseScraper):
@@ -254,12 +250,10 @@ class ScholarshipDBScraper(BaseScraper):
             if self._keyword_match(blob):
                 filtered.append(job)
 
-        # Enrich top results
-        enriched: list[dict[str, Any]] = []
-        for job in filtered[:30]:
-            job = self._enrich_from_detail(job)
-            enriched.append(job)
-        enriched.extend(filtered[30:])
+        # Enrich top results (parallel, skip already-in-DB)
+        enriched = self._parallel_enrich(
+            filtered, self._enrich_from_detail, max_workers=3, limit=30,
+        )
 
         self.logger.info(
             "ScholarshipDB: %d total, %d after filter",

@@ -292,13 +292,17 @@ class ResearchGateScraper(BaseScraper):
             except ImportError:
                 self.logger.warning("Playwright not installed")
 
-        # Keyword filter
-        filtered: list[dict[str, Any]] = []
+        # Keyword filter (pre-enrichment, based on title only)
+        candidates: list[dict[str, Any]] = []
         for job in all_jobs:
             blob = f"{job.get('title', '')} {job.get('description', '')}"
             if self._keyword_match(blob):
-                job = self._enrich_from_detail(job)
-                filtered.append(job)
+                candidates.append(job)
+
+        # Parallel detail-page enrichment (skip already-in-DB)
+        filtered = self._parallel_enrich(
+            candidates, self._enrich_from_detail, max_workers=3, limit=40,
+        )
 
         self.logger.info(
             "ResearchGate: %d total, %d after filter", len(all_jobs), len(filtered)

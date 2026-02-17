@@ -287,17 +287,14 @@ class EuraxessScraper(BaseScraper):
                 )
                 all_jobs.extend(page_jobs)
 
-        # Enrich top results with detail pages (increased limit for coverage)
-        enriched: list[dict[str, Any]] = []
-        for job in all_jobs[:100]:
-            job = self._enrich_from_detail(job)
-            # Keyword filter on enriched description
-            blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
-            if self._keyword_match(blob):
-                enriched.append(job)
+        # Enrich top results with detail pages (parallel for speed)
+        all_enriched = self._parallel_enrich(
+            all_jobs, self._enrich_from_detail, max_workers=4, limit=100,
+        )
 
-        # Add remaining (no detail enrichment) with keyword filter
-        for job in all_jobs[100:]:
+        # Keyword filter on enriched results
+        enriched: list[dict[str, Any]] = []
+        for job in all_enriched:
             blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
             if self._keyword_match(blob):
                 enriched.append(job)

@@ -77,6 +77,9 @@ def _run_single_scraper(scraper) -> list[dict]:
         return []
 
 
+SCRAPER_TIMEOUT = 300  # 5 minutes per scraper
+
+
 def run_scrapers(sequential: bool = False) -> list[dict]:
     """Run all scrapers and collect jobs.
 
@@ -93,14 +96,18 @@ def run_scrapers(sequential: bool = False) -> list[dict]:
         for scraper in scrapers:
             all_jobs.extend(_run_single_scraper(scraper))
     else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
         with ThreadPoolExecutor(max_workers=5) as pool:
             futures = {pool.submit(_run_single_scraper, s): s for s in scrapers}
-            for future in as_completed(futures):
+            for future in as_completed(futures, timeout=SCRAPER_TIMEOUT * 2):
                 scraper = futures[future]
                 try:
-                    jobs = future.result()
+                    jobs = future.result(timeout=SCRAPER_TIMEOUT)
                     all_jobs.extend(jobs)
+                except TimeoutError:
+                    logger.warning(
+                        "%s timed out after %ds, skipping", scraper.name, SCRAPER_TIMEOUT
+                    )
                 except Exception as e:
                     logger.error("%s future failed: %s", scraper.name, e, exc_info=True)
 
@@ -123,6 +130,47 @@ def run_scoring(jobs: list[dict]) -> list[dict]:
     keywords = load_cached_keywords()
     jobs = deduplicate_jobs(jobs)
     jobs = score_and_sort_jobs(jobs, keywords)
+    return jobs
+
+
+def run_pi_enrichment(jobs: list[dict], max_workers: int = 3) -> list[dict]:
+    """Batch PI URL lookup for jobs that have a pi_name but missing URLs.
+
+    Runs after scraping/scoring so it doesn't block scrapers.
+    Uses a thread pool for moderate parallelism (Scholar rate-limits aggressively).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    candidates = [
+        j for j in jobs
+        if j.get("pi_name") and not (j.get("scholar_url") and j.get("lab_url"))
+    ]
+    if not candidates:
+        return jobs
+
+    logger.info("PI enrichment: %d jobs need URL lookup", len(candidates))
+
+    def _lookup_one(job: dict) -> None:
+        try:
+            from src.matching.pi_lookup import lookup_pi_urls
+            urls = lookup_pi_urls(
+                job["pi_name"], job.get("institute"), job.get("department")
+            )
+            for key in ("scholar_url", "lab_url", "dept_url", "h_index", "citations"):
+                if urls.get(key) and not job.get(key):
+                    job[key] = urls[key]
+        except Exception:
+            logger.debug("PI lookup failed for %s", job.get("pi_name"))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_lookup_one, j): j for j in candidates}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            if done % 10 == 0:
+                logger.info("PI enrichment progress: %d/%d", done, len(candidates))
+
+    logger.info("PI enrichment complete")
     return jobs
 
 
@@ -253,6 +301,7 @@ def main() -> None:
     parser.add_argument("--export-only", action="store_true", help="Only export Excel")
     parser.add_argument("--backfill-pi", action="store_true", help="Backfill PI URLs for existing jobs")
     parser.add_argument("--sequential", action="store_true", help="Run scrapers sequentially (debug mode)")
+    parser.add_argument("--skip-pi-lookup", action="store_true", help="Skip PI URL enrichment (faster)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -275,6 +324,10 @@ def main() -> None:
     # Daily scrape + score
     jobs = run_scrapers(sequential=args.sequential)
     jobs = run_scoring(jobs)
+
+    # PI URL enrichment (batch, after scoring)
+    if not args.skip_pi_lookup:
+        jobs = run_pi_enrichment(jobs)
 
     if args.summary:
         print_summary(jobs)

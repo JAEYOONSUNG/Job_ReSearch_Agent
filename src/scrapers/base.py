@@ -385,24 +385,76 @@ class BaseScraper(abc.ABC):
             if field:
                 job["field"] = field
 
-        # PI URL lookup (Scholar, lab, dept)
-        pi_name = job.get("pi_name")
-        if pi_name and not (job.get("scholar_url") and job.get("lab_url")):
-            try:
-                from src.matching.pi_lookup import lookup_pi_urls
-
-                urls = lookup_pi_urls(
-                    pi_name, job.get("institute"), job.get("department")
-                )
-                for key in ("scholar_url", "lab_url", "dept_url", "h_index", "citations"):
-                    if urls.get(key) and not job.get(key):
-                        job[key] = urls[key]
-            except Exception:
-                self.logger.debug(
-                    "PI URL lookup failed for %s", pi_name, exc_info=True
-                )
+        # NOTE: PI URL lookup (Scholar, lab, dept) is handled in a batch
+        # post-processing step in pipeline.py for performance reasons.
 
         return job
+
+    # ── Parallel enrichment ─────────────────────────────────────────────
+
+    def _parallel_enrich(
+        self,
+        jobs: list[dict[str, Any]],
+        enrich_fn,
+        max_workers: int = 4,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Enrich jobs by calling *enrich_fn* concurrently.
+
+        Parameters
+        ----------
+        jobs : list
+            Jobs to enrich (first *limit* are enriched, rest passed through).
+        enrich_fn : callable
+            Function taking a job dict and returning the enriched dict.
+        max_workers : int
+            Thread pool size.
+        limit : int or None
+            How many jobs to enrich (None = all).
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        to_enrich = jobs[:limit] if limit else jobs
+        passthrough = jobs[limit:] if limit else []
+
+        # Skip jobs whose URL is already in DB (already enriched on a prior run)
+        need_enrich: list[dict[str, Any]] = []
+        already_done: list[dict[str, Any]] = []
+        try:
+            from src.db import get_connection
+            with get_connection() as conn:
+                for job in to_enrich:
+                    url = job.get("url")
+                    if url:
+                        row = conn.execute(
+                            "SELECT description FROM jobs WHERE url = ?", (url,)
+                        ).fetchone()
+                        if row and row["description"] and len(row["description"]) > 100:
+                            already_done.append(job)
+                            continue
+                    need_enrich.append(job)
+        except Exception:
+            need_enrich = list(to_enrich)
+            already_done = []
+
+        self.logger.info(
+            "Enriching %d jobs (%d skipped, already in DB)",
+            len(need_enrich), len(already_done),
+        )
+
+        if not need_enrich:
+            return already_done + passthrough
+
+        enriched: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(enrich_fn, j): j for j in need_enrich}
+            for future in as_completed(futures):
+                try:
+                    enriched.append(future.result())
+                except Exception:
+                    enriched.append(futures[future])
+
+        return enriched + already_done + passthrough
 
     # ── Dedup ─────────────────────────────────────────────────────────────
 

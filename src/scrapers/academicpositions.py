@@ -265,12 +265,10 @@ class AcademicPositionsScraper(BaseScraper):
             if self._keyword_match(blob):
                 filtered.append(job)
 
-        # Enrich top results
-        enriched: list[dict[str, Any]] = []
-        for job in filtered[:40]:
-            job = self._enrich_from_detail(job)
-            enriched.append(job)
-        enriched.extend(filtered[40:])
+        # Enrich top results (parallel, skip already-in-DB)
+        enriched = self._parallel_enrich(
+            filtered, self._enrich_from_detail, max_workers=4, limit=40,
+        )
 
         self.logger.info(
             "AcademicPositions: %d total, %d after filter",

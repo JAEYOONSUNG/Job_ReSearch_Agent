@@ -192,6 +192,7 @@ class NatureCareersScraper(BaseScraper):
             soup = BeautifulSoup(resp.text, "html.parser")
 
             # Full description (keep up to 5000 chars for parsing, store 3000)
+            found_desc = False
             for sel in (
                 "div.job-description", "div.content-body",
                 "div[class*='Description']", "article", "main",
@@ -201,7 +202,13 @@ class NatureCareersScraper(BaseScraper):
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 50:
                         job["description"] = text[:3000]
+                        found_desc = True
                         break
+
+            if not found_desc:
+                fallback = self._extract_description_fallback(resp.text)
+                if fallback:
+                    job["description"] = fallback
 
             # Institute
             if not job.get("institute"):
@@ -288,10 +295,36 @@ class NatureCareersScraper(BaseScraper):
                     )
 
             if html_failed == len(HTML_SEARCHES) and not all_jobs:
-                self.logger.warning(
-                    "Nature Careers is blocking all access (Madgex bot protection). "
-                    "Postdoc jobs from Nature are covered by JobSpy/LinkedIn scraper."
+                # Try Playwright as last resort
+                self.logger.info(
+                    "Nature Careers HTTP blocked on all %d searches; trying Playwright...",
+                    html_failed,
                 )
+                try:
+                    from src.scrapers.browser import fetch_page
+                    import time as _time
+                    for search_params in HTML_SEARCHES:
+                        from urllib.parse import urlencode as _urlencode
+                        pw_url = f"{SEARCH_URL}?{_urlencode(search_params)}"
+                        html = fetch_page(
+                            pw_url,
+                            wait_selector="div.card, div.job-card, a[href*='/job/']",
+                            wait_ms=5000,
+                        )
+                        if html:
+                            page_jobs = self._parse_html_page(html)
+                            if page_jobs:
+                                self.logger.info(
+                                    "Playwright %s: %d results",
+                                    search_params.get("discipline", "all"),
+                                    len(page_jobs),
+                                )
+                                all_jobs.extend(page_jobs)
+                        _time.sleep(3.0)
+                except ImportError:
+                    self.logger.warning("Playwright not installed")
+                except Exception:
+                    self.logger.debug("Playwright fallback also failed for Nature Careers")
 
         # 3. Keyword filter
         filtered = [

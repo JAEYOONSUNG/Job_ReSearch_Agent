@@ -11,7 +11,7 @@ from src.scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 # Sites the jobspy library supports
-JOBSPY_SITES = ["indeed", "linkedin", "glassdoor", "google", "zip_recruiter"]
+JOBSPY_SITES = ["indeed", "linkedin", "google", "zip_recruiter"]
 
 # We limit results per query to avoid huge payloads
 RESULTS_PER_QUERY = 25
@@ -21,8 +21,16 @@ def _safe_str(val: Any) -> str | None:
     """Convert pandas/numpy value to plain str or None."""
     if val is None:
         return None
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return None
+    except (ImportError, TypeError, ValueError):
+        pass
     s = str(val).strip()
-    return s if s and s.lower() not in ("nan", "none", "nat") else None
+    if not s or s.lower() in ("nan", "none", "nat", "<na>", "n/a", ""):
+        return None
+    return s
 
 
 class JobSpyScraper(BaseScraper):
@@ -37,6 +45,15 @@ class JobSpyScraper(BaseScraper):
     @property
     def name(self) -> str:
         return "jobspy"
+
+    def _fetch_description(self, url: str) -> str | None:
+        """Fetch a job page and extract description when jobspy returned None."""
+        try:
+            resp = self.fetch(url, timeout=15)
+            return self._extract_description_fallback(resp.text)
+        except Exception:
+            self.logger.debug("Could not fetch description from %s", url)
+            return None
 
     def scrape(self) -> list[dict[str, Any]]:
         try:
@@ -79,6 +96,13 @@ class JobSpyScraper(BaseScraper):
                 self.logger.exception(
                     "JobSpy query failed for keyword: %s", keyword
                 )
+
+        # Back-fill descriptions for jobs that have none (up to 30)
+        empty_desc = [j for j in all_jobs if not j.get("description")]
+        for job in empty_desc[:30]:
+            desc = self._fetch_description(job["url"])
+            if desc:
+                job["description"] = desc
 
         self.logger.info("Total JobSpy jobs collected: %d", len(all_jobs))
         return all_jobs

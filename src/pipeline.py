@@ -26,8 +26,8 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def run_scrapers() -> list[dict]:
-    """Run all scrapers and collect jobs."""
+def _build_scrapers() -> list:
+    """Instantiate all available scrapers."""
     from src.scrapers.nature_careers import NatureCareersScraper
     from src.scrapers.jobspy_scraper import JobSpyScraper
     from src.scrapers.euraxess import EuraxessScraper
@@ -47,29 +47,69 @@ def run_scrapers() -> list[dict]:
     ]
 
     # Conditionally add scrapers that may have import issues
-    try:
-        from src.scrapers.jobs_ac_kr import JobsAcKrScraper
-        scrapers.append(JobsAcKrScraper())
-    except ImportError:
-        logger.warning("jobs_ac_kr scraper unavailable")
-
-    try:
-        from src.scrapers.wanted import WantedScraper
-        scrapers.append(WantedScraper())
-    except ImportError:
-        logger.warning("wanted scraper unavailable")
-
-    all_jobs = []
-    for scraper in scrapers:
+    for cls_path, label in [
+        ("src.scrapers.jobs_ac_uk", "JobsAcUkScraper"),
+        ("src.scrapers.jobs_ac_kr", "JobsAcKrScraper"),
+        ("src.scrapers.wanted", "WantedScraper"),
+        ("src.scrapers.glassdoor", "GlassdoorScraper"),
+    ]:
         try:
-            logger.info("Running scraper: %s", scraper.name)
-            jobs = scraper.run()
-            all_jobs.extend(jobs)
-            log_scrape(scraper.name, "success", len(jobs), len(jobs))
-            logger.info("%s: found %d jobs", scraper.name, len(jobs))
-        except Exception as e:
-            logger.error("%s failed: %s", scraper.name, e, exc_info=True)
-            log_scrape(scraper.name, "error", error=str(e))
+            import importlib
+            mod = importlib.import_module(cls_path)
+            cls = getattr(mod, label)
+            scrapers.append(cls())
+        except (ImportError, AttributeError):
+            logger.warning("%s scraper unavailable", label)
+
+    return scrapers
+
+
+def _run_single_scraper(scraper) -> list[dict]:
+    """Run a single scraper with error handling (used by both sequential/parallel)."""
+    try:
+        logger.info("Running scraper: %s", scraper.name)
+        jobs = scraper.run()
+        logger.info("%s: found %d jobs", scraper.name, len(jobs))
+        return jobs
+    except Exception as e:
+        logger.error("%s failed: %s", scraper.name, e, exc_info=True)
+        log_scrape(scraper.name, "error", error=str(e))
+        return []
+
+
+def run_scrapers(sequential: bool = False) -> list[dict]:
+    """Run all scrapers and collect jobs.
+
+    Parameters
+    ----------
+    sequential : bool
+        If True, run scrapers one-by-one (useful for debugging).
+        Default is parallel execution with up to 5 workers.
+    """
+    scrapers = _build_scrapers()
+    all_jobs: list[dict] = []
+
+    if sequential:
+        for scraper in scrapers:
+            all_jobs.extend(_run_single_scraper(scraper))
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_run_single_scraper, s): s for s in scrapers}
+            for future in as_completed(futures):
+                scraper = futures[future]
+                try:
+                    jobs = future.result()
+                    all_jobs.extend(jobs)
+                except Exception as e:
+                    logger.error("%s future failed: %s", scraper.name, e, exc_info=True)
+
+    # Close shared Playwright browser if it was used
+    try:
+        from src.scrapers.browser import close_browser
+        close_browser()
+    except Exception:
+        pass
 
     return all_jobs
 
@@ -211,11 +251,19 @@ def main() -> None:
     parser.add_argument("--weekly", action="store_true", help="Run weekly PI discovery")
     parser.add_argument("--summary", action="store_true", help="Print text summary")
     parser.add_argument("--export-only", action="store_true", help="Only export Excel")
+    parser.add_argument("--backfill-pi", action="store_true", help="Backfill PI URLs for existing jobs")
+    parser.add_argument("--sequential", action="store_true", help="Run scrapers sequentially (debug mode)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
     init_db()
+
+    if args.backfill_pi:
+        from src.matching.backfill_pi_urls import backfill
+        logger.info("Running PI URL backfill...")
+        result = backfill()
+        logger.info("Backfill result: %s", result)
 
     if args.export_only:
         run_report(send_email=False)
@@ -225,7 +273,7 @@ def main() -> None:
         run_weekly_discovery()
 
     # Daily scrape + score
-    jobs = run_scrapers()
+    jobs = run_scrapers(sequential=args.sequential)
     jobs = run_scoring(jobs)
 
     if args.summary:

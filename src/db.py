@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional
@@ -10,6 +11,10 @@ from typing import Optional
 from src.config import DB_PATH
 
 logger = logging.getLogger(__name__)
+
+# Lock protecting all write operations so that concurrent scrapers don't
+# step on each other (SQLite allows concurrent reads but not concurrent writes).
+_DB_LOCK = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -116,6 +121,8 @@ _MIGRATIONS = [
     ("jobs", "conditions", "TEXT"),
     ("jobs", "keywords", "TEXT"),
     ("jobs", "pi_research_summary", "TEXT"),
+    ("jobs", "dept_url", "TEXT"),
+    ("pis", "dept_url", "TEXT"),
 ]
 
 
@@ -159,8 +166,11 @@ def get_connection():
 
 
 def upsert_job(job: dict) -> tuple[int, bool]:
-    """Insert or update a job. Returns (job_id, is_new)."""
-    with get_connection() as conn:
+    """Insert or update a job. Returns (job_id, is_new).
+
+    Thread-safe: acquires ``_DB_LOCK`` before writing.
+    """
+    with _DB_LOCK, get_connection() as conn:
         existing = conn.execute(
             "SELECT id FROM jobs WHERE url = ?", (job.get("url"),)
         ).fetchone()
@@ -336,8 +346,8 @@ def get_watchlist() -> list[dict]:
 
 
 def log_scrape(source: str, status: str, jobs_found: int = 0, new_jobs: int = 0, error: str = "") -> int:
-    """Log a scrape run."""
-    with get_connection() as conn:
+    """Log a scrape run. Thread-safe."""
+    with _DB_LOCK, get_connection() as conn:
         cursor = conn.execute(
             "INSERT INTO scrape_log (source, status, jobs_found, new_jobs, error, finished_at) "
             "VALUES (?, ?, ?, ?, ?, datetime('now'))",

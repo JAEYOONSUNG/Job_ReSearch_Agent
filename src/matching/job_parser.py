@@ -140,6 +140,72 @@ _SALARY_PATTERNS = [
 
 
 # ---------------------------------------------------------------------------
+# Field inference — keyword-to-field mapping
+# ---------------------------------------------------------------------------
+
+# Maps keyword patterns (lowercased) to canonical field names.
+# Checked in order; first match wins. More specific patterns come first.
+_FIELD_MAPPING: list[tuple[list[str], str]] = [
+    (["crispr", "cas9", "cas12", "cas13", "gene editing", "genome editing"],
+     "Genome Engineering"),
+    (["synthetic biology", "synbio", "cell-free", "biofoundry", "genetic circuit"],
+     "Synthetic Biology"),
+    (["protein engineering", "directed evolution", "enzyme engineering",
+      "enzyme design", "de novo protein", "protein design"],
+     "Protein Engineering"),
+    (["metabolic engineering", "metabolic flux", "pathway engineering",
+      "fermentation", "bioprocess", "biomanufacturing"],
+     "Metabolic Engineering"),
+    (["extremophile", "thermophile", "hyperthermophile", "archaea",
+      "extremozyme", "thermus", "sulfolobus"],
+     "Extremophile Biology"),
+    (["structural biology", "cryo-em", "x-ray crystallography",
+      "protein structure", "structural determination"],
+     "Structural Biology"),
+    (["machine learning", "deep learning", "ai-driven", "artificial intelligence",
+      "computational biology", "computational design"],
+     "Computational Biology / AI"),
+    (["bioinformatics", "genomics", "transcriptomics", "proteomics",
+      "metabolomics", "multi-omics", "metagenomics"],
+     "Bioinformatics / Omics"),
+    (["single-cell", "single cell", "scrna-seq", "spatial transcriptomics"],
+     "Single-Cell Biology"),
+    (["immunology", "antibody engineering", "car-t", "immune",
+      "immunotherapy", "antibody"],
+     "Immunology"),
+    (["cancer biology", "oncology", "tumor", "tumour"],
+     "Cancer Biology"),
+    (["neuroscience", "neurobiology", "optogenetics", "neural",
+      "brain", "electrophysiology"],
+     "Neuroscience"),
+    (["stem cell", "organoid", "tissue engineering", "regenerative",
+      "ips cell", "ipsc"],
+     "Stem Cell / Regenerative Medicine"),
+    (["drug discovery", "pharmacology", "drug design",
+      "medicinal chemistry", "screening"],
+     "Drug Discovery / Pharmacology"),
+    (["plant biology", "agricultural biotechnology", "crop",
+      "plant science", "plant genetics"],
+     "Plant Biology"),
+    (["microfluidics", "biosensor", "bioelectronics", "lab-on-a-chip"],
+     "Bioengineering / Devices"),
+    (["epigenetics", "chromatin", "histone", "dna methylation"],
+     "Epigenetics"),
+    (["rna biology", "mrna", "non-coding rna", "ribosome", "rna therapeutics"],
+     "RNA Biology"),
+    (["microbiology", "bacteriology", "virology", "mycology", "microbiome"],
+     "Microbiology"),
+    (["biochemistry", "biophysics", "chemical biology", "bioorganic"],
+     "Biochemistry / Chemical Biology"),
+    (["cell biology", "cell signaling", "cell cycle", "membrane biology"],
+     "Cell Biology"),
+    (["molecular biology", "gene expression", "gene regulation",
+      "cloning", "transformation"],
+     "Molecular Biology"),
+]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -185,6 +251,22 @@ def _is_valid_name(name: str) -> bool:
     if all(w in common_words for w in words):
         return False
     return True
+
+
+def infer_field(text: str) -> Optional[str]:
+    """Infer the research field from job text using keyword mapping.
+
+    Scans *text* against a prioritised list of keyword groups and returns
+    the canonical field name for the first match.  Returns ``None`` if no
+    field can be determined.
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    for keywords, field_name in _FIELD_MAPPING:
+        if any(kw in lower for kw in keywords):
+            return field_name
+    return None
 
 
 def extract_pi_name(text: str) -> Optional[str]:

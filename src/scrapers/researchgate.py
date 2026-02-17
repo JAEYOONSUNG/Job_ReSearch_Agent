@@ -50,21 +50,21 @@ class ResearchGateScraper(BaseScraper):
         soup = BeautifulSoup(html, "html.parser")
         jobs: list[dict[str, Any]] = []
 
-        # ResearchGate renders job cards in various containers
+        # Try multiple selectors (ResearchGate updates their CSS frequently)
         cards = soup.select(
-            "div.nova-legacy-o-stack__item, "
+            "div.nova-legacy-v-entity-item, "
+            "div.nova-v-entity-item, "
+            "div[class*='entity-item'], "
             "div.search-result-item, "
-            "div.job-card, "
-            "li.search-result, "
-            "div[itemprop='itemListElement']"
+            "li.result-item"
         )
 
         if not cards:
             # Fallback: try to find any job links
-            for link in soup.select("a[href*='/job/']"):
+            for link in soup.select("a[href*='job/'], a[href*='/jobs/']"):
                 href = link.get("href", "")
                 title = link.get_text(strip=True)
-                if title and href:
+                if title and len(title) > 5 and href:
                     jobs.append({
                         "title": title,
                         "url": urljoin(BASE_URL, href),
@@ -81,11 +81,23 @@ class ResearchGateScraper(BaseScraper):
 
     def _parse_card(self, card: Tag) -> dict[str, Any] | None:
         """Extract job info from a search result card."""
-        # Title + link
-        link = card.select_one(
-            "a[href*='/job/'], a.nova-legacy-e-text--size-l, "
-            "a.search-result__title, h3 a, h2 a"
-        )
+        # Title link — try multiple selector patterns (nova-legacy and nova-v)
+        link = None
+        for sel in ("div.nova-legacy-v-entity-item__title a",
+                     "div.nova-v-entity-item__title a",
+                     "div[class*='entity-item__title'] a",
+                     "h3 a", "h2 a"):
+            link = card.select_one(sel)
+            if link:
+                break
+
+        if not link:
+            # Fallback: find first link with text
+            for a in card.select("a[href*='job/'], a[href*='/jobs/']"):
+                if a.get_text(strip=True):
+                    link = a
+                    break
+
         if not link:
             return None
 
@@ -95,20 +107,14 @@ class ResearchGateScraper(BaseScraper):
             return None
         url = urljoin(BASE_URL, href)
 
-        # Institute
-        inst_el = card.select_one(
-            "a[href*='/institution/'], span.institution, "
-            "div.nova-legacy-v-entity-item__info-section-list-item, "
-            ".company-name"
+        # Institute and location from info list items (try both nova-legacy and nova-v)
+        info_items = card.select(
+            "li.nova-legacy-e-list__item span, "
+            "li.nova-e-list__item span, "
+            "li[class*='list__item'] span"
         )
-        institute = inst_el.get_text(strip=True) if inst_el else None
-
-        # Location
-        loc_el = card.select_one(
-            "span.location, div.location, "
-            "span.nova-legacy-e-text--color--grey-700"
-        )
-        location = loc_el.get_text(strip=True) if loc_el else None
+        institute = info_items[0].get_text(strip=True) if info_items else None
+        location = info_items[1].get_text(strip=True) if len(info_items) > 1 else None
         country = self._extract_country(location)
 
         # Date
@@ -118,44 +124,67 @@ class ResearchGateScraper(BaseScraper):
             raw = date_el.get("datetime") or date_el.get_text(strip=True)
             posted_date = self._parse_date(raw)
 
-        # Snippet / description
-        desc_el = card.select_one(
-            "div.nova-legacy-e-text--size-m, p.description, "
-            "div.search-result__snippet"
-        )
-        description = desc_el.get_text(strip=True)[:1000] if desc_el else None
-
         return {
             "title": title,
             "institute": institute,
             "country": country,
             "url": url,
             "posted_date": posted_date,
-            "description": description,
             "source": self.name,
         }
 
     # ── Detail page ───────────────────────────────────────────────────────
 
     def _enrich_from_detail(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Optionally fetch the full job detail page."""
+        """Fetch the full job detail page (HTTP first, Playwright fallback)."""
         url = job.get("url")
         if not url:
             return job
 
+        html_text = None
+        # Try HTTP first
         try:
             resp = self.fetch(url)
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html_text = resp.text
+        except Exception:
+            self.logger.debug("HTTP detail fetch failed for %s, trying Playwright", url)
 
-            # Full description (larger for parsing)
-            desc_el = soup.select_one(
-                "div.job-description, "
-                "div.nova-legacy-o-stack, "
-                "div[itemprop='description'], "
-                "div.research-detail-middle-section"
-            )
-            if desc_el:
-                job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
+        # Playwright fallback on HTTP failure
+        if not html_text:
+            try:
+                from src.scrapers.browser import fetch_page
+                html_text = fetch_page(url, wait_selector="div[itemprop='description'], article", wait_ms=4000)
+            except Exception:
+                self.logger.debug("Playwright detail fetch also failed for %s", url)
+
+        if not html_text:
+            return job
+
+        try:
+            soup = BeautifulSoup(html_text, "html.parser")
+
+            # Full description — try multiple selectors
+            found_desc = False
+            for sel in (
+                "div.job-description",
+                "div.nova-legacy-o-stack",
+                "div.nova-o-stack",
+                "div[itemprop='description']",
+                "div.research-detail-middle-section",
+                "div[class*='description']",
+            ):
+                desc_el = soup.select_one(sel)
+                if desc_el:
+                    text = desc_el.get_text(separator="\n", strip=True)
+                    if len(text) > 50:
+                        job["description"] = text[:3000]
+                        found_desc = True
+                        break
+
+            if not found_desc:
+                fallback = self._extract_description_fallback(html_text)
+                if fallback:
+                    job["description"] = fallback
 
             # Institute
             if not job.get("institute"):
@@ -179,8 +208,7 @@ class ResearchGateScraper(BaseScraper):
 
             # Deadline
             dl_el = soup.select_one(
-                "span.deadline, div.application-deadline, "
-                "span:contains('Deadline'), span:contains('deadline')"
+                "span.deadline, div.application-deadline"
             )
             if dl_el:
                 job["deadline"] = self._parse_date(dl_el.get_text(strip=True))
@@ -194,7 +222,7 @@ class ResearchGateScraper(BaseScraper):
                 job["department"] = dept_el.get_text(strip=True)
 
         except Exception:
-            self.logger.debug("Could not fetch detail for %s", url)
+            self.logger.debug("Could not parse detail for %s", url)
 
         return job
 
@@ -204,6 +232,7 @@ class ResearchGateScraper(BaseScraper):
         import requests as _requests
 
         all_jobs: list[dict[str, Any]] = []
+        http_blocked = False
 
         for term in SEARCH_TERMS:
             self.logger.info("ResearchGate search: %s", term)
@@ -226,11 +255,9 @@ class ResearchGateScraper(BaseScraper):
                     all_jobs.extend(page_jobs)
 
                 except _requests.exceptions.HTTPError as e:
-                    # ResearchGate aggressively blocks bots with 403
                     if e.response is not None and e.response.status_code == 403:
-                        self.logger.warning(
-                            "ResearchGate returned 403 for '%s'; skipping term", term
-                        )
+                        self.logger.info("ResearchGate 403, will try Playwright")
+                        http_blocked = True
                     else:
                         self.logger.warning(
                             "ResearchGate HTTP %s for '%s' page %d",
@@ -246,6 +273,24 @@ class ResearchGateScraper(BaseScraper):
                         page + 1,
                     )
                     break
+
+        # Playwright fallback if HTTP was blocked
+        if http_blocked and not all_jobs:
+            self.logger.info("Trying Playwright browser for ResearchGate...")
+            try:
+                from src.scrapers.browser import fetch_page
+                import time as _time
+                for term in SEARCH_TERMS:
+                    url = f"{JOBS_URL}?query={term.replace(' ', '+')}&page=1"
+                    html = fetch_page(url, wait_selector="div[class*='entity-item'], div.search-result-item", wait_ms=5000)
+                    if html:
+                        page_jobs = self._parse_listing_page(html)
+                        if page_jobs:
+                            self.logger.info("Playwright '%s': %d results", term, len(page_jobs))
+                            all_jobs.extend(page_jobs)
+                    _time.sleep(3.0)
+            except ImportError:
+                self.logger.warning("Playwright not installed")
 
         # Keyword filter
         filtered: list[dict[str, Any]] = []
@@ -275,7 +320,18 @@ class ResearchGateScraper(BaseScraper):
         if not location:
             return None
         parts = [p.strip() for p in location.split(",")]
-        return parts[-1] if parts else None
+        if not parts:
+            return None
+        # ResearchGate format is "Country, City" — take first part
+        # But if first part looks like a city (no known country match), try last part
+        first = parts[0]
+        from src.config import COUNTRY_TO_REGION
+        if first in COUNTRY_TO_REGION or first.lower() in {
+            k.lower() for k in COUNTRY_TO_REGION
+        }:
+            return first
+        # Fallback: last part (traditional "City, Country" format)
+        return parts[-1] if len(parts) > 1 else first
 
     @staticmethod
     def _parse_date(raw: str | None) -> str | None:

@@ -293,6 +293,42 @@ class BaseScraper(abc.ABC):
 
         return None
 
+    @staticmethod
+    def _extract_description_fallback(html: str, min_length: int = 200) -> str | None:
+        """Extract the largest meaningful text block from a page.
+
+        Used when scraper-specific CSS selectors fail to find a description.
+        Looks for the ``<main>``, ``<article>``, or largest ``<div>`` with
+        substantial text content.
+        """
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Remove noise elements
+        for tag in soup.select("nav, header, footer, script, style, aside, "
+                               "form, noscript, iframe"):
+            tag.decompose()
+
+        # Priority containers
+        for sel in ("main", "article", "[role='main']"):
+            el = soup.select_one(sel)
+            if el:
+                text = el.get_text(separator="\n", strip=True)
+                if len(text) >= min_length:
+                    return text[:3000]
+
+        # Fallback: find the div with the most text
+        best_text = ""
+        for div in soup.find_all("div"):
+            text = div.get_text(separator="\n", strip=True)
+            if len(text) > len(best_text):
+                best_text = text
+
+        if len(best_text) >= min_length:
+            return best_text[:3000]
+
+        return None
+
     def enrich(self, job: dict[str, Any]) -> dict[str, Any]:
         """Fill in region, tier, source, and parse structured fields."""
         job.setdefault("source", self.name)
@@ -336,6 +372,35 @@ class BaseScraper(abc.ABC):
                 job["conditions"] = parsed["conditions"]
             if parsed.get("keywords"):
                 job["keywords"] = parsed["keywords"]
+
+        # Infer research field if still empty
+        if not job.get("field"):
+            from src.matching.job_parser import infer_field
+            blob = " ".join(filter(None, [
+                job.get("title"),
+                desc,
+                job.get("keywords"),
+            ]))
+            field = infer_field(blob)
+            if field:
+                job["field"] = field
+
+        # PI URL lookup (Scholar, lab, dept)
+        pi_name = job.get("pi_name")
+        if pi_name and not (job.get("scholar_url") and job.get("lab_url")):
+            try:
+                from src.matching.pi_lookup import lookup_pi_urls
+
+                urls = lookup_pi_urls(
+                    pi_name, job.get("institute"), job.get("department")
+                )
+                for key in ("scholar_url", "lab_url", "dept_url", "h_index", "citations"):
+                    if urls.get(key) and not job.get(key):
+                        job[key] = urls[key]
+            except Exception:
+                self.logger.debug(
+                    "PI URL lookup failed for %s", pi_name, exc_info=True
+                )
 
         return job
 

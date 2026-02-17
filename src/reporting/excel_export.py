@@ -32,7 +32,10 @@ PI_COLUMNS = [
 # ---------------------------------------------------------------------------
 
 def _clean_text(text: str | None, max_len: int = 500) -> str:
-    """Strip markdown, excessive whitespace, and truncate."""
+    """Strip markdown, excessive whitespace, and truncate.
+
+    Preserves real newlines so that Excel's text-wrap renders paragraphs.
+    """
     if not text:
         return ""
     # Remove markdown bold/italic
@@ -43,28 +46,38 @@ def _clean_text(text: str | None, max_len: int = 500) -> str:
     text = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", text)
     # Remove HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-    # Collapse whitespace (but keep single newlines as " | ")
-    text = re.sub(r"\n+", " | ", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    # Remove leading/trailing separators
-    text = text.strip(" |")
+    # Collapse runs of 3+ newlines to double-newline (paragraph break)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Collapse horizontal whitespace (spaces/tabs) but keep newlines
+    text = re.sub(r"[^\S\n]+", " ", text)
+    # Strip each line
+    text = "\n".join(line.strip() for line in text.splitlines())
+    # Remove leading/trailing whitespace
+    text = text.strip()
     return text[:max_len]
 
 
 def _clean_list(text: str | None, max_len: int = 400) -> str:
-    """Clean a list-style section (requirements, etc)."""
+    """Clean a list-style section (requirements, etc).
+
+    Preserves bullet-point structure with ``\\n- `` format for Excel readability.
+    """
     if not text:
         return ""
-    # Remove markdown
+    # Remove markdown bold/italic
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
+    # Remove HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-    # Convert bullet points to semicolons for single-line reading
-    text = re.sub(r"\n\s*[-•*]\s*", "; ", text)
-    text = re.sub(r"\n\s*\d+[.)]\s*", "; ", text)
-    text = re.sub(r"\n+", "; ", text)
-    text = re.sub(r";\s*;", ";", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    text = text.strip(" ;|")
+    # Normalise bullet markers to "- "
+    text = re.sub(r"\n\s*[-•*]\s*", "\n- ", text)
+    text = re.sub(r"\n\s*\d+[.)]\s*", "\n- ", text)
+    # Collapse blank lines but keep single newlines
+    text = re.sub(r"\n{2,}", "\n", text)
+    # Collapse horizontal whitespace
+    text = re.sub(r"[^\S\n]+", " ", text)
+    # Strip each line
+    text = "\n".join(line.strip() for line in text.splitlines())
+    text = text.strip()
     return text[:max_len]
 
 
@@ -215,6 +228,7 @@ JOB_COLUMNS = [
     "Job URL",
     "Lab URL",
     "Scholar URL",
+    "Dept URL",
     # Meta
     "Match Score",
     "Source",
@@ -242,22 +256,23 @@ def _job_to_row(job: dict) -> dict:
         # Requirements parsed
         "Degree Required": _parse_degree(req, desc),
         "Skills/Techniques": _parse_skills(req, desc),
-        "Requirements (Full)": _clean_list(req, 300),
+        "Requirements (Full)": _clean_list(req, 600),
         # Conditions parsed
         "Salary": _parse_salary(cond, desc),
         "Duration": _parse_duration(cond, desc),
         "Contract Type": _parse_contract_type(cond, desc),
         "Start Date": _parse_start_date(cond, desc),
-        "Conditions (Full)": _clean_list(cond, 200),
+        "Conditions (Full)": _clean_list(cond, 400),
         # Dates
         "Posted Date": job.get("posted_date") or "",
         "Deadline": job.get("deadline") or "",
         # Description
-        "Description": _clean_text(desc, 400),
+        "Description": _clean_text(desc, 1500),
         # Links
         "Job URL": job.get("url") or "",
         "Lab URL": job.get("lab_url") or "",
         "Scholar URL": job.get("scholar_url") or "",
+        "Dept URL": job.get("dept_url") or "",
         # Meta
         "Match Score": job.get("match_score", 0),
         "Source": job.get("source") or "",
@@ -310,21 +325,31 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
         "Conditions (Full)": 30,
         "Posted Date": 11, "Deadline": 11,
         "Description": 50,
-        "Job URL": 15, "Lab URL": 15, "Scholar URL": 15,
+        "Job URL": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
         "Match Score": 8, "Source": 12, "Status": 7,
     }
 
-    url_fmt = workbook.add_format({"font_color": "blue", "underline": True})
+    url_fmt = workbook.add_format({"font_color": "blue", "underline": True, "valign": "top"})
     wrap_fmt = workbook.add_format({"text_wrap": True, "valign": "top"})
+
+    # Columns that benefit from text wrapping
+    wrap_cols = {
+        "Description", "Requirements (Full)", "Conditions (Full)",
+        "Keywords", "Title", "Degree Required", "Skills/Techniques",
+        "Field",
+    }
 
     for i, col in enumerate(df.columns):
         width = width_map.get(col, 15)
-        if col in ("Job URL", "Lab URL", "Scholar URL"):
+        if col in ("Job URL", "Lab URL", "Scholar URL", "Dept URL"):
             worksheet.set_column(i, i, width, url_fmt)
-        elif col in ("Description", "Requirements (Full)", "Conditions (Full)", "Keywords"):
+        elif col in wrap_cols:
             worksheet.set_column(i, i, width, wrap_fmt)
         else:
             worksheet.set_column(i, i, width)
+
+    # Default row height for better readability with wrapped text
+    worksheet.set_default_row(45)
 
     # Freeze panes: freeze header row + first 3 columns
     worksheet.freeze_panes(1, 3)

@@ -156,12 +156,25 @@ class AcademicPositionsScraper(BaseScraper):
             soup = BeautifulSoup(resp.text, "html.parser")
 
             # Description (larger for structured parsing)
-            desc_el = soup.select_one(
-                "div.job-description, div.position-description, "
-                "article, div[class*='Description'], div.content-body"
-            )
-            if desc_el:
-                job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
+            found_desc = False
+            for sel in (
+                "div.job-description", "div.position-description",
+                "div[class*='Description']", "div.content-body",
+                "div.ad-description", "section.description",
+                "article",
+            ):
+                desc_el = soup.select_one(sel)
+                if desc_el:
+                    text = desc_el.get_text(separator="\n", strip=True)
+                    if len(text) > 50:
+                        job["description"] = text[:3000]
+                        found_desc = True
+                        break
+
+            if not found_desc:
+                fallback = self._extract_description_fallback(resp.text)
+                if fallback:
+                    job["description"] = fallback
 
             # Institute
             if not job.get("institute"):

@@ -37,7 +37,7 @@ MAX_PAGES = 3
 class ScholarshipDBScraper(BaseScraper):
     """Scrape ScholarshipDB for postdoc fellowship and position opportunities."""
 
-    rate_limit: float = 2.0
+    rate_limit: float = 3.0  # ScholarshipDB frequently returns 520; be gentle
 
     @property
     def name(self) -> str:
@@ -160,13 +160,22 @@ class ScholarshipDBScraper(BaseScraper):
             soup = BeautifulSoup(resp.text, "html.parser")
 
             # Full description
+            found_desc = False
             desc_el = soup.select_one(
                 "div.scholarship-description, div.content, "
                 "article, div.detail-body, div[class*='Description'], "
                 "div.entry-content"
             )
             if desc_el:
-                job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
+                text = desc_el.get_text(separator="\n", strip=True)
+                if len(text) > 50:
+                    job["description"] = text[:3000]
+                    found_desc = True
+
+            if not found_desc:
+                fallback = self._extract_description_fallback(resp.text)
+                if fallback:
+                    job["description"] = fallback
 
             # Institute
             if not job.get("institute"):

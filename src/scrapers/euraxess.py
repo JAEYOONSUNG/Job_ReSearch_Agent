@@ -153,6 +153,7 @@ class EuraxessScraper(BaseScraper):
             soup = BeautifulSoup(resp.text, "html.parser")
 
             # Full description (keep more for structured parsing)
+            found_desc = False
             for sel in (
                 "div.field--name-field-eo-job-description",
                 "div.field--name-body",
@@ -163,8 +164,17 @@ class EuraxessScraper(BaseScraper):
             ):
                 desc_el = soup.select_one(sel)
                 if desc_el:
-                    job["description"] = desc_el.get_text(separator="\n", strip=True)[:3000]
-                    break
+                    text = desc_el.get_text(separator="\n", strip=True)
+                    if len(text) > 50:
+                        job["description"] = text[:3000]
+                        found_desc = True
+                        break
+
+            # Fallback: extract largest text block from the page
+            if not found_desc:
+                fallback = self._extract_description_fallback(resp.text)
+                if fallback:
+                    job["description"] = fallback
 
             # Organisation if still missing
             if not job.get("institute"):
@@ -277,9 +287,9 @@ class EuraxessScraper(BaseScraper):
                 )
                 all_jobs.extend(page_jobs)
 
-        # Enrich top results with detail pages (limit to avoid hammering)
+        # Enrich top results with detail pages (increased limit for coverage)
         enriched: list[dict[str, Any]] = []
-        for job in all_jobs[:40]:
+        for job in all_jobs[:100]:
             job = self._enrich_from_detail(job)
             # Keyword filter on enriched description
             blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
@@ -287,7 +297,7 @@ class EuraxessScraper(BaseScraper):
                 enriched.append(job)
 
         # Add remaining (no detail enrichment) with keyword filter
-        for job in all_jobs[40:]:
+        for job in all_jobs[100:]:
             blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
             if self._keyword_match(blob):
                 enriched.append(job)

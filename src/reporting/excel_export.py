@@ -1,5 +1,6 @@
 """Export job data to Excel files with parsed, structured columns."""
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -9,6 +10,7 @@ import pandas as pd
 
 from src.config import EXCEL_OUTPUT_DIR
 from src.db import get_all_pis, get_jobs, get_recommended_pis
+from src.matching.job_parser import parse_structured_description
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,25 @@ def _clean_text(text: str | None, max_len: int = 500) -> str:
     # Collapse all whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_len]
+
+
+def _format_papers(papers_json: str | None) -> str:
+    """Format JSON paper list to '(Year) Title [N cites]; ...' display string."""
+    if not papers_json:
+        return ""
+    try:
+        papers = json.loads(papers_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not papers:
+        return ""
+    parts = []
+    for p in papers:
+        year = p.get("year") or "?"
+        title = (p.get("title") or "Untitled")[:80]
+        cites = p.get("citation_count", 0)
+        parts.append(f"({year}) {title} [{cites} cites]")
+    return "; ".join(parts)
 
 
 def _clean_list(text: str | None, max_len: int = 400) -> str:
@@ -204,6 +225,10 @@ JOB_COLUMNS = [
     # Research
     "Field",
     "Keywords",
+    # Structured sections (parsed from LinkedIn/Indeed descriptions)
+    "Position Summary",
+    "Responsibilities",
+    "Preferred Qualifications",
     # Requirements (parsed)
     "Degree Required",
     "Skills/Techniques",
@@ -219,6 +244,9 @@ JOB_COLUMNS = [
     "Deadline",
     # Description
     "Description",
+    # PI Papers
+    "Recent Papers (5)",
+    "Top Cited Papers (5)",
     # Links
     "Job URL",
     "Lab URL",
@@ -237,6 +265,15 @@ def _job_to_row(job: dict) -> dict:
     req = job.get("requirements") or ""
     cond = job.get("conditions") or ""
 
+    # Parse structured sections from description (LinkedIn/Indeed format)
+    sections = parse_structured_description(desc)
+
+    # Use parsed requirements/conditions as fallback for empty fields
+    if not req and sections.get("requirements"):
+        req = sections["requirements"]
+    if not cond and sections.get("conditions"):
+        cond = sections["conditions"]
+
     return {
         "Title": _clean_text(job.get("title"), 100),
         "PI Name": job.get("pi_name") or "",
@@ -248,6 +285,10 @@ def _job_to_row(job: dict) -> dict:
         # Research
         "Field": job.get("field") or "",
         "Keywords": job.get("keywords") or "",
+        # Structured sections
+        "Position Summary": _clean_text(sections.get("summary"), 800),
+        "Responsibilities": _clean_list(sections.get("responsibilities"), 800),
+        "Preferred Qualifications": _clean_list(sections.get("preferred"), 600),
         # Requirements parsed
         "Degree Required": _parse_degree(req, desc),
         "Skills/Techniques": _parse_skills(req, desc),
@@ -263,6 +304,9 @@ def _job_to_row(job: dict) -> dict:
         "Deadline": job.get("deadline") or "",
         # Description
         "Description": _clean_text(desc, 1500),
+        # PI Papers
+        "Recent Papers (5)": _format_papers(job.get("recent_papers")),
+        "Top Cited Papers (5)": _format_papers(job.get("top_cited_papers")),
         # Links
         "Job URL": job.get("url") or "",
         "Lab URL": job.get("lab_url") or "",
@@ -292,7 +336,7 @@ def _pi_to_row(pi: dict) -> dict:
 
 
 def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
-    """Apply formatting to a worksheet."""
+    """Apply formatting to a worksheet with auto-filters and conditional formatting."""
     worksheet = writer.sheets[sheet_name]
     workbook = writer.book
 
@@ -314,11 +358,13 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
         "Title": 40, "PI Name": 18, "Institute": 25, "Department": 20,
         "Tier": 5, "Country": 12, "Region": 6,
         "Field": 20, "Keywords": 35,
+        "Position Summary": 45, "Responsibilities": 45, "Preferred Qualifications": 40,
         "Degree Required": 30, "Skills/Techniques": 30, "Requirements (Full)": 40,
         "Salary": 18, "Duration": 18, "Contract Type": 12, "Start Date": 14,
         "Conditions (Full)": 30,
         "Posted Date": 11, "Deadline": 11,
         "Description": 50,
+        "Recent Papers (5)": 50, "Top Cited Papers (5)": 50,
         "Job URL": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
         "Match Score": 8, "Source": 12, "Status": 7,
     }
@@ -336,16 +382,179 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
     # Compact row height
     worksheet.set_default_row(20)
 
-    # Freeze panes: freeze header row + first 3 columns
-    worksheet.freeze_panes(1, 3)
-
-    # Auto-filter
+    # Auto-filter on all columns
     if len(df) > 0:
         worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
 
+    # Conditional formatting: highlight Tier column
+    if "Tier" in df.columns:
+        tier_col = df.columns.get_loc("Tier")
+        tier_range = f"{chr(65 + tier_col)}2:{chr(65 + tier_col)}{len(df) + 1}"
+        # T1 = gold, T2 = blue, T3 = green
+        worksheet.conditional_format(
+            tier_range,
+            {"type": "text", "criteria": "containing", "value": "T1",
+             "format": workbook.add_format({"bg_color": "#FFF3CD", "font_color": "#856404", "bold": True})},
+        )
+        worksheet.conditional_format(
+            tier_range,
+            {"type": "text", "criteria": "containing", "value": "T2",
+             "format": workbook.add_format({"bg_color": "#CCE5FF", "font_color": "#004085"})},
+        )
+        worksheet.conditional_format(
+            tier_range,
+            {"type": "text", "criteria": "containing", "value": "T3",
+             "format": workbook.add_format({"bg_color": "#D4EDDA", "font_color": "#155724"})},
+        )
+
+    # Conditional formatting: color scale on Match Score
+    if "Match Score" in df.columns:
+        score_col = df.columns.get_loc("Match Score")
+        worksheet.conditional_format(
+            1, score_col, len(df), score_col,
+            {"type": "3_color_scale",
+             "min_color": "#F8D7DA", "mid_color": "#FFF3CD", "max_color": "#D4EDDA"},
+        )
+
+    # Conditional formatting: color scale on Recommendation Score (PI sheet)
+    if "Recommendation Score" in df.columns:
+        rec_col = df.columns.get_loc("Recommendation Score")
+        worksheet.conditional_format(
+            1, rec_col, len(df), rec_col,
+            {"type": "3_color_scale",
+             "min_color": "#F8D7DA", "mid_color": "#FFF3CD", "max_color": "#D4EDDA"},
+        )
+
+    # Freeze top row for easy scrolling
+    worksheet.freeze_panes(1, 0)
+
+
+def _write_summary_dashboard(
+    writer: pd.ExcelWriter,
+    all_jobs: list[dict],
+    rec_pis: list[dict],
+) -> None:
+    """Write a Summary Dashboard sheet with statistics and charts."""
+    workbook = writer.book
+    worksheet = workbook.add_worksheet("Summary Dashboard")
+    writer.sheets["Summary Dashboard"] = worksheet
+
+    # Formats
+    title_fmt = workbook.add_format({
+        "bold": True, "font_size": 16, "font_color": "#16213e",
+        "bottom": 2, "bottom_color": "#16213e",
+    })
+    section_fmt = workbook.add_format({
+        "bold": True, "font_size": 12, "font_color": "#16213e",
+        "bg_color": "#f0f4f8",
+    })
+    label_fmt = workbook.add_format({"bold": True, "valign": "vcenter"})
+    value_fmt = workbook.add_format({"valign": "vcenter", "num_format": "#,##0"})
+    pct_fmt = workbook.add_format({"valign": "vcenter", "num_format": "0.0%"})
+
+    # Title
+    worksheet.merge_range("A1:F1", "Job Search Pipeline - Summary Dashboard", title_fmt)
+    worksheet.write("A2", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    # --- Region breakdown ---
+    row = 3
+    worksheet.write(row, 0, "Region Breakdown", section_fmt)
+    worksheet.write(row, 1, "", section_fmt)
+    worksheet.write(row, 2, "", section_fmt)
+    row += 1
+
+    from collections import Counter
+    region_counts = Counter(j.get("region", "Other") for j in all_jobs)
+    region_data = [
+        ("US", region_counts.get("US", 0)),
+        ("EU", region_counts.get("EU", 0)),
+        ("Asia", region_counts.get("Asia", 0)),
+        ("Other", region_counts.get("Other", 0)),
+    ]
+    worksheet.write(row, 0, "Region", label_fmt)
+    worksheet.write(row, 1, "Count", label_fmt)
+    row += 1
+    data_start = row
+    for region, count in region_data:
+        worksheet.write(row, 0, region)
+        worksheet.write(row, 1, count, value_fmt)
+        row += 1
+    data_end = row - 1
+
+    # Pie chart for regions
+    if any(c > 0 for _, c in region_data):
+        chart = workbook.add_chart({"type": "pie"})
+        chart.add_series({
+            "name": "Jobs by Region",
+            "categories": ["Summary Dashboard", data_start, 0, data_end, 0],
+            "values": ["Summary Dashboard", data_start, 1, data_end, 1],
+            "data_labels": {"percentage": True, "category": True},
+        })
+        chart.set_title({"name": "Jobs by Region"})
+        chart.set_size({"width": 400, "height": 300})
+        worksheet.insert_chart("D4", chart)
+
+    # --- Top fields ---
+    row += 1
+    worksheet.write(row, 0, "Top Fields", section_fmt)
+    worksheet.write(row, 1, "", section_fmt)
+    worksheet.write(row, 2, "", section_fmt)
+    row += 1
+
+    field_counts = Counter(
+        j.get("field", "Unknown") for j in all_jobs if j.get("field")
+    )
+    top_fields = field_counts.most_common(10)
+
+    worksheet.write(row, 0, "Field", label_fmt)
+    worksheet.write(row, 1, "Count", label_fmt)
+    row += 1
+    field_start = row
+    for field, count in top_fields:
+        worksheet.write(row, 0, field[:40])
+        worksheet.write(row, 1, count, value_fmt)
+        row += 1
+    field_end = row - 1
+
+    # Bar chart for top fields
+    if top_fields:
+        chart2 = workbook.add_chart({"type": "bar"})
+        chart2.add_series({
+            "name": "Jobs by Field",
+            "categories": ["Summary Dashboard", field_start, 0, field_end, 0],
+            "values": ["Summary Dashboard", field_start, 1, field_end, 1],
+            "fill": {"color": "#16213e"},
+        })
+        chart2.set_title({"name": "Top Research Fields"})
+        chart2.set_size({"width": 500, "height": 350})
+        chart2.set_legend({"none": True})
+        worksheet.insert_chart("D16", chart2)
+
+    # --- Key metrics ---
+    row += 1
+    worksheet.write(row, 0, "Key Metrics", section_fmt)
+    worksheet.write(row, 1, "", section_fmt)
+    row += 1
+    worksheet.write(row, 0, "Total Jobs", label_fmt)
+    worksheet.write(row, 1, len(all_jobs), value_fmt)
+    row += 1
+    worksheet.write(row, 0, "Total PI Recommendations", label_fmt)
+    worksheet.write(row, 1, len(rec_pis), value_fmt)
+    row += 1
+    tier_counts = Counter(j.get("tier") for j in all_jobs if j.get("tier"))
+    for tier in sorted(tier_counts.keys()):
+        worksheet.write(row, 0, f"Tier {tier} Jobs", label_fmt)
+        worksheet.write(row, 1, tier_counts[tier], value_fmt)
+        row += 1
+
+    # Set column widths
+    worksheet.set_column(0, 0, 25)
+    worksheet.set_column(1, 1, 12)
+    worksheet.set_column(2, 2, 5)
+
 
 def export_to_excel(output_dir: Path = None) -> Path:
-    """Export all job data to a multi-sheet Excel file."""
+    """Export all job data to a multi-sheet Excel file with charts and formatting."""
     output_dir = output_dir or EXCEL_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -360,6 +569,9 @@ def export_to_excel(output_dir: Path = None) -> Path:
     rec_pis = get_recommended_pis()
 
     with pd.ExcelWriter(str(filepath), engine="xlsxwriter") as writer:
+        # Sheet 0: Summary Dashboard (charts + statistics)
+        _write_summary_dashboard(writer, all_jobs, rec_pis)
+
         # Sheet 1: US Positions
         df_us = pd.DataFrame([_job_to_row(j) for j in us_jobs], columns=JOB_COLUMNS)
         df_us.to_excel(writer, sheet_name="US Positions", index=False)

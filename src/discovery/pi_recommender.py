@@ -170,7 +170,11 @@ def _score_h_index(pi: dict, max_h: int) -> float:
 
 
 def _score_recent_activity(pi: dict) -> float:
-    """Score based on number of papers in the last N years.
+    """Score based on number of papers in the last N years with recency decay.
+
+    More recent papers contribute more to the score via exponential decay:
+    a paper from the current year gets full weight (1.0), while a paper
+    from ``_RECENT_YEARS`` ago gets weight ~0.37 (1/e).
 
     Fetches recent paper count from Semantic Scholar if a semantic_id is
     available; otherwise returns a low default.
@@ -193,13 +197,20 @@ def _score_recent_activity(pi: dict) -> float:
     if author is None or not author.papers:
         return 0.0
 
-    cutoff = datetime.now().year - _RECENT_YEARS
-    recent_count = sum(
-        1 for p in author.papers if p.year is not None and p.year >= cutoff
-    )
+    current_year = datetime.now().year
+    cutoff = current_year - _RECENT_YEARS
 
-    # Sigmoid normalisation: saturates around 20 papers
-    return 1.0 - (1.0 / (1.0 + 0.15 * recent_count))
+    # Recency-weighted count: exponential decay by age
+    # decay_factor = exp(-age / _RECENT_YEARS) so current year = 1.0
+    weighted_count = 0.0
+    for p in author.papers:
+        if p.year is not None and p.year >= cutoff:
+            age = max(current_year - p.year, 0)
+            weight = np.exp(-age / _RECENT_YEARS)
+            weighted_count += weight
+
+    # Sigmoid normalisation: saturates around 15 weighted papers
+    return 1.0 - (1.0 / (1.0 + 0.2 * weighted_count))
 
 
 # ---------------------------------------------------------------------------

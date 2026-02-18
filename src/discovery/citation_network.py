@@ -3,13 +3,20 @@
 Uses the Semantic Scholar API to trace who cites seed-PI papers (interested
 researchers) and who seed PIs cite (research foundations), then extracts
 corresponding / last authors and adds them to the database.
+
+Supports batch paper fetching and parallel citation exploration via
+``concurrent.futures`` while respecting S2 rate limits.
 """
 
 import json
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
+
+import requests as _req
 
 from semanticscholar import SemanticScholar
 
@@ -21,17 +28,22 @@ logger = logging.getLogger(__name__)
 # Semantic Scholar free tier: 100 requests per 5 minutes
 _S2_DELAY = 3.1  # seconds between requests (safe margin)
 _RECENT_YEARS = 5
+_MAX_WORKERS = 3  # parallel citation fetchers (rate-limit safe)
+_BATCH_SIZE = 50  # S2 batch endpoint max
 
 _s2_client: Optional[SemanticScholar] = None
+_s2_lock = threading.Lock()
 
 
 def _get_s2_client() -> SemanticScholar:
     global _s2_client
     if _s2_client is None:
-        kwargs = {}
-        if SEMANTIC_SCHOLAR_API_KEY:
-            kwargs["api_key"] = SEMANTIC_SCHOLAR_API_KEY
-        _s2_client = SemanticScholar(**kwargs)
+        with _s2_lock:
+            if _s2_client is None:
+                kwargs = {}
+                if SEMANTIC_SCHOLAR_API_KEY:
+                    kwargs["api_key"] = SEMANTIC_SCHOLAR_API_KEY
+                _s2_client = SemanticScholar(**kwargs)
     return _s2_client
 
 
@@ -193,6 +205,56 @@ def _get_seed_papers(semantic_id: str) -> list[dict]:
     return results
 
 
+def _batch_get_papers(paper_ids: list[str], fields: list[str]) -> list[dict]:
+    """Fetch multiple papers in a single batch POST to the S2 API.
+
+    Uses the ``/graph/v1/paper/batch`` endpoint to reduce individual
+    request count and stay within rate limits.
+
+    Returns a list of paper dicts (may contain ``None`` entries for
+    papers that could not be found).
+    """
+    if not paper_ids:
+        return []
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if SEMANTIC_SCHOLAR_API_KEY:
+        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+
+    results: list[dict] = []
+    for batch_start in range(0, len(paper_ids), _BATCH_SIZE):
+        batch = paper_ids[batch_start : batch_start + _BATCH_SIZE]
+        try:
+            resp = _req.post(
+                "https://api.semanticscholar.org/graph/v1/paper/batch",
+                headers=headers,
+                json={"ids": batch},
+                params={"fields": ",".join(fields)},
+                timeout=30,
+            )
+            time.sleep(_S2_DELAY)
+
+            if resp.status_code == 429:
+                logger.warning("S2 rate limited during batch fetch, sleeping 60s")
+                time.sleep(60)
+                resp = _req.post(
+                    "https://api.semanticscholar.org/graph/v1/paper/batch",
+                    headers=headers,
+                    json={"ids": batch},
+                    params={"fields": ",".join(fields)},
+                    timeout=30,
+                )
+                time.sleep(_S2_DELAY)
+
+            resp.raise_for_status()
+            results.extend(resp.json())
+        except Exception:
+            logger.exception("Batch paper fetch failed for %d papers", len(batch))
+            results.extend([None] * len(batch))
+
+    return results
+
+
 def _explore_citations_for_paper(
     paper_id: str,
     source_pi_id: int,
@@ -266,12 +328,38 @@ def _explore_citations_for_paper(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _explore_paper_both_directions(
+    paper_id: str,
+    paper_title: str,
+    pi_id: int,
+    pi_name: str,
+) -> tuple[int, int]:
+    """Explore both citation directions for a single paper.
+
+    Returns ``(forward_count, backward_count)``.
+    """
+    fwd = _explore_citations_for_paper(
+        paper_id, pi_id, pi_name, direction="citing"
+    )
+    bwd = _explore_citations_for_paper(
+        paper_id, pi_id, pi_name, direction="cited_by"
+    )
+    logger.debug(
+        "Paper '%s': %d forward, %d backward discoveries",
+        paper_title[:60],
+        fwd,
+        bwd,
+    )
+    return fwd, bwd
+
+
 def build_citation_network() -> dict:
     """Trace citation networks from all seed PIs.
 
     For each seed PI with a Semantic Scholar ID:
     1. Fetch their recent papers.
-    2. For each paper, find who cited it (forward) and who it cites (backward).
+    2. For each paper, find who cited it (forward) and who it cites (backward)
+       using parallel workers.
     3. Extract corresponding/last authors and add relevant ones to the DB.
 
     Returns
@@ -307,25 +395,29 @@ def build_citation_network() -> dict:
         papers = _get_seed_papers(semantic_id)
         logger.info("PI %s: %d recent papers to explore", pi_name, len(papers))
 
-        for paper in papers:
-            # Forward citations: who cited this paper?
-            fwd = _explore_citations_for_paper(
-                paper["paperId"], pi_id, pi_name, direction="citing"
-            )
-            total_forward += fwd
+        # Parallel exploration of citation directions across papers
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(
+                    _explore_paper_both_directions,
+                    paper["paperId"],
+                    paper["title"],
+                    pi_id,
+                    pi_name,
+                ): paper["paperId"]
+                for paper in papers
+            }
 
-            # Backward citations: who did this paper cite?
-            bwd = _explore_citations_for_paper(
-                paper["paperId"], pi_id, pi_name, direction="cited_by"
-            )
-            total_backward += bwd
-
-            logger.debug(
-                "Paper '%s': %d forward, %d backward discoveries",
-                paper["title"][:60],
-                fwd,
-                bwd,
-            )
+            for future in as_completed(futures):
+                try:
+                    fwd, bwd = future.result()
+                    total_forward += fwd
+                    total_backward += bwd
+                except Exception:
+                    logger.exception(
+                        "Error exploring citations for paper %s",
+                        futures[future],
+                    )
 
     summary = {
         "seed_pis_processed": processed,

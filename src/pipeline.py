@@ -1,6 +1,11 @@
-"""Main pipeline orchestrator."""
+"""Main pipeline orchestrator.
+
+Uses asyncio for concurrent scraper execution when running in parallel mode.
+Each scraper runs as an independent coroutine with per-scraper timeouts.
+"""
 
 import argparse
+import asyncio
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -65,7 +70,7 @@ def _build_scrapers() -> list:
 
 
 def _run_single_scraper(scraper) -> list[dict]:
-    """Run a single scraper with error handling (used by both sequential/parallel)."""
+    """Run a single scraper with error handling (sync, used for sequential mode)."""
     try:
         logger.info("Running scraper: %s", scraper.name)
         jobs = scraper.run()
@@ -80,6 +85,64 @@ def _run_single_scraper(scraper) -> list[dict]:
 SCRAPER_TIMEOUT = 300  # 5 minutes per scraper
 
 
+async def _async_run_single_scraper(scraper) -> list[dict]:
+    """Run a single scraper as an async coroutine with timeout."""
+    try:
+        logger.info("Running async scraper: %s", scraper.name)
+        jobs = await asyncio.wait_for(
+            scraper.async_run(),
+            timeout=SCRAPER_TIMEOUT,
+        )
+        logger.info("%s: found %d jobs", scraper.name, len(jobs))
+        return jobs
+    except asyncio.TimeoutError:
+        logger.warning("%s timed out after %ds, skipping", scraper.name, SCRAPER_TIMEOUT)
+        log_scrape(scraper.name, "error", error=f"Timed out after {SCRAPER_TIMEOUT}s")
+        return []
+    except Exception as e:
+        logger.error("%s failed: %s", scraper.name, e, exc_info=True)
+        log_scrape(scraper.name, "error", error=str(e))
+        return []
+
+
+async def _async_run_all_scrapers(scrapers: list) -> list[dict]:
+    """Run all scrapers concurrently using asyncio.gather."""
+    tasks = [_async_run_single_scraper(s) for s in scrapers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_jobs: list[dict] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(
+                "%s raised exception: %s",
+                scrapers[i].name, result, exc_info=result,
+            )
+        elif isinstance(result, list):
+            all_jobs.extend(result)
+
+    # Close shared async browser + aiohttp session
+    try:
+        from src.scrapers.browser import async_close_browser
+        await async_close_browser()
+    except Exception:
+        pass
+
+    try:
+        from src.scrapers.base import _AsyncSessionManager
+        await _AsyncSessionManager.close()
+    except Exception:
+        pass
+
+    # Also close sync browser if any scraper used it as fallback
+    try:
+        from src.scrapers.browser import close_browser
+        close_browser()
+    except Exception:
+        pass
+
+    return all_jobs
+
+
 def run_scrapers(sequential: bool = False) -> list[dict]:
     """Run all scrapers and collect jobs.
 
@@ -87,7 +150,7 @@ def run_scrapers(sequential: bool = False) -> list[dict]:
     ----------
     sequential : bool
         If True, run scrapers one-by-one (useful for debugging).
-        Default is parallel execution with up to 5 workers.
+        Default is parallel execution via asyncio.gather().
     """
     scrapers = _build_scrapers()
     all_jobs: list[dict] = []
@@ -96,22 +159,9 @@ def run_scrapers(sequential: bool = False) -> list[dict]:
         for scraper in scrapers:
             all_jobs.extend(_run_single_scraper(scraper))
     else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_run_single_scraper, s): s for s in scrapers}
-            for future in as_completed(futures, timeout=SCRAPER_TIMEOUT * 2):
-                scraper = futures[future]
-                try:
-                    jobs = future.result(timeout=SCRAPER_TIMEOUT)
-                    all_jobs.extend(jobs)
-                except TimeoutError:
-                    logger.warning(
-                        "%s timed out after %ds, skipping", scraper.name, SCRAPER_TIMEOUT
-                    )
-                except Exception as e:
-                    logger.error("%s future failed: %s", scraper.name, e, exc_info=True)
+        all_jobs = asyncio.run(_async_run_all_scrapers(scrapers))
 
-    # Close shared Playwright browser if it was used
+    # Close shared Playwright browser if it was used (sync fallback)
     try:
         from src.scrapers.browser import close_browser
         close_browser()
@@ -133,14 +183,13 @@ def run_scoring(jobs: list[dict]) -> list[dict]:
     return jobs
 
 
-def run_pi_enrichment(jobs: list[dict], max_workers: int = 3) -> list[dict]:
+def run_pi_enrichment(jobs: list[dict], max_workers: int = 2) -> list[dict]:
     """Batch PI URL lookup for jobs that have a pi_name but missing URLs.
 
     Runs after scraping/scoring so it doesn't block scrapers.
-    Uses a thread pool for moderate parallelism (Scholar rate-limits aggressively).
+    Uses asyncio with a semaphore for controlled concurrency
+    (Scholar rate-limits aggressively).
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     candidates = [
         j for j in jobs
         if j.get("pi_name") and not (j.get("scholar_url") and j.get("lab_url"))
@@ -150,26 +199,36 @@ def run_pi_enrichment(jobs: list[dict], max_workers: int = 3) -> list[dict]:
 
     logger.info("PI enrichment: %d jobs need URL lookup", len(candidates))
 
-    def _lookup_one(job: dict) -> None:
-        try:
-            from src.matching.pi_lookup import lookup_pi_urls
-            urls = lookup_pi_urls(
-                job["pi_name"], job.get("institute"), job.get("department")
-            )
-            for key in ("scholar_url", "lab_url", "dept_url", "h_index", "citations"):
-                if urls.get(key) and not job.get(key):
-                    job[key] = urls[key]
-        except Exception:
-            logger.debug("PI lookup failed for %s", job.get("pi_name"))
+    async def _async_pi_enrichment() -> None:
+        sem = asyncio.Semaphore(max_workers)
+        done_count = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_lookup_one, j): j for j in candidates}
-        done = 0
-        for future in as_completed(futures):
-            done += 1
-            if done % 10 == 0:
-                logger.info("PI enrichment progress: %d/%d", done, len(candidates))
+        async def _lookup_one(job: dict) -> None:
+            nonlocal done_count
+            async with sem:
+                loop = asyncio.get_running_loop()
+                try:
+                    def _do_lookup() -> dict:
+                        from src.matching.pi_lookup import lookup_pi_urls
+                        return lookup_pi_urls(
+                            job["pi_name"], job.get("institute"), job.get("department")
+                        )
 
+                    urls = await loop.run_in_executor(None, _do_lookup)
+                    for key in ("scholar_url", "lab_url", "dept_url", "h_index",
+                                "citations", "recent_papers", "top_cited_papers"):
+                        if urls.get(key) and not job.get(key):
+                            job[key] = urls[key]
+                except Exception:
+                    logger.debug("PI lookup failed for %s", job.get("pi_name"))
+
+                done_count += 1
+                if done_count % 10 == 0:
+                    logger.info("PI enrichment progress: %d/%d", done_count, len(candidates))
+
+        await asyncio.gather(*[_lookup_one(j) for j in candidates])
+
+    asyncio.run(_async_pi_enrichment())
     logger.info("PI enrichment complete")
     return jobs
 
@@ -487,6 +546,13 @@ def main() -> None:
     # Daily scrape + score
     jobs = run_scrapers(sequential=args.sequential)
     jobs = run_scoring(jobs)
+
+    # Deep enrichment: resolve aggregators + single-name PIs
+    try:
+        from src.matching.job_enricher import enrich_jobs_deep
+        jobs = enrich_jobs_deep(jobs)
+    except Exception as e:
+        logger.error("Deep enrichment failed: %s", e, exc_info=True)
 
     # PI URL enrichment (batch, after scoring)
     if not args.skip_pi_lookup:

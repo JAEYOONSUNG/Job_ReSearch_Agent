@@ -1,40 +1,67 @@
-"""Co-author network explorer.
+"""Co-author network explorer (Semantic Scholar only).
 
 Builds a multi-hop co-authorship graph starting from seed PIs, identifies
-cross-connections, and adds field-relevant new PIs to the database as
-recommendations.
+cross-connections, and adds field-relevant, PI-level researchers to the
+database as recommendations.
+
+Uses BFS with concurrent.futures for parallel coauthor fetching while
+respecting Semantic Scholar rate limits (100 req / 5 min).
+
+Filtering strategy (applied per coauthor candidate):
+1. Field relevance — paper titles/abstracts must match CV_KEYWORDS
+2. PI-level check — h-index >= 10, total papers >= 15, recent papers >= 3
+3. Institution tier (optional boost) — Tier 1-3 institutions prioritised
 """
 
-import json
 import logging
 import re
+import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
-from scholarly import scholarly
 from semanticscholar import SemanticScholar
 
 from src import db
-from src.config import CV_KEYWORDS, SEMANTIC_SCHOLAR_API_KEY
+from src.config import CV_KEYWORDS, SEMANTIC_SCHOLAR_API_KEY, load_rankings
 
 logger = logging.getLogger(__name__)
 
-_SCHOLARLY_DELAY = 1.0
 _S2_DELAY = 3.1  # ~100 req / 5 min free tier
 _RECENT_YEARS = 5
+_MAX_WORKERS = 3  # concurrent S2 fetches (rate-limit safe: 3 * 3.1s ~ 1 req/s)
+
+# PI quality thresholds — filters out students, postdocs, and inactive researchers
+_MIN_H_INDEX = 10
+_MIN_RECENT_PAPERS = 3
+_MIN_TOTAL_PAPERS = 15
 
 _s2_client: Optional[SemanticScholar] = None
+_s2_lock = threading.Lock()
+
+# Institution rankings cache
+_rankings: Optional[dict] = None
 
 
 def _get_s2_client() -> SemanticScholar:
     global _s2_client
     if _s2_client is None:
-        kwargs = {}
-        if SEMANTIC_SCHOLAR_API_KEY:
-            kwargs["api_key"] = SEMANTIC_SCHOLAR_API_KEY
-        _s2_client = SemanticScholar(**kwargs)
+        with _s2_lock:
+            if _s2_client is None:
+                kwargs = {}
+                if SEMANTIC_SCHOLAR_API_KEY:
+                    kwargs["api_key"] = SEMANTIC_SCHOLAR_API_KEY
+                _s2_client = SemanticScholar(**kwargs)
     return _s2_client
+
+
+def _get_rankings() -> dict:
+    global _rankings
+    if _rankings is None:
+        _rankings = load_rankings()
+    return _rankings
 
 
 # ---------------------------------------------------------------------------
@@ -62,13 +89,28 @@ def _is_field_relevant(texts: list[str]) -> bool:
     return False
 
 
+def _get_institution_tier(affiliations: list[str]) -> Optional[int]:
+    """Return the best institution tier (1-3) from affiliations, or None."""
+    rankings = _get_rankings()
+    if not rankings or not affiliations:
+        return None
+    for aff in affiliations:
+        aff_lower = aff.lower()
+        for tier_name, institutions in rankings.items():
+            tier_num = {"tier_1": 1, "tier_2": 2, "tier_3": 3}.get(tier_name)
+            if tier_num is None:
+                continue
+            for inst in institutions:
+                if inst.lower() in aff_lower or aff_lower in inst.lower():
+                    return tier_num
+    return None
+
+
 # ---------------------------------------------------------------------------
-# Semantic Scholar: fetch recent coauthors
+# Semantic Scholar: fetch + validate coauthors
 # ---------------------------------------------------------------------------
 
-def _fetch_coauthors_s2(
-    semantic_id: str,
-) -> list[dict]:
+def _fetch_coauthors_s2(semantic_id: str) -> list[dict]:
     """Return coauthors from recent papers of the given S2 author.
 
     Each dict has keys: name, semantic_id, paper_titles, paper_abstracts.
@@ -120,27 +162,69 @@ def _fetch_coauthors_s2(
     return list(coauthor_map.values())
 
 
-def _fetch_coauthors_scholarly(name: str, institute: Optional[str] = None) -> list[str]:
-    """Return coauthor names from the Google Scholar profile.
+def _is_pi_level(semantic_id: str) -> tuple[bool, dict]:
+    """Check if an author qualifies as PI-level via Semantic Scholar metrics.
 
-    This is a lightweight fallback when no Semantic Scholar ID is available.
+    Returns (passes_threshold, metadata_dict).
+    The metadata_dict contains h_index, citations, paper_count, affiliations,
+    and recent_paper_count for use in the PI record.
     """
+    s2 = _get_s2_client()
+    metadata: dict = {}
     try:
-        query = f"{name} {institute}" if institute else name
-        results = scholarly.search_author(query)
-        author = next(results, None)
-        if author is None:
-            return []
-        time.sleep(_SCHOLARLY_DELAY)
-        author = scholarly.fill(author)
-        return [
-            ca["name"]
-            for ca in author.get("coauthors", [])
-            if ca.get("name")
-        ]
+        author = s2.get_author(
+            semantic_id,
+            fields=[
+                "authorId",
+                "name",
+                "hIndex",
+                "citationCount",
+                "paperCount",
+                "affiliations",
+                "papers",
+                "papers.year",
+            ],
+        )
+        time.sleep(_S2_DELAY)
     except Exception:
-        logger.exception("Scholarly error fetching coauthors for %s", name)
-        return []
+        logger.debug("S2 error checking PI level for %s", semantic_id)
+        return False, metadata
+
+    if author is None:
+        return False, metadata
+
+    h_index = author.hIndex or 0
+    paper_count = author.paperCount or 0
+    citations = author.citationCount or 0
+    affiliations = author.affiliations or []
+
+    cutoff_year = datetime.now().year - _RECENT_YEARS
+    recent_papers = sum(
+        1 for p in (author.papers or [])
+        if p.year and p.year >= cutoff_year
+    )
+
+    metadata = {
+        "h_index": h_index,
+        "citations": citations,
+        "paper_count": paper_count,
+        "affiliations": affiliations,
+        "recent_paper_count": recent_papers,
+    }
+
+    passes = (
+        h_index >= _MIN_H_INDEX
+        and paper_count >= _MIN_TOTAL_PAPERS
+        and recent_papers >= _MIN_RECENT_PAPERS
+    )
+
+    if not passes:
+        logger.debug(
+            "Filtered out %s (h=%d, papers=%d, recent=%d)",
+            author.name, h_index, paper_count, recent_papers,
+        )
+
+    return passes, metadata
 
 
 # ---------------------------------------------------------------------------
@@ -153,36 +237,54 @@ def _process_coauthor(
     source_pi_name: str,
     hop: int,
 ) -> Optional[int]:
-    """Evaluate a single coauthor and, if relevant, add to DB.
+    """Evaluate a single coauthor and, if relevant + PI-level, add to DB.
 
     Returns the PI id of the coauthor if stored, else ``None``.
     """
     name = coauthor.get("name", "").strip()
-    if not name:
+    semantic_id = coauthor.get("semantic_id", "")
+    if not name or not semantic_id:
         return None
 
-    # Field relevance check
+    # 1) Field relevance check
     texts = coauthor.get("paper_titles", []) + coauthor.get("paper_abstracts", [])
     if not _is_field_relevant(texts):
         logger.debug("Skipping %s (not field-relevant)", name)
         return None
 
-    # Upsert PI
+    # 2) PI-level check via S2 metrics
+    passes, metadata = _is_pi_level(semantic_id)
+    if not passes:
+        return None
+
+    # 3) Build PI record with enriched data
+    institute = ""
+    tier = None
+    if metadata.get("affiliations"):
+        institute = metadata["affiliations"][0]
+        tier = _get_institution_tier(metadata["affiliations"])
+
     pi_record: dict = {
         "name": name,
-        "institute": "",  # often unknown for coauthors
+        "institute": institute,
+        "semantic_id": semantic_id,
         "is_recommended": 1,
         "connected_seeds": source_pi_name,
+        "h_index": metadata.get("h_index", 0),
+        "citations": metadata.get("citations", 0),
     }
-    if coauthor.get("semantic_id"):
-        pi_record["semantic_id"] = coauthor["semantic_id"]
 
     pi_id, is_new = db.upsert_pi(pi_record)
     if is_new:
+        tier_label = f" [Tier {tier}]" if tier else ""
         logger.info(
-            "New PI from coauthor network (hop %d): %s (source: %s)",
+            "New PI (hop %d): %s — h=%d, papers=%d, recent=%d%s (via %s)",
             hop,
             name,
+            metadata.get("h_index", 0),
+            metadata.get("paper_count", 0),
+            metadata.get("recent_paper_count", 0),
+            tier_label,
             source_pi_name,
         )
     else:
@@ -207,8 +309,36 @@ def _process_coauthor(
     return pi_id
 
 
+def _fetch_coauthors_for_pi(pi_id: int) -> tuple[int, str, list[dict]]:
+    """Fetch coauthors for a single PI via Semantic Scholar.
+
+    Returns ``(pi_id, pi_name, coauthors)``.
+    Skips PIs without a semantic_id.
+    """
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM pis WHERE id = ?", (pi_id,)
+        ).fetchone()
+    if row is None:
+        return pi_id, "", []
+
+    pi = dict(row)
+    pi_name = pi["name"]
+
+    if not pi.get("semantic_id"):
+        logger.debug("Skipping %s (no semantic_id)", pi_name)
+        return pi_id, pi_name, []
+
+    coauthors = _fetch_coauthors_s2(pi["semantic_id"])
+    return pi_id, pi_name, coauthors
+
+
 def build_coauthor_network(max_hops: int = 2) -> dict:
-    """Build the full coauthor network from seed PIs.
+    """Build the full coauthor network from seed PIs using BFS with parallelism.
+
+    Uses Semantic Scholar only. Each candidate coauthor is verified for:
+    - Field relevance (CV_KEYWORDS match)
+    - PI-level metrics (h-index, paper count, recent activity)
 
     Parameters
     ----------
@@ -219,68 +349,80 @@ def build_coauthor_network(max_hops: int = 2) -> dict:
     Returns
     -------
     dict
-        Summary statistics: ``{"seed_pis": int, "discovered": int,
-        "cross_connections": int}``.
+        Summary statistics.
     """
     seed_pis = db.get_seed_pis()
     if not seed_pis:
         logger.info("No seed PIs in database.")
-        return {"seed_pis": 0, "discovered": 0, "cross_connections": 0}
+        return {"seed_pis": 0, "discovered": 0, "filtered": 0, "cross_connections": 0}
 
     logger.info(
-        "Building coauthor network from %d seed PIs (max_hops=%d)",
-        len(seed_pis),
-        max_hops,
+        "Building coauthor network from %d seed PIs (max_hops=%d, "
+        "min_h=%d, min_papers=%d, min_recent=%d)",
+        len(seed_pis), max_hops, _MIN_H_INDEX, _MIN_TOTAL_PAPERS, _MIN_RECENT_PAPERS,
     )
 
     discovered_total = 0
-    cross_connections = 0
+    filtered_total = 0
 
-    # Track which PI IDs we have seen at each hop so we don't re-explore
+    # BFS: queue entries are (pi_id, current_hop)
     explored_ids: set[int] = {pi["id"] for pi in seed_pis}
-    frontier_ids: set[int] = set(explored_ids)
+    bfs_queue: deque[tuple[int, int]] = deque()
+    for pi in seed_pis:
+        bfs_queue.append((pi["id"], 0))
 
+    # Process hops level by level for controlled parallelism
     for hop in range(1, max_hops + 1):
+        frontier_ids: list[int] = []
+        while bfs_queue and bfs_queue[0][1] == hop - 1:
+            pi_id, _ = bfs_queue.popleft()
+            frontier_ids.append(pi_id)
+
+        if not frontier_ids:
+            break
+
         logger.info("--- Hop %d (frontier size: %d) ---", hop, len(frontier_ids))
         next_frontier: set[int] = set()
 
-        for pi_id in list(frontier_ids):
-            # Fetch the PI record
-            with db.get_connection() as conn:
-                row = conn.execute(
-                    "SELECT * FROM pis WHERE id = ?", (pi_id,)
-                ).fetchone()
-            if row is None:
-                continue
-            pi = dict(row)
-            pi_name = pi["name"]
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(_fetch_coauthors_for_pi, pi_id): pi_id
+                for pi_id in frontier_ids
+            }
 
-            # Prefer Semantic Scholar for coauthor extraction
-            coauthors: list[dict] = []
-            if pi.get("semantic_id"):
-                coauthors = _fetch_coauthors_s2(pi["semantic_id"])
-            else:
-                # Fallback: scholarly (limited info)
-                ca_names = _fetch_coauthors_scholarly(pi_name, pi.get("institute"))
-                coauthors = [{"name": n, "paper_titles": [], "paper_abstracts": []} for n in ca_names]
-                time.sleep(_SCHOLARLY_DELAY)
+            for future in as_completed(futures):
+                try:
+                    pi_id, pi_name, coauthors = future.result()
+                except Exception:
+                    logger.exception(
+                        "Error fetching coauthors for PI %d", futures[future]
+                    )
+                    continue
 
-            for ca in coauthors:
-                ca_pi_id = _process_coauthor(ca, pi_id, pi_name, hop)
-                if ca_pi_id is not None:
-                    discovered_total += 1
-                    if ca_pi_id not in explored_ids:
-                        next_frontier.add(ca_pi_id)
+                if not pi_name:
+                    continue
 
+                for ca in coauthors:
+                    ca_pi_id = _process_coauthor(ca, pi_id, pi_name, hop)
+                    if ca_pi_id is not None:
+                        discovered_total += 1
+                        if ca_pi_id not in explored_ids:
+                            next_frontier.add(ca_pi_id)
+                    else:
+                        filtered_total += 1
+
+        # Enqueue next hop
+        for nf_id in next_frontier:
+            bfs_queue.append((nf_id, hop))
         explored_ids |= next_frontier
-        frontier_ids = next_frontier
 
-    # Cross-connection detection: coauthors shared by multiple seeds
+    # Cross-connection detection
     cross_connections = _detect_cross_connections(seed_pis)
 
     summary = {
         "seed_pis": len(seed_pis),
         "discovered": discovered_total,
+        "filtered": filtered_total,
         "cross_connections": cross_connections,
     }
     logger.info("Coauthor network complete: %s", summary)
@@ -288,16 +430,11 @@ def build_coauthor_network(max_hops: int = 2) -> dict:
 
 
 def _detect_cross_connections(seed_pis: list[dict]) -> int:
-    """Find PIs that are coauthors of more than one seed PI.
-
-    Updates the ``connected_seeds`` field for those PIs and returns the count.
-    """
+    """Find PIs that are coauthors of more than one seed PI."""
     seed_ids = {pi["id"] for pi in seed_pis}
     cross_count = 0
 
     with db.get_connection() as conn:
-        # For each non-seed PI, count how many distinct seed PIs they
-        # share a coauthorship with.
         rows = conn.execute(
             """
             SELECT pi_id,

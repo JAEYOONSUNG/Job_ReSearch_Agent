@@ -167,12 +167,15 @@ COUNTRY_TO_REGION = {
 }
 
 # ── PI Recommender Weights ─────────────────────────────────────────────────
+# recent_activity raised from 0.10 → 0.20 (recency-weighted scoring);
+# h_index lowered from 0.15 → 0.10 to compensate (established PIs already
+# score well via connection_strength and institution_ranking).
 RECOMMENDER_WEIGHTS = {
     "field_similarity": 0.30,
     "connection_strength": 0.25,
-    "institution_ranking": 0.20,
-    "h_index": 0.15,
-    "recent_activity": 0.10,
+    "institution_ranking": 0.15,
+    "h_index": 0.10,
+    "recent_activity": 0.20,
 }
 
 # ── Institution Rankings (load) ────────────────────────────────────────────

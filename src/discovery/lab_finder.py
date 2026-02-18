@@ -14,6 +14,7 @@ import requests
 from scholarly import scholarly
 
 from src import db
+from src.discovery.web_search import ddg_search
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,10 @@ def _find_url_via_scholar(name: str, institute: Optional[str] = None) -> Optiona
     """Search Google Scholar for a PI and extract the homepage URL.
 
     Scholarly fills the ``homepage`` field from the author profile page.
+    Uses FreeProxies to avoid IP blocking.
     """
+    from src.discovery.seed_profiler import _setup_scholarly_proxy
+    _setup_scholarly_proxy()
     try:
         query = f"{name} {institute}" if institute else name
         results = scholarly.search_author(query)
@@ -193,6 +197,95 @@ def _url_is_reachable(url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Strategy 4: DDG multi-query search (duckduckgo-search library)
+# ---------------------------------------------------------------------------
+
+def _score_url(url: str, institute: Optional[str], domain: Optional[str]) -> int:
+    """Score a candidate URL for relevance as a lab/faculty page."""
+    score = 0
+    url_lower = url.lower()
+
+    # Institute domain match
+    if domain and domain in url_lower:
+        score += 3
+
+    # Lab / faculty / research keywords in URL
+    lab_keywords = ("lab", "faculty", "professor", "research", "people", "member", "group")
+    for kw in lab_keywords:
+        if kw in url_lower:
+            score += 2
+            break
+
+    # .edu domain
+    if ".edu" in url_lower or ".ac." in url_lower:
+        score += 1
+
+    return score
+
+
+def find_lab_url_multi_strategy(
+    name: str, institute: Optional[str] = None, domain: Optional[str] = None,
+) -> Optional[str]:
+    """Search DuckDuckGo with multiple query templates to find a lab URL.
+
+    Tries several query patterns, collects valid URLs, scores them,
+    and returns the best match.
+
+    Parameters
+    ----------
+    name : str
+        PI full name.
+    institute : str, optional
+        Institute name (e.g. "MIT").
+    domain : str, optional
+        Institute web domain (e.g. "mit.edu").  If not given, derived
+        from *institute* via ``_institute_to_domain``.
+    """
+    if not domain and institute:
+        domain = _institute_to_domain(institute)
+
+    # Build query templates
+    queries: list[str] = []
+    if domain:
+        queries.append(f'site:{domain} "{name}" lab')
+        queries.append(f'site:{domain} "{name}" faculty')
+    if institute:
+        queries.append(f'"{name}" {institute} lab homepage')
+        queries.append(f'"{name}" {institute} research group')
+        queries.append(f'"{name}" {institute} faculty profile')
+    # Generic fallback
+    queries.append(f'"{name}" lab homepage')
+
+    seen_urls: set[str] = set()
+    scored: list[tuple[int, str]] = []
+
+    for query in queries:
+        results = ddg_search(query, max_results=5)
+        for r in results:
+            href = r.get("href", "")
+            if not href or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            if not _is_valid_lab_url(href):
+                continue
+            s = _score_url(href, institute, domain)
+            scored.append((s, href))
+
+        # Early exit if we found a high-confidence match
+        if scored and scored[-1][0] >= 4:
+            break
+
+    if not scored:
+        return None
+
+    # Return the highest-scored URL
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_url = scored[0][1]
+    logger.debug("DDG multi-query best for %s: %s (score=%d)", name, best_url, scored[0][0])
+    return best_url
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -208,17 +301,20 @@ def find_lab_url_for_pi(name: str, institute: Optional[str] = None) -> Optional[
 
     time.sleep(_SCHOLARLY_DELAY)
 
-    # Strategy 2: University directory (if institute is known)
+    # Strategy 2: DDG multi-query search (richer than single directory query)
+    url = find_lab_url_multi_strategy(name, institute)
+    if url:
+        return url
+
+    # Strategy 3: University directory (if institute is known)
     if institute:
-        # Try to extract a domain from the institute name
-        # e.g. "MIT" -> mit.edu, "Stanford University" -> stanford.edu
         domain_guess = _institute_to_domain(institute)
         if domain_guess:
             url = _search_university_directory(name, domain_guess)
             if url:
                 return url
 
-    # Strategy 3: Guess common patterns
+    # Strategy 4: Guess common patterns
     url = _guess_lab_url(name, institute)
     if url:
         return url

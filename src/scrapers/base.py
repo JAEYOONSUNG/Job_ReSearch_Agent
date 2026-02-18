@@ -1,8 +1,14 @@
-"""Abstract base scraper with common HTTP, retry, rate-limit, and dedup logic."""
+"""Abstract base scraper with common HTTP, retry, rate-limit, and dedup logic.
+
+Supports both synchronous (requests) and asynchronous (aiohttp) HTTP clients.
+Scrapers can override ``scrape()`` (sync) and/or ``async_scrape()`` (async).
+The pipeline uses ``async_run()`` for concurrent execution via asyncio.
+"""
 
 from __future__ import annotations
 
 import abc
+import asyncio
 import hashlib
 import json
 import logging
@@ -139,11 +145,56 @@ def _random_ua() -> str:
     return random.choice(_USER_AGENTS)
 
 
+# ── Async HTTP helpers ──────────────────────────────────────────────────
+
+_aiohttp_available = False
+try:
+    import aiohttp
+    _aiohttp_available = True
+except ImportError:
+    pass
+
+
+class _AsyncSessionManager:
+    """Lazy singleton for a shared aiohttp.ClientSession.
+
+    Created once per event loop, reused by all scrapers in the same run.
+    """
+
+    _session: aiohttp.ClientSession | None = None
+    _lock: asyncio.Lock | None = None
+
+    @classmethod
+    async def get_session(cls) -> aiohttp.ClientSession:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        async with cls._lock:
+            if cls._session is None or cls._session.closed:
+                timeout = aiohttp.ClientTimeout(total=60, connect=15)
+                connector = aiohttp.TCPConnector(
+                    limit=30,
+                    limit_per_host=6,
+                    enable_cleanup_closed=True,
+                )
+                cls._session = aiohttp.ClientSession(
+                    timeout=timeout,
+                    connector=connector,
+                )
+            return cls._session
+
+    @classmethod
+    async def close(cls) -> None:
+        if cls._session and not cls._session.closed:
+            await cls._session.close()
+            cls._session = None
+
+
 class BaseScraper(abc.ABC):
     """Base class every scraper must inherit from.
 
     Subclasses implement ``scrape()`` which returns raw job dicts.
-    ``run()`` orchestrates scrape -> deduplicate -> upsert -> log.
+    ``run()`` orchestrates scrape -> deduplicate -> upsert -> log (sync).
+    ``async_run()`` does the same using asyncio for concurrent execution.
     """
 
     # Minimum seconds between HTTP requests (override per-scraper)
@@ -152,6 +203,7 @@ class BaseScraper(abc.ABC):
     def __init__(self) -> None:
         self.session = _build_session()
         self._last_request_time: float = 0.0
+        self._async_last_request_time: float = 0.0
         self.logger = logging.getLogger(f"scraper.{self.name}")
         # Pre-load institution tier lookup
         self._tier_lookup: dict[str, int] = self._build_tier_lookup()
@@ -217,6 +269,158 @@ class BaseScraper(abc.ABC):
         self._last_request_time = time.monotonic()
         resp.raise_for_status()
         return resp
+
+    # ── Async HTTP helpers ───────────────────────────────────────────────
+
+    async def _async_throttle(self) -> None:
+        """Async-compatible rate limiter using ``asyncio.sleep``."""
+        elapsed = time.monotonic() - self._async_last_request_time
+        if elapsed < self.rate_limit:
+            await asyncio.sleep(self.rate_limit - elapsed)
+
+    async def async_fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        params: dict | None = None,
+        data: dict | None = None,
+        json_body: dict | None = None,
+        headers: dict | None = None,
+        timeout: int = 30,
+        max_retries: int = 3,
+    ) -> aiohttp.ClientResponse:
+        """Async rate-limited HTTP request with rotating user-agent and retries.
+
+        Returns an aiohttp.ClientResponse whose body has already been read
+        (``response.text`` / ``response.json()`` are cached via ``_body``).
+        """
+        if not _aiohttp_available:
+            raise RuntimeError("aiohttp is not installed; run: pip install aiohttp")
+
+        await self._async_throttle()
+        hdrs = {
+            "User-Agent": _random_ua(),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        if headers:
+            hdrs.update(headers)
+
+        self.logger.debug("async %s %s", method, url)
+        session = await _AsyncSessionManager.get_session()
+
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                resp = await session.request(
+                    method,
+                    url,
+                    params=params,
+                    data=data,
+                    json=json_body,
+                    headers=hdrs,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                )
+                self._async_last_request_time = time.monotonic()
+
+                # Read body eagerly so callers can access .text / .json later
+                await resp.read()
+
+                if resp.status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    backoff = (2 ** attempt) + random.random()
+                    self.logger.debug(
+                        "Retry %d/%d for %s (status %d), waiting %.1fs",
+                        attempt + 1, max_retries, url, resp.status, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                resp.raise_for_status()
+                return resp
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    backoff = (2 ** attempt) + random.random()
+                    self.logger.debug(
+                        "Retry %d/%d for %s (%s), waiting %.1fs",
+                        attempt + 1, max_retries, url, exc, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+
+        raise last_exc or RuntimeError(f"All {max_retries} retries failed for {url}")
+
+    async def async_fetch_text(
+        self,
+        url: str,
+        **kwargs: Any,
+    ) -> str:
+        """Convenience: fetch URL and return response body as text."""
+        resp = await self.async_fetch(url, **kwargs)
+        return await resp.text()
+
+    # ── Async parallel enrichment ────────────────────────────────────────
+
+    async def _async_parallel_enrich(
+        self,
+        jobs: list[dict[str, Any]],
+        enrich_fn,
+        concurrency: int = 4,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Async version of ``_parallel_enrich`` using a semaphore for concurrency.
+
+        *enrich_fn* can be either a sync or async callable.
+        Sync callables are run in the default executor.
+        """
+        to_enrich = jobs[:limit] if limit else jobs
+        passthrough = jobs[limit:] if limit else []
+
+        # Skip jobs whose URL is already in DB
+        need_enrich: list[dict[str, Any]] = []
+        already_done: list[dict[str, Any]] = []
+        try:
+            from src.db import get_connection
+            with get_connection() as conn:
+                for job in to_enrich:
+                    url = job.get("url")
+                    if url:
+                        row = conn.execute(
+                            "SELECT description FROM jobs WHERE url = ?", (url,)
+                        ).fetchone()
+                        if row and row["description"] and len(row["description"]) > 100:
+                            already_done.append(job)
+                            continue
+                    need_enrich.append(job)
+        except Exception:
+            need_enrich = list(to_enrich)
+            already_done = []
+
+        self.logger.info(
+            "Async enriching %d jobs (%d skipped, already in DB)",
+            len(need_enrich), len(already_done),
+        )
+
+        if not need_enrich:
+            return already_done + passthrough
+
+        sem = asyncio.Semaphore(concurrency)
+        is_coro_fn = asyncio.iscoroutinefunction(enrich_fn)
+
+        async def _enrich_one(job: dict[str, Any]) -> dict[str, Any]:
+            async with sem:
+                try:
+                    if is_coro_fn:
+                        return await enrich_fn(job)
+                    else:
+                        loop = asyncio.get_running_loop()
+                        return await loop.run_in_executor(None, enrich_fn, job)
+                except Exception:
+                    return job
+
+        enriched = await asyncio.gather(*[_enrich_one(j) for j in need_enrich])
+        return list(enriched) + already_done + passthrough
 
     # ── Mapping helpers ───────────────────────────────────────────────────
 
@@ -565,3 +769,66 @@ class BaseScraper(abc.ABC):
             self.logger.exception("Scraper %s failed", self.name)
             log_scrape(source=self.name, status="error", error=str(exc))
             return []
+
+    async def async_run(self) -> list[dict[str, Any]]:
+        """Async full scrape cycle: fetch -> enrich -> dedup -> upsert -> log.
+
+        Falls back to running the sync ``scrape()`` in a thread executor
+        if the scraper does not override ``async_scrape()``.
+        """
+        from src.db import log_scrape, upsert_job
+
+        self.logger.info("Starting async scraper: %s", self.name)
+        try:
+            # Use async_scrape if overridden, else run sync scrape in executor
+            if self._has_async_scrape():
+                raw_jobs = await self.async_scrape()
+            else:
+                loop = asyncio.get_running_loop()
+                raw_jobs = await loop.run_in_executor(None, self.scrape)
+            self.logger.info("Raw results: %d", len(raw_jobs))
+
+            enriched = [self.enrich(j) for j in raw_jobs]
+            unique = self._deduplicate(enriched)
+            self.logger.info("After dedup: %d", len(unique))
+
+            new_count = 0
+            for job in unique:
+                try:
+                    _, is_new = upsert_job(job)
+                    if is_new:
+                        new_count += 1
+                except Exception:
+                    self.logger.exception("Failed to upsert job: %s", job.get("url"))
+
+            self.logger.info(
+                "Scraper %s finished: %d found, %d new",
+                self.name,
+                len(unique),
+                new_count,
+            )
+            log_scrape(
+                source=self.name,
+                status="success",
+                jobs_found=len(unique),
+                new_jobs=new_count,
+            )
+            return unique
+
+        except Exception as exc:
+            self.logger.exception("Scraper %s failed", self.name)
+            log_scrape(source=self.name, status="error", error=str(exc))
+            return []
+
+    async def async_scrape(self) -> list[dict[str, Any]]:
+        """Async version of ``scrape()``.
+
+        Override in subclasses that benefit from async HTTP (aiohttp).
+        Default implementation runs the sync ``scrape()`` in a thread executor.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.scrape)
+
+    def _has_async_scrape(self) -> bool:
+        """Check if this scraper has a custom async_scrape implementation."""
+        return type(self).async_scrape is not BaseScraper.async_scrape

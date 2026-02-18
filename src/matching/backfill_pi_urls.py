@@ -70,7 +70,8 @@ def backfill(dry_run: bool = False) -> dict:
             urls = lookup_pi_urls(pi_name, institute, department)
 
             update_fields: dict = {}
-            for key in ("scholar_url", "lab_url", "dept_url", "h_index", "citations"):
+            for key in ("scholar_url", "lab_url", "dept_url", "h_index", "citations",
+                        "recent_papers", "top_cited_papers"):
                 if urls.get(key) and not job.get(key):
                     update_fields[key] = urls[key]
 

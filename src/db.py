@@ -113,6 +113,20 @@ CREATE INDEX IF NOT EXISTS idx_jobs_region ON jobs(region);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_pis_name ON pis(name);
 CREATE INDEX IF NOT EXISTS idx_pis_is_seed ON pis(is_seed);
+
+-- Composite indexes matching common query patterns
+CREATE INDEX IF NOT EXISTS idx_jobs_status_discovered ON jobs(status, discovered_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_region_tier_hindex ON jobs(region ASC, tier ASC, h_index DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_discovered_at ON jobs(discovered_at);
+CREATE INDEX IF NOT EXISTS idx_pis_name_institute ON pis(name, institute);
+CREATE INDEX IF NOT EXISTS idx_pis_recommended_score ON pis(is_recommended, recommendation_score DESC);
+CREATE INDEX IF NOT EXISTS idx_pis_seed_score ON pis(is_seed, recommendation_score DESC);
+CREATE INDEX IF NOT EXISTS idx_coauthorships_pi1_pi2 ON coauthorships(pi_id_1, pi_id_2);
+CREATE INDEX IF NOT EXISTS idx_coauthorships_pi2_pi1 ON coauthorships(pi_id_2, pi_id_1);
+CREATE INDEX IF NOT EXISTS idx_citations_citing ON citations(citing_pi_id, cited_pi_id);
+CREATE INDEX IF NOT EXISTS idx_citations_cited ON citations(cited_pi_id, citing_pi_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_pi_name ON watchlist(pi_name);
+CREATE INDEX IF NOT EXISTS idx_scrape_log_source ON scrape_log(source);
 """
 
 # Columns added after initial schema — applied via ALTER TABLE if missing
@@ -123,6 +137,11 @@ _MIGRATIONS = [
     ("jobs", "pi_research_summary", "TEXT"),
     ("jobs", "dept_url", "TEXT"),
     ("pis", "dept_url", "TEXT"),
+    ("jobs", "recent_papers", "TEXT"),
+    ("jobs", "top_cited_papers", "TEXT"),
+    ("pis", "recent_papers", "TEXT"),
+    ("pis", "top_cited_papers", "TEXT"),
+    ("pis", "s2_author_id", "TEXT"),
 ]
 
 
@@ -147,11 +166,21 @@ def init_db() -> None:
 
 @contextmanager
 def get_connection():
-    """Context manager for database connections."""
+    """Context manager for database connections.
+
+    Applies WAL mode and tuned PRAGMAs for optimal read/write concurrency
+    and reduced I/O overhead on typical workloads (hundreds to low-thousands
+    of rows per table).
+    """
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA cache_size=-8000")          # 8 MB page cache
+    conn.execute("PRAGMA mmap_size=67108864")         # 64 MB memory-mapped I/O
+    conn.execute("PRAGMA journal_size_limit=16777216") # 16 MB WAL size limit
+    conn.execute("PRAGMA temp_store=MEMORY")          # temp tables in RAM
+    conn.execute("PRAGMA synchronous=NORMAL")         # safe with WAL mode
     try:
         yield conn
         conn.commit()
@@ -203,21 +232,26 @@ def get_jobs(
     since: Optional[str] = None,
     limit: int = 500,
 ) -> list[dict]:
-    """Retrieve jobs with optional filters."""
-    query = "SELECT * FROM jobs WHERE 1=1"
-    params = []
+    """Retrieve jobs with optional filters.
+
+    Builds a dynamic WHERE clause so SQLite can use the composite indexes
+    ``idx_jobs_status_discovered`` and ``idx_jobs_region_tier_hindex``.
+    """
+    clauses: list[str] = []
+    params: list = []
 
     if region:
-        query += " AND region = ?"
+        clauses.append("region = ?")
         params.append(region)
     if status:
-        query += " AND status = ?"
+        clauses.append("status = ?")
         params.append(status)
     if since:
-        query += " AND discovered_at >= ?"
+        clauses.append("discovered_at >= ?")
         params.append(since)
 
-    query += " ORDER BY region ASC, tier ASC, h_index DESC LIMIT ?"
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    query = f"SELECT * FROM jobs{where} ORDER BY region ASC, tier ASC, h_index DESC LIMIT ?"
     params.append(limit)
 
     with get_connection() as conn:
@@ -300,11 +334,17 @@ def get_all_pis() -> list[dict]:
 
 
 def add_coauthorship(pi_id_1: int, pi_id_2: int, shared_papers: int = 1) -> None:
-    """Record a coauthorship relationship."""
+    """Record a coauthorship relationship.
+
+    Uses UNION of two indexed lookups instead of OR to allow SQLite to
+    leverage ``idx_coauthorships_pi1_pi2`` and ``idx_coauthorships_pi2_pi1``.
+    """
     with get_connection() as conn:
         existing = conn.execute(
-            "SELECT id, shared_papers FROM coauthorships "
-            "WHERE (pi_id_1 = ? AND pi_id_2 = ?) OR (pi_id_1 = ? AND pi_id_2 = ?)",
+            "SELECT id, shared_papers FROM coauthorships WHERE pi_id_1 = ? AND pi_id_2 = ? "
+            "UNION ALL "
+            "SELECT id, shared_papers FROM coauthorships WHERE pi_id_1 = ? AND pi_id_2 = ? "
+            "LIMIT 1",
             (pi_id_1, pi_id_2, pi_id_2, pi_id_1),
         ).fetchone()
 

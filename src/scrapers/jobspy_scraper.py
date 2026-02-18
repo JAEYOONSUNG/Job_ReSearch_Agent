@@ -130,6 +130,11 @@ class JobSpyScraper(BaseScraper):
         # Extract additional fields from jobspy DataFrame
         salary_min = _safe_str(getattr(row, "min_amount", None))
         salary_max = _safe_str(getattr(row, "max_amount", None))
+        # Strip trailing ".0" from salary values (e.g. "35000.0" -> "35000")
+        if salary_min and salary_min.endswith(".0"):
+            salary_min = salary_min[:-2]
+        if salary_max and salary_max.endswith(".0"):
+            salary_max = salary_max[:-2]
         interval = _safe_str(getattr(row, "interval", None))
         job_type = _safe_str(getattr(row, "job_type", None))
 

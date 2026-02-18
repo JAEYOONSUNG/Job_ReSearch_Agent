@@ -1,39 +1,41 @@
-"""PI URL lookup: Scholar, lab homepage, and department URL.
+"""PI URL lookup: Scholar, lab homepage, department URL, and papers.
 
 Reuses existing infrastructure from seed_profiler and lab_finder,
 adding a caching layer via the pis table and department URL search.
+
+Fallback chain:
+1. Cache check (with negative-cache / 7-day TTL)
+2. Google Scholar direct HTTP scraping -> scholar_url, citations
+3. DDG multi-query -> lab_url  (if Scholar homepage is missing)
+4. Semantic Scholar metadata -> h_index, citations, s2_author_id
+5. S2 paper fetch -> recent_papers, top_cited_papers
+6. Dept URL search
+7. Cache results
 """
 
+import json
 import logging
-import signal
-import threading
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 from src import db
 from src.discovery.lab_finder import (
     _institute_to_domain,
+    _is_valid_lab_url,
     _search_university_directory,
+    find_lab_url_multi_strategy,
 )
-from src.discovery.seed_profiler import _fetch_scholar_profile
+from src.discovery.scholar_scraper import search_scholar_author
+from src.discovery.seed_profiler import (
+    fetch_pi_papers,
+    fetch_semantic_scholar_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT = 1.5  # seconds between external requests
-
-# Circuit breaker: after N consecutive Scholar failures, skip all further attempts
-_SCHOLAR_MAX_FAILURES = 5
-_scholar_consecutive_failures = 0
-_scholar_disabled = False
-_scholar_lock = threading.Lock()
-
-
-class _ScholarTimeout(Exception):
-    pass
-
-
-def _scholar_timeout_handler(signum, frame):
-    raise _ScholarTimeout("Scholar lookup timed out")
+_NEGATIVE_CACHE_DAYS = 7  # skip re-search within this window
 
 
 def _get_cached_pi(name: str, institute: Optional[str] = None) -> Optional[dict]:
@@ -41,17 +43,35 @@ def _get_cached_pi(name: str, institute: Optional[str] = None) -> Optional[dict]
     with db.get_connection() as conn:
         if institute:
             row = conn.execute(
-                "SELECT scholar_url, lab_url, dept_url, h_index, citations "
-                "FROM pis WHERE name = ? AND institute = ?",
+                "SELECT scholar_url, lab_url, dept_url, h_index, citations,"
+                " s2_author_id, recent_papers, top_cited_papers, last_scraped"
+                " FROM pis WHERE name = ? AND institute = ?",
                 (name, institute),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT scholar_url, lab_url, dept_url, h_index, citations "
-                "FROM pis WHERE name = ?",
+                "SELECT scholar_url, lab_url, dept_url, h_index, citations,"
+                " s2_author_id, recent_papers, top_cited_papers, last_scraped"
+                " FROM pis WHERE name = ?",
                 (name,),
             ).fetchone()
         return dict(row) if row else None
+
+
+def _is_negative_cache_valid(cached: dict) -> bool:
+    """Return True if the cached record was scraped recently (within 7 days).
+
+    A record with no URLs but a recent ``last_scraped`` timestamp means
+    we already tried and found nothing -- skip re-searching.
+    """
+    last_scraped = cached.get("last_scraped")
+    if not last_scraped:
+        return False
+    try:
+        ts = datetime.fromisoformat(last_scraped)
+        return (datetime.now() - ts) < timedelta(days=_NEGATIVE_CACHE_DAYS)
+    except (ValueError, TypeError):
+        return False
 
 
 def _lookup_dept_url(
@@ -77,9 +97,12 @@ def _cache_pi_urls(
     h_index: Optional[int] = None,
     citations: Optional[int] = None,
     scholar_id: Optional[str] = None,
+    s2_author_id: Optional[str] = None,
+    recent_papers: Optional[str] = None,
+    top_cited_papers: Optional[str] = None,
 ) -> None:
     """Upsert PI URL data into the pis cache table."""
-    record: dict = {"name": name}
+    record: dict = {"name": name, "last_scraped": datetime.now().isoformat()}
     if institute:
         record["institute"] = institute
     if scholar_url:
@@ -94,43 +117,13 @@ def _cache_pi_urls(
         record["citations"] = citations
     if scholar_id:
         record["scholar_id"] = scholar_id
+    if s2_author_id:
+        record["s2_author_id"] = s2_author_id
+    if recent_papers:
+        record["recent_papers"] = recent_papers
+    if top_cited_papers:
+        record["top_cited_papers"] = top_cited_papers
     db.upsert_pi(record)
-
-
-def _safe_scholar_lookup(pi_name: str, institute: Optional[str]) -> Optional[dict]:
-    """Call _fetch_scholar_profile with a SIGALRM-based hard timeout."""
-    old_handler = signal.signal(signal.SIGALRM, _scholar_timeout_handler)
-    signal.alarm(20)  # 20-second hard kill
-    try:
-        return _fetch_scholar_profile(pi_name, institute)
-    except _ScholarTimeout:
-        logger.warning("Scholar lookup hard-timed-out for %s", pi_name)
-        return None
-    except Exception:
-        logger.debug("Scholar lookup failed for %s", pi_name, exc_info=True)
-        return None
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
-
-
-def _lab_url_from_scholar(scholar_data: dict, pi_name: str, institute: Optional[str]) -> Optional[str]:
-    """Extract lab/homepage URL from Scholar data, or fall back to DDG directory search."""
-    # Scholar profile homepage
-    homepage = scholar_data.get("homepage") if scholar_data else None
-    from src.discovery.lab_finder import _is_valid_lab_url
-    if homepage and _is_valid_lab_url(homepage):
-        return homepage
-
-    # Fall back: search institute directory
-    if institute:
-        domain = _institute_to_domain(institute)
-        if domain:
-            url = _search_university_directory(pi_name, domain, suffix="lab")
-            time.sleep(1.0)
-            if url:
-                return url
-    return None
 
 
 def lookup_pi_urls(
@@ -138,72 +131,116 @@ def lookup_pi_urls(
     institute: Optional[str] = None,
     department: Optional[str] = None,
 ) -> dict:
-    """Look up Scholar URL, lab URL, and dept URL for a PI.
+    """Look up Scholar URL, lab URL, dept URL, and papers for a PI.
 
     Uses the pis table as a cache.  External requests are rate-limited.
-    Thread-safe circuit breaker for Scholar failures.
+    Google Scholar uses its own circuit breaker (in scholar_scraper).
+
+    Fallback chain:
+    1. Cache check (with 7-day negative cache TTL)
+    2. Google Scholar direct scraping -> scholar_url, citations
+    3. DDG multi-query -> lab_url (if Scholar homepage absent)
+    4. Semantic Scholar -> h_index, citations, s2_author_id
+    5. S2 paper fetch -> recent_papers, top_cited_papers
+    6. Dept URL search
+    7. Cache results
 
     Returns
     -------
-    dict with keys: scholar_url, lab_url, dept_url, h_index, citations
+    dict with keys: scholar_url, lab_url, dept_url, h_index, citations,
+                    recent_papers, top_cited_papers
     """
-    global _scholar_consecutive_failures, _scholar_disabled
-
     result: dict = {
         "scholar_url": None,
         "lab_url": None,
         "dept_url": None,
         "h_index": None,
         "citations": None,
+        "recent_papers": None,
+        "top_cited_papers": None,
     }
 
-    # 1. Cache check (including negative results — cached None means "already tried")
+    # 1. Cache check
     cached = _get_cached_pi(pi_name, institute)
     if cached:
-        result.update({k: v for k, v in cached.items() if v})
+        result.update({k: v for k, v in cached.items() if v and k != "last_scraped"})
         has_scholar = bool(cached.get("scholar_url"))
         has_lab = bool(cached.get("lab_url"))
         has_dept = bool(cached.get("dept_url"))
-        if has_scholar and has_lab and has_dept:
+        has_papers = bool(cached.get("recent_papers"))
+
+        # Full cache hit
+        if has_scholar and has_lab and has_dept and has_papers:
             logger.debug("Full cache hit for %s", pi_name)
             return result
 
-    # 2. Scholar search (single call — also extracts homepage for lab URL)
-    scholar_data = None
-    if not result.get("scholar_url") and not _scholar_disabled:
-        logger.info("Fetching Scholar profile for %s", pi_name)
-        scholar_data = _safe_scholar_lookup(pi_name, institute)
-        time.sleep(_RATE_LIMIT)
+        # Negative cache: already tried recently and found nothing -- skip
+        if not has_scholar and not has_lab and _is_negative_cache_valid(cached):
+            logger.debug("Negative cache hit for %s (within %d days)", pi_name, _NEGATIVE_CACHE_DAYS)
+            return result
 
-        with _scholar_lock:
-            if scholar_data:
-                _scholar_consecutive_failures = 0
-                result["scholar_url"] = scholar_data.get("scholar_url")
-                result["h_index"] = scholar_data.get("h_index")
-                result["citations"] = scholar_data.get("citations")
-            else:
-                _scholar_consecutive_failures += 1
-                if _scholar_consecutive_failures >= _SCHOLAR_MAX_FAILURES:
-                    _scholar_disabled = True
-                    logger.warning(
-                        "Scholar circuit breaker tripped after %d failures",
-                        _scholar_consecutive_failures,
-                    )
+    # 2. Google Scholar direct scraping (with built-in circuit breaker)
+    #    Skip single-name PIs (too ambiguous for Scholar search)
+    is_single_name = " " not in pi_name.strip()
+    s2_author_id = cached.get("s2_author_id") if cached else None
 
-    # 3. Lab URL (from Scholar homepage or directory search — no second Scholar call)
+    if not result.get("scholar_url") and not is_single_name:
+        logger.info("Fetching Scholar profile for %s (direct scrape)", pi_name)
+        gs_data = search_scholar_author(pi_name, institute)
+
+        if gs_data:
+            result["scholar_url"] = gs_data.get("scholar_url")
+            # Use GS cited_by as citations if we don't have it yet
+            gs_cited = gs_data.get("cited_by")
+            if gs_cited and result.get("citations") is None:
+                result["citations"] = gs_cited
+
+    # 3. DDG multi-query lab URL (if Scholar homepage didn't provide one)
+    #    For single-name PIs, combine with institute for better results
     if not result.get("lab_url"):
-        lab_url = _lab_url_from_scholar(scholar_data, pi_name, institute)
+        logger.debug("Trying DDG multi-query for %s", pi_name)
+        lab_url = find_lab_url_multi_strategy(pi_name, institute)
         if lab_url:
             result["lab_url"] = lab_url
 
-    # 4. Dept URL search (if needed)
+    # 4. Semantic Scholar metadata (h_index, citations, homepage, authorId)
+    #    Now supports single-name PIs by cross-referencing with institute
+    s2_meta = None
+    if result.get("h_index") is None or result.get("citations") is None or not s2_author_id:
+        logger.debug("Trying Semantic Scholar metadata for %s", pi_name)
+        s2_meta = fetch_semantic_scholar_metadata(pi_name, institute)
+        if s2_meta:
+            if result.get("h_index") is None and s2_meta.get("h_index") is not None:
+                result["h_index"] = s2_meta["h_index"]
+            if result.get("citations") is None and s2_meta.get("citations") is not None:
+                result["citations"] = s2_meta["citations"]
+            # S2 may return full name for single-name PIs -- update the result
+            if is_single_name and s2_meta.get("full_name"):
+                result["_full_name"] = s2_meta["full_name"]
+            # Bonus: S2 homepage as lab_url fallback
+            if not result.get("lab_url") and s2_meta.get("homepage"):
+                if _is_valid_lab_url(s2_meta["homepage"]):
+                    result["lab_url"] = s2_meta["homepage"]
+            # Capture authorId for paper fetching
+            if s2_meta.get("authorId"):
+                s2_author_id = s2_meta["authorId"]
+
+    # 5. S2 paper fetch (recent + top cited)
+    if not result.get("recent_papers") and s2_author_id:
+        logger.debug("Fetching S2 papers for %s (author_id=%s)", pi_name, s2_author_id)
+        paper_data = fetch_pi_papers(pi_name, institute, s2_author_id=s2_author_id)
+        if paper_data:
+            result["recent_papers"] = json.dumps(paper_data["recent_papers"])
+            result["top_cited_papers"] = json.dumps(paper_data["top_cited_papers"])
+
+    # 6. Dept URL search (if needed)
     if not result.get("dept_url") and department:
         dept_url = _lookup_dept_url(department, institute)
         time.sleep(_RATE_LIMIT)
         if dept_url:
             result["dept_url"] = dept_url
 
-    # 5. Cache the results (including empty ones to avoid re-searching)
+    # 7. Cache the results
     _cache_pi_urls(
         name=pi_name,
         institute=institute,
@@ -212,6 +249,9 @@ def lookup_pi_urls(
         dept_url=result.get("dept_url"),
         h_index=result.get("h_index"),
         citations=result.get("citations"),
+        s2_author_id=s2_author_id,
+        recent_papers=result.get("recent_papers"),
+        top_cited_papers=result.get("top_cited_papers"),
     )
 
     return result

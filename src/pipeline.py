@@ -298,35 +298,22 @@ def run_dept_enrichment(jobs: list[dict]) -> list[dict]:
     # Phase 2: DDG search for uncached (with circuit breaker)
     consecutive_failures = 0
     searched = 0
-    # Parallel DDG lookups with circuit breaker
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    _ddg_failures = 0
-    _ddg_lock = __import__("threading").Lock()
-    _stop = False
+    # Sequential DDG lookups (DDG rate-limits parallel requests aggressively)
+    consecutive_failures = 0
+    for inst, dept in uncached_keys:
+        if consecutive_failures >= 5:
+            logger.warning("DDG circuit breaker after %d failures, deferring rest", consecutive_failures)
+            break
 
-    def _search_one(key: tuple[str, str]) -> tuple[tuple, str | None]:
-        nonlocal _ddg_failures, _stop
-        if _stop:
-            return key, None
-        inst, dept = key
         url = _lookup_dept(inst, dept)
-        with _ddg_lock:
-            if url:
-                _ddg_failures = 0
-            else:
-                _ddg_failures += 1
-                if _ddg_failures >= 5:
-                    _stop = True
-                    logger.warning("DDG circuit breaker after %d failures", _ddg_failures)
-        return key, url
+        _save_dept_cache(inst, dept, url)
+        key_to_url[(inst, dept)] = url
+        searched += 1
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_search_one, k): k for k in uncached_keys}
-        for future in as_completed(futures):
-            key, url = future.result()
-            _save_dept_cache(key[0], key[1], url)
-            key_to_url[key] = url
-            searched += 1
+        if url:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
 
     # Phase 3: apply to jobs and persist to DB
     from src.db import get_connection

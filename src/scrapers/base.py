@@ -7,8 +7,10 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime
+from html import unescape as html_unescape
 from typing import Any
 
 import requests
@@ -125,6 +127,7 @@ def _build_session(
         status_forcelist=list(status_forcelist),
         allowed_methods=["GET", "HEAD", "POST"],
         raise_on_status=False,
+        respect_retry_after_header=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
@@ -329,9 +332,29 @@ class BaseScraper(abc.ABC):
 
         return None
 
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        """Decode HTML entities and remove garbage from a job title."""
+        if not title:
+            return title
+        # Decode HTML entities: &#39; -> ', &amp; -> &, etc.
+        title = html_unescape(title)
+        # Remove stray >>> or <<< (LinkedIn artefact)
+        title = re.sub(r"\s*>{2,}\s*", " ", title)
+        title = re.sub(r"\s*<{2,}\s*", " ", title)
+        # Remove "Empty heading" artefact
+        title = re.sub(r"\s*Empty heading\s*", " ", title, flags=re.IGNORECASE)
+        # Collapse whitespace
+        title = re.sub(r"\s{2,}", " ", title).strip()
+        return title
+
     def enrich(self, job: dict[str, Any]) -> dict[str, Any]:
         """Fill in region, tier, source, and parse structured fields."""
         job.setdefault("source", self.name)
+
+        # Clean title
+        if job.get("title"):
+            job["title"] = self._clean_title(job["title"])
 
         # Try to detect country if missing
         country = job.get("country")
@@ -340,7 +363,7 @@ class BaseScraper(abc.ABC):
             blob = " ".join(filter(None, [
                 job.get("title"),
                 job.get("institute"),
-                job.get("description", "")[:500],
+                (job.get("description") or "")[:500],
                 job.get("field"),
             ]))
             country = self.guess_country(blob)
@@ -360,13 +383,33 @@ class BaseScraper(abc.ABC):
 
         # Parse structured fields from description
         desc = job.get("description", "")
+
+        # Extract PI name from title Lab patterns (e.g. "Badran Lab")
+        if not job.get("pi_name") and job.get("title"):
+            from src.matching.job_parser import extract_pi_from_title
+            pi_from_title = extract_pi_from_title(job["title"])
+            if pi_from_title:
+                job["pi_name"] = pi_from_title
+
+        # Expand single last name from title to full name using description
+        if job.get("pi_name") and " " not in job["pi_name"] and desc:
+            from src.matching.job_parser import expand_pi_last_name
+            full_name = expand_pi_last_name(job["pi_name"], desc)
+            if full_name:
+                job["pi_name"] = full_name
+
         if desc:
-            from src.matching.job_parser import parse_job_posting, extract_pi_name
-            # Always try PI name extraction, even if requirements are set
+            from src.matching.job_parser import parse_job_posting, extract_pi_name, extract_deadline
+            # Always try PI name extraction from description
             if not job.get("pi_name"):
                 pi = extract_pi_name(desc)
                 if pi:
                     job["pi_name"] = pi
+            # Extract deadline if not already set
+            if not job.get("deadline"):
+                deadline = extract_deadline(desc)
+                if deadline:
+                    job["deadline"] = deadline
             # Parse requirements/conditions/keywords if not already set
             if not job.get("requirements"):
                 parsed = parse_job_posting(desc)

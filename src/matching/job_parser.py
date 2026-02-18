@@ -18,20 +18,53 @@ from typing import Any, Optional
 # PI Name extraction patterns
 # ---------------------------------------------------------------------------
 
+# Reusable fragments for PI patterns
+# Academic title prefix — handles "Prof.", "Dr.", "Prof. Dr.", "dr hab.", etc.
+_TITLE = (
+    r"(?:Prof(?:essor)?\.?\s+Dr\.?\s+"       # "Prof. Dr. "
+    r"|dr\s+hab\.?\s+"                         # "dr hab. " (Polish habilitation)
+    r"|(?:Prof(?:essor)?|Dr|Assoc\.?\s*Prof|Asst\.?\s*Prof)\.?\s+)"  # standard titles
+)
+_TITLE_OPT = f"(?:{_TITLE})?"
+
+# Person name — Unicode-aware (handles ł, ń, ö, é, ř, etc.)
+_UC = r"[A-ZÀ-ÖØ-Þ\u0100-\u017E]"   # uppercase first letter (incl. Latin Extended-A)
+_LC = r"[a-zà-öø-ÿ\u0100-\u017E]"   # lowercase continuation (incl. ł, ń, ś, etc.)
+_FIRST = rf"{_UC}{_LC}+"       # first name: "John", "José", "Joanna"
+_MID = rf"(?:\s+{_UC}\.?)?"    # optional middle initial: " J." or " A"
+_LAST = rf"{_UC}{_LC}+(?:-{_UC}{_LC}+)?"  # last name: "Smith", "Basta-Kaim"
+_FULL_NAME = rf"({_FIRST}{_MID}\s+{_LAST})"  # captured full name
+
 # Patterns that typically precede a PI name in job postings
 _PI_PATTERNS = [
     # "Lab of Dr. John Smith", "Laboratory of Prof. Jane Doe"
-    r"(?:lab(?:oratory)?|group|team)\s+(?:of|led by|headed by|directed by)\s+(?:(?:Prof(?:essor)?|Dr|Assoc\.?\s*Prof|Asst\.?\s*Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)",
+    rf"(?:lab(?:oratory)?|group|team)\s+(?:of|led by|headed by|directed by)\s+{_TITLE_OPT}{_FULL_NAME}",
     # "PI: John Smith" or "Principal Investigator: Dr. Jane Doe"
-    r"(?:PI|Principal\s+Investigator|Supervisor|Advisor|Adviser)\s*[:=]\s*(?:(?:Prof(?:essor)?|Dr|Assoc\.?\s*Prof|Asst\.?\s*Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)",
+    # Also: "Project leader:", "Program Coordinator", "Reporting to:", "Head of project"
+    # \b prevents matching "PI" inside "EXPIRED", "OPIS" etc.
+    rf"\b(?:PI|Principal\s+Investigator|Supervisor|Advisor|Adviser|Project\s+(?:leader|coordinator)|Program\s+Coordinator|Reporting\s+to|Head\s+of\s+(?:programme|project))\s*[:=\-]?\s*{_TITLE_OPT}{_FULL_NAME}",
     # "Prof. John Smith's lab" or "Dr. Jane Doe's group"
-    r"(?:Prof(?:essor)?|Dr|Assoc\.?\s*Prof|Asst\.?\s*Prof)\.?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)'?s?\s+(?:lab(?:oratory)?|group|team|research)",
+    rf"{_TITLE}{_FULL_NAME}'?s?\s+(?:lab(?:oratory)?|group|team|research)",
     # "under the supervision of Dr. John Smith"
-    r"(?:under the )?(?:supervision|direction|guidance|mentorship)\s+of\s+(?:(?:Prof(?:essor)?|Dr|Assoc\.?\s*Prof|Asst\.?\s*Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)",
+    rf"(?:under the )?(?:supervision|direction|guidance|mentorship)\s+of\s+{_TITLE_OPT}{_FULL_NAME}",
     # "contact Dr. John Smith" or "Contact: Prof. Jane Doe"
-    r"(?:contact|inquiries?|questions?)\s*:?\s*(?:(?:Prof(?:essor)?|Dr|Assoc\.?\s*Prof|Asst\.?\s*Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)\s*(?:at|@|\()",
+    rf"(?:contact|inquiries?|questions?|message\s+to|directed\s+to(?:\s+both)?)\s*:?\s*{_TITLE_OPT}{_FULL_NAME}\s*(?:at|@|\(|\[at\])",
     # "The [Name] Lab" or "[Name] Laboratory"
-    r"(?:The\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)\s+(?:Lab(?:oratory)?|Group|Team)(?:\s|,|\.)",
+    rf"(?:The\s+)?{_FULL_NAME}\s+(?:Lab(?:oratory)?|Group|Team)(?:\s|,|\.)",
+    # "directed/supervised by Dr. Mitchell Ho" (lab/group prefix not required)
+    rf"(?:directed|headed|led|managed|run|supervised)\s+by\s+{_TITLE_OPT}{_FULL_NAME}",
+    # "join Dr. Mitchell Ho" or "work with Prof. Smith"
+    rf"(?:join|work\s+with|collaborat\w+\s+with|assist)\s+{_TITLE}{_FULL_NAME}",
+    # "lab/group/team led by Dr. Name" (passive)
+    rf"(?:lab(?:oratory)?|group|team|unit)\s+(?:is\s+)?(?:led|headed|directed|supervised|run)\s+by\s+{_TITLE_OPT}{_FULL_NAME}",
+    # "in the Name lab/group" (embedded)
+    rf"in\s+(?:the\s+)?(?:(?:Prof|Dr)\.?\s+)?{_FULL_NAME}\s+(?:lab(?:oratory)?|group|team)",
+    # "mentor: Dr. Name" or "mentored by Name"
+    rf"(?:mentor(?:ed)?|mentoring)\s*(?:by|is|:)\s*{_TITLE_OPT}{_FULL_NAME}",
+    # "led at [institution] by Prof. Name" (gap between verb and "by")
+    rf"(?:directed|headed|led|supervised)\s+(?:at|in)\s+(?:the\s+)?\w[\w\s,]{{0,60}}?\s+by\s+{_TITLE_OPT}{_FULL_NAME}",
+    # Parenthetical PI mention: "(Prof. Name, url)" or "(supervised by Dr. Name)"
+    rf"\({_TITLE}{_FULL_NAME}(?:\s*,|\s*\))",
 ]
 
 _PI_COMPILED = [re.compile(p, re.IGNORECASE) for p in _PI_PATTERNS]
@@ -64,6 +97,14 @@ _FALSE_POSITIVE_NAMES = {
     "climate change", "global health", "public health",
     "organic chemistry", "physical chemistry", "analytical chemistry",
     "prokaryotic gene", "eukaryotic gene",
+    # Common false positives from actual data
+    "cellular signalling", "central hr", "chan research",
+    "ecology research", "environmental dna", "health equity",
+    "join our", "marine modelling", "network development",
+    "renewable energy", "ridge national",
+    # False positives from page boilerplate / non-name phrases
+    "red apply", "mechanics employment", "description the",
+    "hill anton",  # "Chapel Hill" + "Anton lab" misparse
 }
 
 
@@ -245,7 +286,7 @@ def _is_valid_name(name: str) -> bool:
         "the", "a", "an", "this", "that", "our", "their", "his", "her",
         "new", "old", "full", "part", "more", "all", "any", "each",
         "perform", "conduct", "manage", "develop", "lead", "apply",
-        "research", "senior", "junior", "assistant", "associate",
+        "research", "senior", "junior", "assistant", "associate", "postdoctoral", "fellow", "position",
         "earth", "life", "data", "cell", "gene", "protein",
         "biological", "biomedical", "clinical", "computational",
         "discovery", "priming", "romanian", "european", "american",
@@ -289,6 +330,14 @@ def _is_valid_name(name: str) -> bool:
     }
     if all(w in common_words for w in words):
         return False
+    # Reject two-word "names" where second word is a common non-surname
+    non_surname_seconds = {
+        "research", "biology", "dna", "hr", "national", "modelling",
+        "energy", "equity", "signalling", "signaling",
+        "employment", "apply", "expired", "status", "description",
+    }
+    if len(words) == 2 and words[1] in non_surname_seconds:
+        return False
     return True
 
 
@@ -313,12 +362,93 @@ def extract_pi_name(text: str) -> Optional[str]:
     if not text:
         return None
 
+    # Normalize whitespace (newlines inside names break matching)
+    text = re.sub(r"\s+", " ", text)
+
     for pattern in _PI_COMPILED:
         m = pattern.search(text)
         if m:
             name = m.group(1).strip()
             if _is_valid_name(name):
                 return name
+    return None
+
+
+def expand_pi_last_name(last_name: str, text: str) -> str | None:
+    """Expand a single last name (from title) to a full name using description text.
+
+    Searches for patterns like "Dr./Prof. First Last" or "First Last" where
+    *Last* matches the given surname.  Returns the full name or ``None``.
+    """
+    if not last_name or not text:
+        return None
+
+    text = re.sub(r"\s+", " ", text)  # normalise whitespace
+
+    # 1. "Dr./Prof. First Last" where Last matches
+    pattern1 = rf"{_TITLE}({_FIRST}{_MID})\s+{re.escape(last_name)}"
+    m = re.search(pattern1, text, re.IGNORECASE)
+    if m:
+        full = f"{m.group(1)} {last_name}"
+        if _is_valid_name(full):
+            return full
+
+    # 2. "First Last" where Last matches and First is capitalised
+    pattern2 = rf"\b({_UC}{_LC}{{2,}})\s+{re.escape(last_name)}\b"
+    for m in re.finditer(pattern2, text):
+        candidate = f"{m.group(1)} {last_name}"
+        if _is_valid_name(candidate):
+            return candidate
+
+    return None
+
+
+# Title-specific Lab patterns (shorter names, different context)
+_TITLE_LAB_PATTERNS = [
+    # "Badran Lab", "Kampmann Lab", "Vardhana Lab" (single last name + Lab)
+    r"(?:^|[\s\-\(])([A-Z][a-z]{2,})\s+Lab(?:oratory)?(?:[\s\)\-,.]|$)",
+    # "(Coruzzi Lab)", "[Smith Lab]"
+    r"[\(\[]([A-Z][a-z]{2,})\s+Lab(?:oratory)?[\)\]]",
+    # "Laimins Laboratory", "Bhatt Lab"
+    r"(?:^|[\s\-])([A-Z][a-z]{2,})\s+Lab(?:oratory)?(?:\s|$|[,\-])",
+    # "Dr. Wan's Lab", "Dr. Nguyen's lab"
+    r"(?:Dr|Prof)\.?\s+([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]+)?)'?s?\s+[Ll]ab",
+    # "in Jeffrey J. Gray's ... Lab" (possessive full name in title — apostrophe-s required)
+    r"(?:^|[\s\-])(?:(?:Dr|Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)'s\s+(?:.*?\s)?(?:Lab|Laboratory)",
+]
+_TITLE_LAB_COMPILED = [re.compile(p) for p in _TITLE_LAB_PATTERNS]
+
+# Last names that are false positives for Lab patterns
+_LAB_FALSE_POSITIVES = {
+    "research", "biology", "science", "clinical", "national",
+    "animal", "federal", "central", "virtual", "digital",
+    "mobile", "advanced", "applied", "general", "special",
+    "teaching", "testing", "training", "fabrication", "innovation",
+    "computer", "media", "data", "design",
+}
+
+
+def extract_pi_from_title(title: str) -> Optional[str]:
+    """Extract a PI last name (or full name) from a job title.
+
+    Targets patterns like "Badran Lab", "Dr. Wan's Lab", "(Coruzzi Lab)".
+    Returns the extracted name, or None.
+    """
+    if not title:
+        return None
+
+    for pattern in _TITLE_LAB_COMPILED:
+        m = pattern.search(title)
+        if m:
+            name = m.group(1).strip()
+            if name.lower() in _LAB_FALSE_POSITIVES:
+                continue
+            if len(name) < 3:
+                continue
+            # For multi-word names, apply full validation
+            if " " in name and not _is_valid_name(name):
+                continue
+            return name
     return None
 
 
@@ -409,6 +539,263 @@ def extract_keywords(text: str) -> list[str]:
 def extract_job_description(text: str) -> Optional[str]:
     """Extract the main job/research description section."""
     return extract_section(text, _DESCRIPTION_HEADERS, max_chars=2000)
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn / Indeed description cleaner & structured parser
+# ---------------------------------------------------------------------------
+
+# Boilerplate lines to strip from LinkedIn scraped descriptions
+_LINKEDIN_NOISE = re.compile(
+    r"^(?:"
+    r"Apply|Save|Report this job|"
+    r"Sign in (?:to |with ).*|"
+    r"Use AI to assess.*|"
+    r"Get AI-powered.*|"
+    r"Am I a good fit.*|"
+    r"Tailor my resume|"
+    r"New to LinkedIn\?|"
+    r"Join now|"
+    r"See who .* has hired.*|"
+    r"By clicking .*|"
+    r"User Agreement|Privacy Policy|Cookie Policy|"
+    r"\d+ (?:applicants?|days? ago)|"
+    r"Over \d+ applicants|"
+    r"Be among the first.*"
+    r")$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Section headers recognized in structured LinkedIn/Indeed descriptions
+_STRUCTURED_SECTIONS = {
+    "summary": re.compile(
+        r"^(?:Position |Job )?Summary\s*[:.]?\s*$|"
+        r"^About (?:the |this )?(?:Position|Role|Opportunity)\s*[:.]?\s*$|"
+        r"^Overview\s*[:.]?\s*$|"
+        r"^Description\s*[:.]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    "responsibilities": re.compile(
+        r"^(?:Position |Key |Primary )?Responsibilities\s*[:.]?\s*$|"
+        r"^(?:Key |Major )?(?:Duties|Tasks)\s*[:.]?\s*$|"
+        r"^What (?:you'll|you will) do\s*[:.]?\s*$|"
+        r"^The Role\s*[:.]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    "requirements": re.compile(
+        r"^(?:Position |Minimum )?(?:Requirements?|Qualifications?)\s*[:.]?\s*$|"
+        r"^(?:Required |Minimum )?(?:Education|Experience|Skills)(?: and Experience)?\s*[:.]?\s*$|"
+        r"^What (?:you'll|you will) (?:need|bring)\s*[:.]?\s*$|"
+        r"^Who you are\s*[:.]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    "preferred": re.compile(
+        r"^Preferred\s+(?:Experience|Education|Skills|Qualifications?)\s*[:.]?\s*$|"
+        r"^(?:Nice to have|Desired|Bonus)\s*[:.]?\s*$|"
+        r"^Additional (?:Skills|Qualifications?)\s*[:.]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    "conditions": re.compile(
+        r"^(?:Compensation|Salary|Pay|Benefits?|What we offer)\s*[:.]?\s*$|"
+        r"^(?:Contract|Employment) (?:Type|Details?|Terms?)\s*[:.]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+}
+
+
+def clean_linkedin_description(text: str) -> str:
+    """Strip LinkedIn UI boilerplate from scraped job descriptions.
+
+    Removes 'Apply', 'Save', 'Sign in with Email', 'Cookie Policy' lines etc.
+    Also strips the repeated title/company/location header that LinkedIn duplicates.
+    """
+    if not text:
+        return ""
+
+    # Remove boilerplate lines
+    text = _LINKEDIN_NOISE.sub("", text)
+
+    # Remove duplicated title/company block at top (LinkedIn shows it twice)
+    lines = text.split("\n")
+    # Find and remove the second occurrence of the first non-empty line
+    first_line = ""
+    for line in lines:
+        if line.strip():
+            first_line = line.strip()
+            break
+    if first_line and len(first_line) > 5:
+        count = 0
+        cleaned = []
+        for line in lines:
+            if line.strip() == first_line:
+                count += 1
+                if count <= 1:
+                    cleaned.append(line)
+                # Skip duplicates
+            else:
+                cleaned.append(line)
+        text = "\n".join(cleaned)
+
+    # Collapse excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def parse_structured_description(text: str) -> dict[str, str]:
+    """Parse a job description into structured sections.
+
+    Returns a dict with keys: summary, responsibilities, requirements,
+    preferred, conditions. Empty sections are omitted.
+    """
+    if not text:
+        return {}
+
+    text = clean_linkedin_description(text)
+
+    result: dict[str, str] = {}
+
+    # Find all section header positions
+    positions: list[tuple[int, int, str]] = []
+    for section_name, pattern in _STRUCTURED_SECTIONS.items():
+        for m in pattern.finditer(text):
+            positions.append((m.start(), m.end(), section_name))
+
+    if not positions:
+        return {}
+
+    # Sort by position in text
+    positions.sort(key=lambda x: x[0])
+
+    # Extract text between consecutive headers
+    for i, (start, end, name) in enumerate(positions):
+        if name in result:
+            continue  # keep first occurrence
+        next_start = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        section_text = text[end:next_start].strip()
+        if section_text and len(section_text) > 10:
+            result[name] = section_text[:2000]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Deadline extraction
+# ---------------------------------------------------------------------------
+
+# Date patterns — matches common date formats in job postings
+_MONTH_NAMES = (
+    r"(?:January|February|March|April|May|June|July|August|September|October|November|December"
+    r"|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?"
+)
+
+# "March 15, 2026" or "15 March 2026" or "Mar 15, 2026"
+_DATE_MDY = rf"({_MONTH_NAMES})\s+(\d{{1,2}}),?\s+(\d{{4}})"
+_DATE_DMY = rf"(\d{{1,2}})\s+({_MONTH_NAMES})\s+(\d{{4}})"
+# "2026-03-15" or "2026/03/15"
+_DATE_ISO = r"(\d{4})[-/](\d{2})[-/](\d{2})"
+# "15/03/2026" or "15.03.2026"
+_DATE_EU = r"(\d{1,2})[./](\d{1,2})[./](\d{4})"
+
+_DEADLINE_CONTEXT_PATTERNS = [
+    # "Deadline: <date>" or "Application deadline: <date>"
+    r"(?:application\s+)?deadline\s*[:=]\s*",
+    # "Closing date: <date>"
+    r"closing\s+date\s*[:=]\s*",
+    # "Applications must be received by <date>"
+    r"(?:applications?|submissions?)\s+(?:must be|should be|are)\s+(?:received|submitted)\s+(?:by|before|no later than)\s+",
+    # "Apply by <date>" or "Apply before <date>"
+    r"apply\s+(?:by|before)\s+",
+    # "open until <date>"
+    r"(?:position|posting|vacancy|job)\s+(?:is\s+)?open\s+(?:until|through|till)\s+",
+    # "Review of applications will begin <date>"
+    r"review\s+of\s+(?:applications?|candidates?)\s+(?:will\s+)?(?:begin|start|commence)\s*(?:on)?\s*",
+]
+
+_DEADLINE_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DEADLINE_CONTEXT_PATTERNS]
+_DATE_PATTERNS = [
+    re.compile(_DATE_MDY, re.IGNORECASE),
+    re.compile(_DATE_DMY, re.IGNORECASE),
+    re.compile(_DATE_ISO),
+    re.compile(_DATE_EU),
+]
+
+_MONTH_MAP = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
+    "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+
+
+def _parse_date_string(text: str) -> Optional[str]:
+    """Try to parse a date from *text* and return ISO format (YYYY-MM-DD).
+
+    Handles: "March 15, 2026", "15 March 2026", "2026-03-15",
+    "15/03/2026", "Mar 15, 2026".
+    """
+    # MDY: "March 15, 2026"
+    m = re.match(_DATE_MDY, text, re.IGNORECASE)
+    if m:
+        month_str, day, year = m.group(1), m.group(2), m.group(3)
+        month = _MONTH_MAP.get(month_str.rstrip(".").lower())
+        if month:
+            return f"{year}-{month:02d}-{int(day):02d}"
+
+    # DMY: "15 March 2026"
+    m = re.match(_DATE_DMY, text, re.IGNORECASE)
+    if m:
+        day, month_str, year = m.group(1), m.group(2), m.group(3)
+        month = _MONTH_MAP.get(month_str.rstrip(".").lower())
+        if month:
+            return f"{year}-{month:02d}-{int(day):02d}"
+
+    # ISO: "2026-03-15"
+    m = re.match(_DATE_ISO, text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    # EU: "15/03/2026" or "15.03.2026"
+    m = re.match(_DATE_EU, text)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year}-{month:02d}-{day:02d}"
+
+    return None
+
+
+def extract_deadline(text: str) -> Optional[str]:
+    """Extract application deadline date from job posting text.
+
+    Searches for deadline-related keywords followed by date patterns.
+    Returns the date in ISO format (YYYY-MM-DD) or None.
+    """
+    if not text:
+        return None
+
+    # Strategy 1: Look for deadline keywords followed by a date
+    for pattern in _DEADLINE_COMPILED:
+        m = pattern.search(text)
+        if not m:
+            continue
+        # Extract the text after the keyword (up to 50 chars)
+        after = text[m.end():m.end() + 50]
+        date = _parse_date_string(after.strip())
+        if date:
+            return date
+
+    # Strategy 2: Look for "Deadline" section header
+    deadline_section = extract_section(text, [r"deadline\s*[:.]"])
+    if deadline_section:
+        # Try to find a date in the first 100 chars of the section
+        for dp in _DATE_PATTERNS:
+            dm = dp.search(deadline_section[:100])
+            if dm:
+                date = _parse_date_string(dm.group(0))
+                if date:
+                    return date
+
+    return None
 
 
 def parse_job_posting(text: str) -> dict[str, Any]:

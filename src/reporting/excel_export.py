@@ -55,23 +55,39 @@ def _clean_text(text: str | None, max_len: int = 500) -> str:
     return text[:max_len]
 
 
-def _format_papers(papers_json: str | None) -> str:
-    """Format JSON paper list to '(Year) Title [N cites]; ...' display string."""
+_MAX_PAPER_COLS = 5  # number of individual paper columns
+
+
+def _parse_papers(papers_json: str | None) -> list[dict]:
+    """Parse JSON paper list into a list of paper dicts."""
     if not papers_json:
-        return ""
+        return []
     try:
         papers = json.loads(papers_json)
     except (json.JSONDecodeError, TypeError):
-        return ""
-    if not papers:
-        return ""
-    parts = []
-    for p in papers:
-        year = p.get("year") or "?"
-        title = (p.get("title") or "Untitled")[:80]
-        cites = p.get("citation_count", 0)
-        parts.append(f"({year}) {title} [{cites} cites]")
-    return "; ".join(parts)
+        return []
+    return papers if isinstance(papers, list) else []
+
+
+def _papers_to_columns(prefix: str, papers: list[dict]) -> dict[str, str]:
+    """Convert a list of paper dicts to individual column values.
+
+    Returns e.g. {"Recent Paper 1": "(2024) Title [10 cites]", ...}.
+    The display text is used as a placeholder; actual hyperlinks are written
+    by _write_paper_links() after the DataFrame is exported.
+    """
+    result: dict[str, str] = {}
+    for i in range(_MAX_PAPER_COLS):
+        col_name = f"{prefix} {i + 1}"
+        if i < len(papers):
+            p = papers[i]
+            year = p.get("year") or "?"
+            title = (p.get("title") or "Untitled")[:80]
+            cites = p.get("citation_count", 0)
+            result[col_name] = f"({year}) {title} [{cites} cites]"
+        else:
+            result[col_name] = ""
+    return result
 
 
 def _clean_list(text: str | None, max_len: int = 400) -> str:
@@ -244,9 +260,9 @@ JOB_COLUMNS = [
     "Deadline",
     # Description
     "Description",
-    # PI Papers
-    "Recent Papers (5)",
-    "Top Cited Papers (5)",
+    # PI Papers — individual columns
+    *[f"Recent Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
+    *[f"Top Cited Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
     # Links
     "Job URL",
     "Lab URL",
@@ -304,9 +320,9 @@ def _job_to_row(job: dict) -> dict:
         "Deadline": job.get("deadline") or "",
         # Description
         "Description": _clean_text(desc, 1500),
-        # PI Papers
-        "Recent Papers (5)": _format_papers(job.get("recent_papers")),
-        "Top Cited Papers (5)": _format_papers(job.get("top_cited_papers")),
+        # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
+        **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
+        **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
         # Links
         "Job URL": job.get("url") or "",
         "Lab URL": job.get("lab_url") or "",
@@ -333,6 +349,69 @@ def _pi_to_row(pi: dict) -> dict:
         "Lab URL": pi.get("lab_url", ""),
         "Scholar URL": pi.get("scholar_url", ""),
     }
+
+
+def _write_paper_links(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    df: pd.DataFrame,
+    jobs: list[dict],
+) -> None:
+    """Overwrite paper cells with clickable hyperlinks pointing to S2/DOI URLs."""
+    worksheet = writer.sheets[sheet_name]
+    workbook = writer.book
+    link_fmt = workbook.add_format({
+        "font_color": "#0563C1",
+        "underline": True,
+        "valign": "vcenter",
+        "text_wrap": True,
+        "font_size": 9,
+    })
+
+    # Build column index lookup for paper columns
+    paper_col_indices: dict[str, int] = {}
+    for col_name in df.columns:
+        if col_name.startswith("Recent Paper ") or col_name.startswith("Top Cited Paper "):
+            paper_col_indices[col_name] = df.columns.get_loc(col_name)
+
+    for row_idx, job in enumerate(jobs):
+        excel_row = row_idx + 1  # +1 for header row
+
+        # Recent papers
+        recent = _parse_papers(job.get("recent_papers"))
+        for i in range(min(_MAX_PAPER_COLS, len(recent))):
+            col_name = f"Recent Paper {i + 1}"
+            col_idx = paper_col_indices.get(col_name)
+            if col_idx is None:
+                continue
+            p = recent[i]
+            url = p.get("url", "")
+            year = p.get("year") or "?"
+            title = (p.get("title") or "Untitled")[:80]
+            cites = p.get("citation_count", 0)
+            display = f"({year}) {title} [{cites} cites]"
+            if url:
+                worksheet.write_url(excel_row, col_idx, url, link_fmt, display)
+            else:
+                worksheet.write(excel_row, col_idx, display)
+
+        # Top cited papers
+        top_cited = _parse_papers(job.get("top_cited_papers"))
+        for i in range(min(_MAX_PAPER_COLS, len(top_cited))):
+            col_name = f"Top Cited Paper {i + 1}"
+            col_idx = paper_col_indices.get(col_name)
+            if col_idx is None:
+                continue
+            p = top_cited[i]
+            url = p.get("url", "")
+            year = p.get("year") or "?"
+            title = (p.get("title") or "Untitled")[:80]
+            cites = p.get("citation_count", 0)
+            display = f"({year}) {title} [{cites} cites]"
+            if url:
+                worksheet.write_url(excel_row, col_idx, url, link_fmt, display)
+            else:
+                worksheet.write(excel_row, col_idx, display)
 
 
 def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
@@ -364,7 +443,8 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
         "Conditions (Full)": 30,
         "Posted Date": 11, "Deadline": 11,
         "Description": 50,
-        "Recent Papers (5)": 50, "Top Cited Papers (5)": 50,
+        **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
+        **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
         "Job URL": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
         "Match Score": 8, "Source": 12, "Status": 7,
     }
@@ -577,18 +657,21 @@ def export_to_excel(output_dir: Path = None) -> Path:
         df_us.to_excel(writer, sheet_name="US Positions", index=False)
         if len(df_us) > 0:
             _style_worksheet(writer, "US Positions", df_us)
+            _write_paper_links(writer, "US Positions", df_us, us_jobs)
 
         # Sheet 2: EU Positions
         df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
         df_eu.to_excel(writer, sheet_name="EU Positions", index=False)
         if len(df_eu) > 0:
             _style_worksheet(writer, "EU Positions", df_eu)
+            _write_paper_links(writer, "EU Positions", df_eu, eu_jobs)
 
         # Sheet 3: Other Positions
         df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
         df_other.to_excel(writer, sheet_name="Other Positions", index=False)
         if len(df_other) > 0:
             _style_worksheet(writer, "Other Positions", df_other)
+            _write_paper_links(writer, "Other Positions", df_other, other_jobs)
 
         # Sheet 4: PI Recommendations
         df_rec = pd.DataFrame([_pi_to_row(p) for p in rec_pis], columns=PI_COLUMNS)
@@ -601,6 +684,7 @@ def export_to_excel(output_dir: Path = None) -> Path:
         df_all.to_excel(writer, sheet_name="All History", index=False)
         if len(df_all) > 0:
             _style_worksheet(writer, "All History", df_all)
+            _write_paper_links(writer, "All History", df_all, all_jobs)
 
     logger.info("Excel exported to %s (%d jobs)", filepath, len(all_jobs))
     return filepath

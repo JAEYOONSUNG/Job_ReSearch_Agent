@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 
 _S2_DELAY = 3.1  # ~100 requests per 5 min for free tier
 
+# ---------------------------------------------------------------------------
+# Known Semantic Scholar author IDs for famous PIs with common names.
+# The S2 search API (limit=20) often fails to return these researchers
+# because their profiles are buried under namesakes with empty affiliations.
+# These IDs were verified via DOI→paper→author lookups on S2.
+# ---------------------------------------------------------------------------
+KNOWN_S2_IDS: dict[str, str] = {
+    "George Church": "145892667",      # h=173, Harvard genetics/genomics
+    "David Baker": "2241617405",       # h=153, UW protein design, Nobel 2024
+    "Feng Zhang": "145126988",         # h=95, MIT/Broad CRISPR
+    "James Collins": "2231125920",     # h=124, MIT synthetic biology
+    "Frances Arnold": "2795724",       # h=116, Caltech directed evolution, Nobel 2018
+    "Christa Schleper": "6940827",     # h=74, Vienna archaea/extremophiles
+    "William Whitman": "2073798315",   # Prokaryotes/archaea taxonomy
+    "Ahmed Badran": "144777372",       # h=24, Scripps directed evolution
+    "David Liu": "2949942",            # h=100, Harvard base editing/prime editing
+}
+
 _s2_client: Optional[SemanticScholar] = None
 
 
@@ -39,6 +57,83 @@ def _get_s2_client() -> SemanticScholar:
 # Semantic Scholar helpers
 # ---------------------------------------------------------------------------
 
+def _disambiguate_author(
+    name: str,
+    institute: Optional[str] = None,
+) -> Optional[str]:
+    """Find the correct Semantic Scholar author ID for *name*.
+
+    First checks KNOWN_S2_IDS for pre-verified famous researchers.
+    Otherwise uses the REST API with limit=20, ranks candidates by:
+    1. Affiliation match (if institute given)
+    2. h-index (highest wins — real PIs have much higher h-index than namesakes)
+
+    Returns the best-matching authorId, or None.
+    """
+    import requests as _req
+
+    # Check known IDs first (handles famous PIs with common names)
+    known_id = KNOWN_S2_IDS.get(name)
+    if known_id:
+        logger.info("Using known S2 ID for %s: %s", name, known_id)
+        return known_id
+
+    try:
+        params = {
+            "query": name,
+            "fields": "authorId,name,hIndex,citationCount,paperCount,affiliations",
+            "limit": 20,
+        }
+        headers = {}
+        if SEMANTIC_SCHOLAR_API_KEY:
+            headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+
+        resp = _req.get(
+            "https://api.semanticscholar.org/graph/v1/author/search",
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+        time.sleep(_S2_DELAY)
+
+        if resp.status_code == 429:
+            logger.debug("S2 rate limited searching for %s", name)
+            return None
+        resp.raise_for_status()
+
+        data = resp.json().get("data", [])
+        if not data:
+            logger.warning("No Semantic Scholar results for %s", name)
+            return None
+
+        # Score each candidate
+        def _score(candidate: dict) -> tuple[int, int, int]:
+            h = candidate.get("hIndex") or 0
+            papers = candidate.get("paperCount") or 0
+            aff_match = 0
+            if institute:
+                affs = candidate.get("affiliations") or []
+                inst_lower = institute.lower()
+                for a in affs:
+                    if inst_lower in a.lower() or a.lower() in inst_lower:
+                        aff_match = 1000  # strong boost for affiliation match
+                        break
+            return (aff_match, h, papers)
+
+        best = max(data, key=_score)
+        best_score = _score(best)
+        logger.info(
+            "S2 disambiguated %s → %s (h=%d, papers=%d, aff_match=%s)",
+            name, best.get("name"), best.get("hIndex", 0),
+            best.get("paperCount", 0), best_score[0] > 0,
+        )
+        return best.get("authorId")
+
+    except Exception:
+        logger.exception("Error disambiguating S2 author for %s", name)
+        return None
+
+
 def _fetch_semantic_profile(
     name: str,
     institute: Optional[str] = None,
@@ -46,8 +141,9 @@ def _fetch_semantic_profile(
 ) -> Optional[dict]:
     """Fetch Semantic Scholar profile data.
 
-    If *known_s2_id* is provided, skips search and fetches directly.
-    Otherwise searches by name (limit=5 to avoid pagination storm).
+    If *known_s2_id* is provided, fetches directly.
+    Otherwise uses _disambiguate_author() to find the best match
+    via REST API (ranked by h-index + affiliation).
 
     Returns a dict with keys: semantic_id, h_index, citations, affiliations,
     papers (list of dicts with paperId, title, abstract, year, authors).
@@ -58,21 +154,9 @@ def _fetch_semantic_profile(
         if known_s2_id:
             author_id = known_s2_id
         else:
-            results = s2.search_author(name, limit=5)
-            if not results:
-                logger.warning("No Semantic Scholar profile found for %s", name)
+            author_id = _disambiguate_author(name, institute)
+            if not author_id:
                 return None
-
-            # Pick the best result — prefer matching affiliation if institute given
-            best = results[0]
-            if institute and len(results) > 1:
-                inst_lower = institute.lower()
-                for r in results:
-                    affs = getattr(r, "affiliations", []) or []
-                    if any(inst_lower in a.lower() for a in affs):
-                        best = r
-                        break
-            author_id = best.authorId
 
         time.sleep(_S2_DELAY)
 
@@ -131,6 +215,9 @@ def fetch_semantic_scholar_metadata(
 ) -> Optional[dict]:
     """Fetch lightweight metadata from Semantic Scholar for *name*.
 
+    Uses the same disambiguation logic as _disambiguate_author:
+    ranks candidates by affiliation match + h-index to pick the real person.
+
     Returns a dict with keys: ``h_index``, ``citations``, ``homepage``,
     ``s2_url``, ``full_name``, ``authorId``.
     """
@@ -142,13 +229,11 @@ def fetch_semantic_scholar_metadata(
         logger.debug("Skipping S2 metadata for single-name without institute: %s", name)
         return None
 
-    query = name
-
     try:
         params = {
-            "query": query,
+            "query": name,
             "fields": "authorId,name,hIndex,citationCount,homepage,url,paperCount,affiliations",
-            "limit": 10 if is_single else 5,
+            "limit": 20,
         }
         headers = {}
         if SEMANTIC_SCHOLAR_API_KEY:
@@ -172,19 +257,32 @@ def fetch_semantic_scholar_metadata(
             logger.debug("No Semantic Scholar match for %s", name)
             return None
 
-        if is_single and institute:
+        if is_single:
             name_lower = name.lower()
-            candidates = [
+            data = [
                 r for r in data
                 if name_lower in (r.get("name") or "").lower()
                 and (r.get("paperCount") or 0) >= 5
             ]
-            if not candidates:
+            if not data:
                 logger.debug("No S2 match for single-name %s (no candidate with >=5 papers)", name)
                 return None
-            best = max(candidates, key=lambda r: (r.get("hIndex") or 0, r.get("paperCount") or 0))
-        else:
-            best = max(data, key=lambda r: r.get("paperCount", 0) or 0)
+
+        # Rank by affiliation match + h-index (same logic as _disambiguate_author)
+        def _score(r: dict) -> tuple[int, int, int]:
+            h = r.get("hIndex") or 0
+            papers = r.get("paperCount") or 0
+            aff_match = 0
+            if institute:
+                affs = r.get("affiliations") or []
+                inst_lower = institute.lower()
+                for a in affs:
+                    if inst_lower in a.lower() or a.lower() in inst_lower:
+                        aff_match = 1000
+                        break
+            return (aff_match, h, papers)
+
+        best = max(data, key=_score)
 
         return {
             "h_index": best.get("hIndex"),
@@ -369,7 +467,7 @@ def profile_seed_pis() -> None:
         institute = pi.get("institute")
         pi_id = pi["id"]
 
-        known_s2_id = pi.get("semantic_id")
+        known_s2_id = pi.get("semantic_id") or KNOWN_S2_IDS.get(name)
         logger.info("Profiling seed PI: %s (id=%d, s2=%s)", name, pi_id, known_s2_id or "unknown")
 
         sem_data = _fetch_semantic_profile(name, institute, known_s2_id=known_s2_id)

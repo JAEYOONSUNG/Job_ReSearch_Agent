@@ -105,6 +105,7 @@ _FALSE_POSITIVE_NAMES = {
     # False positives from page boilerplate / non-name phrases
     "red apply", "mechanics employment", "description the",
     "hill anton",  # "Chapel Hill" + "Anton lab" misparse
+    "about the", "about our", "about this",
 }
 
 
@@ -283,7 +284,7 @@ def _is_valid_name(name: str) -> bool:
     # Reject names starting with common non-name words
     first_word = name.split()[0].lower()
     non_name_starters = {
-        "the", "a", "an", "this", "that", "our", "their", "his", "her",
+        "the", "a", "an", "this", "that", "our", "their", "his", "her", "about",
         "new", "old", "full", "part", "more", "all", "any", "each",
         "perform", "conduct", "manage", "develop", "lead", "apply",
         "research", "senior", "junior", "assistant", "associate", "postdoctoral", "fellow", "position",

@@ -30,6 +30,9 @@ pip install -r requirements.txt
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Install Playwright browsers (needed for ResearchGate, Glassdoor scraping)
+playwright install chromium
 ```
 
 ### 2. Configure environment

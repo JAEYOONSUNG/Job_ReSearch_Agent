@@ -16,8 +16,9 @@ LOG_FILE="${SCRIPT_DIR}/logs/run_$(date +%Y-%m-%d_%H%M).log"
 PYTHON=""
 for candidate in \
     "$HOME/miniconda3/envs/${CONDA_ENV}/bin/python" \
-    "/Users/Jaeyoon/miniconda3/envs/${CONDA_ENV}/bin/python" \
     "$HOME/miniforge3/envs/${CONDA_ENV}/bin/python" \
+    "$HOME/mambaforge/envs/${CONDA_ENV}/bin/python" \
+    "$HOME/anaconda3/envs/${CONDA_ENV}/bin/python" \
     "$HOME/conda/envs/${CONDA_ENV}/bin/python"; do
     if [[ -x "$candidate" ]]; then
         PYTHON="$candidate"

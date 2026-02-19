@@ -55,6 +55,10 @@ _AGGREGATOR_SOURCES = {
     "euraxess",
     "academic positions",
     "science careers",
+    "times higher education",
+    "inside higher ed",
+    "higheredjobs",
+    "chronicle of higher education",
 }
 
 
@@ -224,10 +228,30 @@ class ScholarshipDBScraper(BaseScraper):
                             real_inst = self._infer_institute_from_desc(
                                 job.get("description", "")
                             )
+                            # Also try h2 full text (may contain real inst + aggregator)
+                            if not real_inst:
+                                real_inst = self._infer_institute_from_h2(h2, listed_source)
+                            # Also try from other page elements
+                            if not real_inst:
+                                real_inst = self._infer_institute_from_page(pos_detail)
                             if real_inst:
                                 job["institute"] = real_inst
                         elif not job.get("institute"):
                             job["institute"] = listed_source
+
+                # === Fallback: infer institute from description if still empty ===
+                if not job.get("institute"):
+                    inferred = self._infer_institute_from_desc(
+                        job.get("description", "")
+                    )
+                    if inferred:
+                        job["institute"] = inferred
+
+                # === Fallback: extract institute from URL slug ===
+                if not job.get("institute"):
+                    inferred = self._infer_institute_from_url(job.get("url", ""))
+                    if inferred:
+                        job["institute"] = inferred
 
             else:
                 # Fallback: try generic content extraction
@@ -285,10 +309,17 @@ class ScholarshipDBScraper(BaseScraper):
                     )
                     break
 
-        # Filter for relevance
+        # Filter for relevance and remove fake listing pages
         filtered: list[dict[str, Any]] = []
         for job in all_jobs:
-            blob = f"{job.get('title', '')} {job.get('description', '')}"
+            # Skip fake category/listing pages (title is just "Postdoctoral"
+            # and description starts with result counts like "813 postdoc...")
+            title = (job.get("title") or "").strip()
+            desc = (job.get("description") or "").strip()
+            if title.lower() in ("postdoctoral", "postdoc", "post-doc"):
+                if re.match(r'^\d', desc) or "Postdoctoral positions\nFilters" in desc:
+                    continue
+            blob = f"{title} {desc}"
             if self._keyword_match(blob):
                 filtered.append(job)
 
@@ -297,9 +328,9 @@ class ScholarshipDBScraper(BaseScraper):
             len(all_jobs), len(filtered),
         )
 
-        # Enrich from detail pages
+        # Enrich from detail pages (all jobs, not just first N)
         enriched = self._parallel_enrich(
-            filtered, self._enrich_from_detail, max_workers=2, limit=40,
+            filtered, self._enrich_from_detail, max_workers=2,
         )
 
         # Remove fields not in the DB schema
@@ -372,19 +403,114 @@ class ScholarshipDBScraper(BaseScraper):
         return None
 
     @staticmethod
+    def _infer_institute_from_h2(h2: Tag, aggregator_name: str) -> str | None:
+        """Extract real institute from h2 text when it contains aggregator + real name.
+
+        h2 might contain: "Real Institute — Nature Careers" or
+        "Some text Nature Careers at Real University"
+        """
+        full_text = h2.get_text(separator=" ", strip=True)
+        # Remove the aggregator name
+        cleaned = re.sub(re.escape(aggregator_name), "", full_text, flags=re.IGNORECASE).strip()
+        cleaned = cleaned.strip("—–- ,|")
+        if not cleaned or len(cleaned) < 5:
+            return None
+
+        # Check for university/institute pattern in remaining text
+        m = re.search(
+            r"((?:[A-Z][\w\'-]+\s+){0,4}"
+            r"(?:University|Institute|College|Hospital|Centre|Center|Polytechnic)"
+            r"(?:\s+(?:of|for|de)\s+(?:the\s+)?[A-Z][\w]+(?:\s+[A-Za-z]+){0,3})?)",
+            cleaned,
+        )
+        if m and len(m.group(1).strip()) >= 10:
+            return m.group(1).strip()
+        return None
+
+    @staticmethod
+    def _infer_institute_from_page(pos_detail: Tag) -> str | None:
+        """Try to extract institute from other page elements (links, metadata)."""
+        # Check for employer/institution links elsewhere on the page
+        for link in pos_detail.select("a"):
+            href = link.get("href", "")
+            text = link.get_text(strip=True)
+            # Skip aggregator and generic links
+            if any(agg in text.lower() for agg in ("nature", "academic", "euraxess", "science careers")):
+                continue
+            if "scholarships-at-" in href and len(text) >= 5:
+                return text
+        return None
+
+    @staticmethod
+    def _infer_institute_from_url(url: str) -> str | None:
+        """Extract institute name from ScholarshipDB URL slug.
+
+        URLs follow the pattern:
+        ``/jobs-in-{Country}/{Title}-{Institute}={id}.html``
+        e.g. ``/Postdoc-In-Ethology-Link-ping-University=98frk0wL8RG...``
+        """
+        if not url or "scholarshipdb.net" not in url:
+            return None
+
+        # Extract the slug part before the =id
+        m = re.search(r"/([^/]+)=[^/]+\.html$", url)
+        if not m:
+            return None
+
+        slug = m.group(1)
+        # Look for university/institute keywords at the end of the slug
+        inst_pattern = re.search(
+            r"((?:[A-Z][a-z-]+[-]){0,4}"
+            r"(?:University|Universit[aey]t[a-z]*|Institut[eo]?[a-z]*|"
+            r"College|Hospital|Polytechnic|Academy|"
+            r"Helmholtz|Max-Planck|Leibniz|"
+            r"Research-(?:Center|Centre|Network|Institute))"
+            r"(?:[-][A-Za-z-]+){0,5})"
+            r"$",
+            slug,
+        )
+        if not inst_pattern:
+            return None
+
+        raw = inst_pattern.group(1)
+        # Convert URL slug to proper name: hyphens → spaces
+        name = raw.replace("-", " ").strip()
+        if len(name) < 5:
+            return None
+        # Skip if it matches an aggregator name
+        if name.lower() in _AGGREGATOR_SOURCES:
+            return None
+        return name
+
+    @staticmethod
     def _infer_institute_from_desc(description: str) -> str | None:
         """Extract real institute name from a job description.
 
         Used when the listed source is an aggregator (Nature Careers etc.).
+        Also extracts from EURAXESS-style "Organisation/Company" fields.
         """
         if not description:
             return None
+
+        # Pattern 0: EURAXESS-style "Organisation/Company\nSome Institute Name"
+        org_match = re.search(
+            r'Organisation/Company\s*\n?\s*(.+?)(?:\n|Research Field|Department|$)',
+            description,
+        )
+        if org_match:
+            org_name = org_match.group(1).strip()
+            if len(org_name) >= 3 and org_name.lower() not in (
+                "n/a", "unknown", "various", "multiple",
+            ):
+                return org_name
 
         # Pattern 1: "The University of X" or "X University"
         patterns = [
             # "University of Luxembourg", "Stanford University"
             r"(?:The\s+)?((?:[A-Z][a-z]+\s+){0,3}University"
-            r"(?:\s+of\s+(?:the\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})?)",
+            r"\s+of\s+(?:the\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})",
+            # "Stanford University", "Aarhus University" (Name + University)
+            r"(?:The\s+)?((?:[A-Z][a-z]+\s+){1,3}University)",
             # "Massachusetts Institute of Technology"
             r"((?:[A-Z][a-z]+\s+){1,3}Institute"
             r"(?:\s+of\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,2})?)",

@@ -52,6 +52,7 @@ _AGGREGATOR_SOURCES = {
 }
 
 SEARCH_KEYWORDS = [
+    # Field-specific
     "postdoc biology",
     "postdoctoral life sciences",
     "postdoc CRISPR",
@@ -59,6 +60,12 @@ SEARCH_KEYWORDS = [
     "postdoc synthetic biology",
     "postdoctoral microbiology",
     "postdoc chemistry biology",
+    # Institution-specific (premier EU/UK research institutes)
+    "EMBL postdoc",
+    "Max Planck biology postdoc",
+    "Sanger Institute",
+    "Pasteur Institute postdoc",
+    "Francis Crick postdoc",
 ]
 
 MAX_PAGES = 3
@@ -265,27 +272,28 @@ class EuraxessScraper(BaseScraper):
                     new_cond = " | ".join(cond_parts)
                     job["conditions"] = f"{existing} | {new_cond}".strip(" |")
 
-            # === Full description from h2#offer-description ===
-            desc_section = soup.find("h2", id="offer-description")
+            # === Full description ===
+            # Regular jobs use h2#offer-description; hosting offers use h2#description
+            desc_section = (
+                soup.find("h2", id="offer-description")
+                or soup.find("h2", id="description")
+            )
             if desc_section:
-                parent = desc_section.parent
-                if parent:
-                    # Get all text content after the h2
-                    desc_parts = []
-                    for sibling in desc_section.find_next_siblings():
-                        text = sibling.get_text(separator="\n", strip=True)
-                        if text:
+                desc_parts = []
+                for sibling in desc_section.find_next_siblings():
+                    text = sibling.get_text(separator="\n", strip=True)
+                    if text:
+                        desc_parts.append(text)
+                # Also check div.ecl children within parent
+                if not desc_parts and desc_section.parent:
+                    for div in desc_section.parent.select("div.ecl"):
+                        text = div.get_text(separator="\n", strip=True)
+                        if len(text) > 30:
                             desc_parts.append(text)
-                    # Also check div.ecl children within parent
-                    if not desc_parts:
-                        for div in parent.select("div.ecl"):
-                            text = div.get_text(separator="\n", strip=True)
-                            if len(text) > 30:
-                                desc_parts.append(text)
 
-                    full_desc = "\n\n".join(desc_parts)
-                    if len(full_desc) > len(job.get("description") or ""):
-                        job["description"] = full_desc[:5000]
+                full_desc = "\n\n".join(desc_parts)
+                if len(full_desc) > len(job.get("description") or ""):
+                    job["description"] = full_desc[:5000]
 
             # Fallback description
             if not job.get("description") or len(job.get("description", "")) < 50:
@@ -436,7 +444,7 @@ class EuraxessScraper(BaseScraper):
 
         # Enrich from detail pages
         all_enriched = self._parallel_enrich(
-            all_jobs, self._enrich_from_detail, max_workers=4, limit=100,
+            all_jobs, self._enrich_from_detail, max_workers=4,
         )
 
         # Keyword filter on enriched results

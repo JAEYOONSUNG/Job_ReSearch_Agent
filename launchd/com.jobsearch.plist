@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd agent for automated job search pipeline.
+
+  Installation:
+    1. Copy this file to ~/Library/LaunchAgents/
+    2. Edit the paths below to match your installation
+    3. Load:  launchctl load ~/Library/LaunchAgents/com.jobsearch.plist
+    4. Unload: launchctl unload ~/Library/LaunchAgents/com.jobsearch.plist
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.jaeyoon.jobsearch</string>
+    <string>com.jobsearch</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
+        <!-- EDIT: Replace with your actual project path -->
         <string>
             cd ~/github/job-search-pipeline &amp;&amp;
             DOW=$(date +%u) &amp;&amp;
@@ -49,15 +59,17 @@
     </array>
 
     <key>StandardOutPath</key>
-    <string>/Users/JaeYoon/github/job-search-pipeline/logs/launchd_stdout.log</string>
+    <!-- EDIT: Replace with your actual project path -->
+    <string>/tmp/jobsearch_stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/JaeYoon/github/job-search-pipeline/logs/launchd_stderr.log</string>
+    <!-- EDIT: Replace with your actual project path -->
+    <string>/tmp/jobsearch_stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Users/JaeYoon/miniconda3/bin</string>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
     </dict>
 
     <key>RunAtLoad</key>

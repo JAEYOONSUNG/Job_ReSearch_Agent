@@ -50,23 +50,73 @@ class GlassdoorScraper(BaseScraper):
 
     # ── Browser helpers ────────────────────────────────────────────────────
 
-    @staticmethod
-    def _fetch_with_browser(url: str, wait_sel: str = "li.JobsList_jobListItem__wjTHv, div.jobCard, li[data-test='jobListing']") -> str | None:
-        """Fetch a Glassdoor page using the shared Playwright browser."""
+    # Glassdoor CAPTCHA marker strings
+    _CAPTCHA_MARKERS = (
+        "Help Us Protect Glassdoor",
+        "Aidez-nous à protéger Glassdoor",
+        "Helfen Sie mit, Glassdoor zu schützen",
+        "Help ons Glassdoor te beschermen",
+        "Ayúdanos a proteger Glassdoor",
+        "verifying that you're a real person",
+    )
+
+    @classmethod
+    def _is_captcha_page(cls, html: str) -> bool:
+        """Return True if the HTML looks like a Glassdoor CAPTCHA page."""
+        return any(marker in html for marker in cls._CAPTCHA_MARKERS)
+
+    def _fetch_with_browser(
+        self,
+        url: str,
+        wait_sel: str = (
+            "li[data-test='jobListing'], "
+            "li.JobsList_jobListItem__wjTHv, "
+            "div.jobCard, "
+            "li[class*='jobListItem']"
+        ),
+        retries: int = 2,
+    ) -> str | None:
+        """Fetch a Glassdoor page using the shared Playwright browser.
+
+        Detects CAPTCHA pages and retries with a longer delay.  If the
+        CAPTCHA persists after *retries* attempts, returns ``None``.
+        """
+        import time
         from src.scrapers.browser import fetch_page
-        return fetch_page(url, wait_selector=wait_sel, wait_ms=5000)
+
+        for attempt in range(1, retries + 1):
+            html = fetch_page(url, wait_selector=wait_sel, wait_ms=6000, timeout=30000)
+            if html is None:
+                return None
+            if not self._is_captcha_page(html):
+                return html
+            self.logger.warning(
+                "Glassdoor CAPTCHA detected (attempt %d/%d), waiting...",
+                attempt, retries,
+            )
+            # Exponential backoff: 10s, 20s, ...
+            time.sleep(10 * attempt)
+
+        self.logger.warning("Glassdoor CAPTCHA persisted after %d retries", retries)
+        return None
 
     # ── Listing page parsing ──────────────────────────────────────────────
 
     def _parse_listing_page(self, html: str) -> list[dict[str, Any]]:
-        """Parse a Glassdoor search results page."""
+        """Parse a Glassdoor search results page.
+
+        Glassdoor search results are rendered as a two-column SPA: job
+        cards on the left (``data-test="jobListing"``), with the first
+        card's full description auto-loaded in a right-side detail panel
+        (``div[class*='JobDetails_jobDescription']``).
+        """
         soup = BeautifulSoup(html, "html.parser")
         jobs: list[dict[str, Any]] = []
 
-        # Glassdoor uses list items for job cards (CSS classes change frequently)
+        # Glassdoor uses list items for job cards — data-test is most stable
         cards = soup.select(
-            "li.JobsList_jobListItem__wjTHv, "
             "li[data-test='jobListing'], "
+            "li.JobsList_jobListItem__wjTHv, "
             "li.react-job-listing, "
             "div.jobCard, "
             "li[class*='jobListItem']"
@@ -90,11 +140,38 @@ class GlassdoorScraper(BaseScraper):
             if job:
                 jobs.append(job)
 
+        # The search page's right panel shows the full description for the
+        # first (auto-selected) job.  Grab it so at least one job per page
+        # gets a full description without a separate detail-page fetch.
+        if jobs:
+            detail_desc = self._extract_right_panel_description(soup)
+            if detail_desc and (not jobs[0].get("description") or
+                                len(detail_desc) > len(jobs[0].get("description", ""))):
+                jobs[0]["description"] = detail_desc[:5000]
+
         return jobs
 
+    @staticmethod
+    def _extract_right_panel_description(soup: BeautifulSoup) -> str | None:
+        """Extract the job description from the search-page right panel."""
+        for sel in (
+            "div[class*='JobDetails_jobDescription']",
+            "div.jobDescriptionContent",
+        ):
+            el = soup.select_one(sel)
+            if el:
+                text = el.get_text(separator="\n", strip=True)
+                if len(text) > 100:
+                    return text
+        return None
+
     def _parse_card(self, card: Tag) -> dict[str, Any] | None:
-        """Extract job info from a Glassdoor job card."""
-        # Title + link
+        """Extract job info from a Glassdoor job card.
+
+        Glassdoor frequently changes CSS class hashes but keeps stable
+        ``data-test`` attributes.  We prioritise those for reliability.
+        """
+        # Title + link — data-test="job-title" is the most stable selector
         link = card.select_one(
             "a[data-test='job-title'], "
             "a.jobTitle, "
@@ -113,25 +190,28 @@ class GlassdoorScraper(BaseScraper):
 
         # Company / Institute
         company_el = card.select_one(
+            "a[data-test='employer-name'], "
             "span[class*='EmployerProfile_compactEmployerName'], "
+            "span[class*='EmployerProfile_employerName'], "
             "div.employer-name, "
-            "span.companyName, "
-            "a[data-test='employer-name']"
+            "span.companyName"
         )
         institute = company_el.get_text(strip=True) if company_el else None
 
-        # Location
+        # Location — data-test="emp-location" is a <div>, not <span>
         loc_el = card.select_one(
+            "div[data-test='emp-location'], "
+            "span[data-test='emp-location'], "
             "span[class*='JobCard_location'], "
             "span.compactLocation, "
-            "div.location, "
-            "span[data-test='emp-location']"
+            "div.location"
         )
         location = loc_el.get_text(strip=True) if loc_el else None
         country = self._extract_country(location)
 
-        # Salary (if shown)
+        # Salary (if shown) — data-test="detailSalary" is a <div>
         salary_el = card.select_one(
+            "div[data-test='detailSalary'], "
             "span[data-test='detailSalary'], "
             "span.salary-estimate, "
             "div[class*='SalaryEstimate']"
@@ -140,7 +220,25 @@ class GlassdoorScraper(BaseScraper):
         if salary_el:
             conditions = f"Salary: {salary_el.get_text(strip=True)}"
 
-        return {
+        # Description snippet — Glassdoor shows a 2-3 line preview on cards
+        description = None
+        snippet_el = card.select_one(
+            "div[data-test='descSnippet'], "
+            "div[class*='JobCard_jobDescriptionSnippet']"
+        )
+        if snippet_el:
+            snippet_text = snippet_el.get_text(separator="\n", strip=True)
+            # Remove the trailing HTML entity and "Skills:" line
+            snippet_text = re.sub(r"\s*&hellip;.*", "", snippet_text)
+            snippet_text = re.sub(r"\nSkills:.*", "", snippet_text, flags=re.DOTALL)
+            if len(snippet_text) > 20:
+                description = snippet_text.strip()
+
+        # Posting age
+        age_el = card.select_one("div[data-test='job-age']")
+        posted_age = age_el.get_text(strip=True) if age_el else None
+
+        result: dict[str, Any] = {
             "title": title,
             "institute": institute,
             "country": country,
@@ -148,18 +246,37 @@ class GlassdoorScraper(BaseScraper):
             "conditions": conditions,
             "source": self.name,
         }
+        if description:
+            result["description"] = description
+        if posted_age:
+            result["posted_age"] = posted_age
+
+        return result
 
     # ── Detail page ───────────────────────────────────────────────────────
 
     def _enrich_from_detail(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Fetch the detail page for full description."""
+        """Fetch the detail page for full description.
+
+        Glassdoor detail pages (and the right-panel on search results)
+        contain the full job description inside a div whose class starts
+        with ``JobDetails_jobDescription``.  The description text is present
+        in the DOM even when visually truncated by CSS, so ``get_text()``
+        retrieves the full content.
+        """
         url = job.get("url")
         if not url:
             return job
 
         html = self._fetch_with_browser(
             url,
-            wait_sel="div.jobDescriptionContent, div[class*='JobDetails'], div[class*='description']",
+            wait_sel=(
+                "div[class*='JobDetails_jobDescription'], "
+                "div[class*='JobDetails'], "
+                "div.jobDescriptionContent, "
+                "body"
+            ),
+            retries=1,  # only 1 retry for detail pages to save time
         )
         if not html:
             return job
@@ -167,33 +284,33 @@ class GlassdoorScraper(BaseScraper):
         try:
             soup = BeautifulSoup(html, "html.parser")
 
-            # Description
+            # Description — ordered from most-specific to least-specific
             found_desc = False
             for sel in (
-                "div.jobDescriptionContent",
                 "div[class*='JobDetails_jobDescription']",
-                "div[class*='description']",
+                "div.jobDescriptionContent",
                 "div#JobDescriptionContainer",
                 "article",
             ):
                 desc_el = soup.select_one(sel)
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
-                    if len(text) > 50:
-                        job["description"] = text[:3000]
+                    if len(text) > 50 and not self._is_captcha_page(text):
+                        job["description"] = text[:5000]
                         found_desc = True
                         break
 
             if not found_desc:
                 fallback = self._extract_description_fallback(html)
-                if fallback:
+                if fallback and not self._is_captcha_page(fallback):
                     job["description"] = fallback
 
             # Company if missing
             if not job.get("institute"):
                 inst_el = soup.select_one(
                     "div[data-test='employerName'], "
-                    "span.employer-name"
+                    "span.employer-name, "
+                    "a[data-test='employer-name']"
                 )
                 if inst_el:
                     job["institute"] = inst_el.get_text(strip=True)
@@ -202,6 +319,7 @@ class GlassdoorScraper(BaseScraper):
             if not job.get("country"):
                 loc_el = soup.select_one(
                     "div[data-test='location'], "
+                    "div[data-test='emp-location'], "
                     "span.location"
                 )
                 if loc_el:
@@ -210,7 +328,7 @@ class GlassdoorScraper(BaseScraper):
                     )
 
         except Exception:
-            self.logger.debug("Could not parse detail for %s", url)
+            self.logger.debug("Could not parse detail for %s", url, exc_info=True)
 
         return job
 

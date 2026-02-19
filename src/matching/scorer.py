@@ -2,10 +2,12 @@
 
 import logging
 import re
+import unicodedata
 
 from src.config import (
     COUNTRY_TO_REGION,
     CV_KEYWORDS,
+    INSTITUTE_COUNTRY_RULES,
     REGION_PRIORITY,
     load_rankings,
 )
@@ -15,6 +17,23 @@ logger = logging.getLogger(__name__)
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower().strip())
+
+
+def _strip_accents(text: str) -> str:
+    """Remove accents/diacritics: Zürich→Zurich, Université→Universite, Poznań→Poznan."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _norm_inst(text: str) -> str:
+    """Normalize institute name for matching: lowercase, strip accents, remove punctuation."""
+    text = _strip_accents(text.lower().strip())
+    # Remove commas, periods, "the " prefix, ", inc." suffix
+    text = re.sub(r"[,.]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^the ", "", text)
+    text = re.sub(r"\s+inc$", "", text)
+    return text
 
 
 def keyword_match_score(job_text: str, keywords: list[str] = None) -> float:
@@ -30,20 +49,99 @@ def keyword_match_score(job_text: str, keywords: list[str] = None) -> float:
 
 
 def get_institution_tier(institute: str) -> int:
-    """Look up institution tier from rankings. Returns 1-4 (4 = unranked)."""
+    """Look up institution tier from rankings. Returns 1-5 (5 = unranked).
+
+    Checks tiers 1-4, then companies (top_companies -> 2, companies -> 3).
+    Also resolves aliases from tier_lookup_aliases.
+    Uses accent-stripped matching (ETH Zürich == ETH Zurich).
+    """
     if not institute:
-        return 4
+        return 5
 
     rankings = load_rankings()
     tiers = rankings.get("tiers", {})
-    inst_lower = institute.lower()
+    aliases = rankings.get("tier_lookup_aliases", {})
+    inst_norm = _norm_inst(institute)
 
+    # Check aliases first (normalized, short aliases require exact match)
+    for alias, canonical in aliases.items():
+        alias_n = _norm_inst(alias)
+        if alias_n == inst_norm:
+            inst_norm = _norm_inst(canonical)
+            break
+        # Only do substring match for aliases >= 5 chars to avoid false positives
+        if len(alias_n) >= 5 and alias_n in inst_norm:
+            inst_norm = _norm_inst(canonical)
+            break
+
+    # Check tiers 1-4
     for tier_num, tier_data in tiers.items():
+        try:
+            tier_int = int(tier_num)
+        except (ValueError, TypeError):
+            continue
         for inst in tier_data.get("institutions", []):
-            if inst.lower() in inst_lower or inst_lower in inst.lower():
-                return int(tier_num)
+            ref = _norm_inst(inst)
+            if ref in inst_norm or inst_norm in ref:
+                return tier_int
 
-    return 4
+    # Check companies section
+    companies = rankings.get("companies", {})
+    top_co = companies.get("top_companies", {})
+    top_list = top_co.get("institutions", []) if isinstance(top_co, dict) else top_co
+    for inst in top_list:
+        ref = _norm_inst(inst)
+        if ref in inst_norm or inst_norm in ref:
+            return top_co.get("tier_equivalent", 2) if isinstance(top_co, dict) else 2
+
+    std_co = companies.get("companies", {})
+    std_list = std_co.get("institutions", []) if isinstance(std_co, dict) else std_co
+    for inst in std_list:
+        ref = _norm_inst(inst)
+        if ref in inst_norm or inst_norm in ref:
+            return std_co.get("tier_equivalent", 3) if isinstance(std_co, dict) else 3
+
+    return 5
+
+
+def is_company(institute: str) -> bool:
+    """Return True if the institute is a company (not academic institution).
+
+    Uses stricter matching than tier lookup to avoid false positives
+    (e.g., "MIT" must not match "GlaxoSmithKline").
+    """
+    if not institute:
+        return False
+    rankings = load_rankings()
+    companies = rankings.get("companies", {})
+    inst_n = _norm_inst(institute)
+
+    for group in companies.values():
+        comp_list = group.get("institutions", []) if isinstance(group, dict) else group
+        for comp in comp_list:
+            comp_n = _norm_inst(comp)
+            shorter = min(len(inst_n), len(comp_n))
+            if shorter < 5:
+                if inst_n == comp_n:
+                    return True
+            else:
+                if comp_n in inst_n or inst_n in comp_n:
+                    return True
+    return False
+
+
+def guess_country_from_institute(institute: str) -> str:
+    """Infer country from institution name using known patterns.
+
+    Returns a country string (e.g. "United States") or empty string if unknown.
+    """
+    if not institute:
+        return ""
+    inst_lower = institute.lower()
+    for pattern, country in INSTITUTE_COUNTRY_RULES:
+        if pattern in inst_lower:
+            return country
+    return ""
 
 
 def get_region(country: str) -> str:
@@ -67,7 +165,7 @@ def score_job(job: dict, keywords: list[str] = None) -> dict:
     Returns the job dict with added fields:
       - match_score: float (0.0 - 1.0)
       - region: str
-      - tier: int (1-4)
+      - tier: int (1-5, where 5 = unranked)
       - sort_key: tuple for sorting
     """
     text = " ".join(
@@ -76,7 +174,10 @@ def score_job(job: dict, keywords: list[str] = None) -> dict:
     )
 
     match_score = keyword_match_score(text, keywords)
-    region = job.get("region") or get_region(job.get("country", ""))
+    country = job.get("country") or ""
+    if not country:
+        country = guess_country_from_institute(job.get("institute", ""))
+    region = job.get("region") or get_region(country)
     tier = job.get("tier") or get_institution_tier(job.get("institute", ""))
     h_index = job.get("h_index") or 0
 

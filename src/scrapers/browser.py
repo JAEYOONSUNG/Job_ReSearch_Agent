@@ -32,22 +32,67 @@ _PW = None
 
 
 def _init_browser():
-    """Launch browser (called only in worker thread)."""
+    """Launch browser (called only in worker thread).
+
+    Uses ``playwright-stealth`` to reduce bot-detection fingerprints and
+    ``channel="chrome"`` to prefer the locally-installed Chrome binary
+    (harder for sites like Glassdoor to detect than bundled Chromium).
+    """
     global _BROWSER, _CONTEXT, _PW
     if _BROWSER is None:
         from playwright.sync_api import sync_playwright
+
         _PW = sync_playwright().start()
-        _BROWSER = _PW.chromium.launch(headless=True)
+
+        # Prefer real Chrome (harder to detect) with fallback to Chromium
+        try:
+            _BROWSER = _PW.chromium.launch(headless=True, channel="chrome")
+        except Exception:
+            logger.debug("Real Chrome not found, falling back to bundled Chromium")
+            _BROWSER = _PW.chromium.launch(headless=True)
+
         _CONTEXT = _BROWSER.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
             locale="en-US",
             viewport={"width": 1280, "height": 800},
         )
+
     return _CONTEXT
+
+
+_STEALTH = None
+
+
+def _get_stealth():
+    """Get a singleton Stealth instance."""
+    global _STEALTH
+    if _STEALTH is None:
+        try:
+            from playwright_stealth import Stealth
+            _STEALTH = Stealth(
+                navigator_platform_override="MacIntel",
+                navigator_vendor_override="Google Inc.",
+            )
+        except ImportError:
+            _STEALTH = False  # sentinel: not installed
+        except Exception:
+            logger.debug("Stealth init failed", exc_info=True)
+            _STEALTH = False
+    return _STEALTH if _STEALTH is not False else None
+
+
+def _apply_stealth_sync(page):
+    """Apply playwright-stealth patches to a page."""
+    s = _get_stealth()
+    if s:
+        try:
+            s.apply_stealth_sync(page)
+        except Exception:
+            logger.debug("apply_stealth_sync failed", exc_info=True)
 
 
 def _do_fetch(url: str, wait_selector: str, wait_ms: int, timeout: int) -> Optional[str]:
@@ -55,6 +100,7 @@ def _do_fetch(url: str, wait_selector: str, wait_ms: int, timeout: int) -> Optio
     try:
         ctx = _init_browser()
         page = ctx.new_page()
+        _apply_stealth_sync(page)
         try:
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             if wait_selector:
@@ -158,12 +204,20 @@ async def _async_init_browser():
             return None
 
         _ASYNC_PW = await async_playwright().start()
-        _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(headless=True)
+
+        # Prefer real Chrome with fallback to Chromium
+        try:
+            _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(
+                headless=True, channel="chrome",
+            )
+        except Exception:
+            _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(headless=True)
+
         _ASYNC_CONTEXT = await _ASYNC_BROWSER.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
             locale="en-US",
             viewport={"width": 1280, "height": 800},
@@ -252,6 +306,14 @@ async def async_fetch_page(
         )
 
     try:
+        # Apply stealth patches per page
+        s = _get_stealth()
+        if s:
+            try:
+                await s.apply_stealth_async(page)
+            except Exception:
+                pass
+
         await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         if wait_selector:
             try:

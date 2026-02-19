@@ -8,9 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import EXCEL_OUTPUT_DIR
+from src.config import EXCEL_OUTPUT_DIR, EXCLUDE_KEYWORDS
 from src.db import get_all_pis, get_jobs, get_recommended_pis
 from src.matching.job_parser import parse_structured_description
+from src.matching.scorer import is_company
 
 logger = logging.getLogger(__name__)
 
@@ -36,22 +37,37 @@ PI_COLUMNS = [
 def _clean_text(text: str | None, max_len: int = 500) -> str:
     """Strip markdown, excessive whitespace, and truncate.
 
-    Flattens all newlines into spaces for compact single-line display.
+    Flattens all newlines into ``|`` section dividers for readable
+    single-line display.  Adjacent short lines are merged; headers
+    (``### Header`` or ``Header =====``) become ``| HEADER |``.
     """
     if not text:
         return ""
     # Remove markdown bold/italic
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
-    # Remove markdown headers
+    # Remove markdown header markers: ### Header
     text = re.sub(r"^#{1,4}\s*", "", text, flags=re.MULTILINE)
+    # Convert "Header ====+" or "====+" underline-style headers to section break
+    text = re.sub(r"^(.+?)\s*={4,}\s*$", r"| \1 |", text, flags=re.MULTILINE)
+    text = re.sub(r"^={4,}\s*$", "", text, flags=re.MULTILINE)
+    # Convert "---+" horizontal rules to section break
+    text = re.sub(r"^-{4,}\s*$", "|", text, flags=re.MULTILINE)
     # Remove markdown links but keep text
     text = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", text)
     # Remove HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-    # Replace all newlines with spaces
+    # Unescape backslash-escaped characters (e.g. \- from Indeed)
+    text = re.sub(r"\\([^\\])", r"\1", text)
+    # Replace paragraph breaks (2+ newlines) with " | "
+    text = re.sub(r"\s*\n\s*\n\s*", " | ", text)
+    # Replace single newlines with space
     text = text.replace("\n", " ").replace("\r", " ")
     # Collapse all whitespace
     text = re.sub(r"\s+", " ", text).strip()
+    # Clean up redundant pipe separators
+    text = re.sub(r"\|\s*\|", "|", text)
+    text = re.sub(r"^\s*\|\s*", "", text)
+    text = re.sub(r"\s*\|\s*$", "", text)
     return text[:max_len]
 
 
@@ -99,8 +115,15 @@ def _clean_list(text: str | None, max_len: int = 400) -> str:
         return ""
     # Remove markdown bold/italic
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
+    # Remove markdown headers
+    text = re.sub(r"^#{1,4}\s*", "", text, flags=re.MULTILINE)
+    # Remove underline-style headers
+    text = re.sub(r"={4,}", "", text)
+    text = re.sub(r"-{4,}", "", text)
     # Remove HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
+    # Unescape backslash-escaped characters
+    text = re.sub(r"\\([^\\])", r"\1", text)
     # Normalise bullet markers to "; "
     text = re.sub(r"\n\s*[-•*]\s*", "; ", text)
     text = re.sub(r"\n\s*\d+[.)]\s*", "; ", text)
@@ -117,21 +140,52 @@ def _clean_list(text: str | None, max_len: int = 400) -> str:
 # Condition parsing — split into sub-fields
 # ---------------------------------------------------------------------------
 
+def _format_salary_number(s: str) -> str:
+    """Add thousand-separator commas to bare salary numbers.
+
+    ``$56484`` → ``$56,484``;  ``€45000-€55000`` → ``€45,000-€55,000``
+    ``3800`` → ``3,800``;  ``42.185,28`` → ``42,185``
+    Leaves already-formatted strings (``$56,484``) and non-numeric
+    salary scales (``TV-L E13``) unchanged.
+    """
+    # First, normalise EU thousands separator (42.185,28 → 42185.28)
+    s = re.sub(r"(\d{1,3})\.(\d{3}),(\d{2})\b", lambda m: f"{m.group(1)}{m.group(2)}", s)
+    # Also handle "42.185" standalone (EU thousands, no decimals)
+    s = re.sub(r"\b(\d{1,3})\.(\d{3})\b(?![\d.])", lambda m: f"{m.group(1)}{m.group(2)}", s)
+
+    def _add_commas(m: re.Match) -> str:
+        return f"{int(m.group()):,}"
+
+    # Currency-prefixed: 4+ digits after $, €, £
+    s = re.sub(r"(?<=[\$€£])\d{4,}", _add_commas, s)
+    # Bare numbers: 4+ digits (not preceded/followed by digit or dot)
+    s = re.sub(r"(?<![.\d])\b(\d{4,})\b(?![\d.])", lambda m: f"{int(m.group(1)):,}", s)
+    # Strip decimal places from numbers (e.g. $60,000.00 → $60,000, 36.0 → 36)
+    s = re.sub(r"(\d)\.0{1,2}\b", r"\1", s)          # .0 or .00
+    s = re.sub(r"(\d)\.\d{1,2}(?=\s*[€$£%])", r"\1", s)  # 42,392.88€ → 42,392€
+    s = re.sub(r"(\d)\.\d{1,2}(?=\s*/)", r"\1", s)   # $60,000.00/yr → $60,000/yr
+    # Large comma-formatted numbers: strip remaining decimals (€ 70,167.44 etc)
+    s = re.sub(r"(\d{1,3}(?:,\d{3})+)\.\d{1,2}\b", r"\1", s)
+    return s
+
+
 def _parse_salary(conditions: str, description: str) -> str:
     """Extract salary info from conditions or description."""
     blob = f"{conditions} {description}"
     patterns = [
-        r"(?:salary|stipend|compensation|remuneration)\s*(?:of|is|:)?\s*([\$€£]?\s*[\d,]+(?:\.\d+)?(?:\s*[-–]\s*[\$€£]?\s*[\d,]+(?:\.\d+)?)?)\s*(?:k|K|per\s+(?:year|annum|month)|/\s*(?:yr|year|annum|month(?:ly)?))?",
-        r"([\$€£]\s*[\d,]+(?:\.\d+)?(?:\s*[-–]\s*[\$€£]?\s*[\d,]+(?:\.\d+)?)?)\s*(?:k|K)?\s*(?:per\s+(?:year|annum)|/\s*(?:yr|year|annum|yearly))",
+        r"(?:salary|stipend|compensation|remuneration)\s*(?:of|is|:)?\s*([\$€£]?\s*\d[\d,]*(?:\.\d+)?(?:\s*[-–]\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?)\s*(?:k|K|per\s+(?:year|annum|month)|/\s*(?:yr|year|annum|month(?:ly)?)|euros?(?:/month)?)?",
+        r"([\$€£]\s*\d[\d,]*(?:\.\d+)?(?:\s*[-–]\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?)\s*(?:k|K)?\s*(?:per\s+(?:year|annum)|/\s*(?:yr|year|annum|yearly))",
         r"(TV-?L\s*E?\s*1[3-5](?:\s*/\s*E?\s*1[3-5])?)",
         r"(NIH\s+(?:scale|salary))",
         r"(Grade\s+\d+|Band\s+\d+|Scale\s+\d+)",
-        r"Salary:\s*([\$€£]?[\d,.]+-?[\$€£]?[\d,.]*(?:/\w+)?)",
+        r"Salary:\s*([\$€£]?\d[\d,.]*(?:\s*[-–]\s*[\$€£]?\d[\d,.]*)?(?:/\w+)?)",
+        r"(\d[\d.]*,\d{2}\s*€)",  # EU format: "42.185,28 €"
     ]
     for p in patterns:
         m = re.search(p, blob, re.IGNORECASE)
         if m:
-            return m.group(1).strip() if m.lastindex else m.group(0).strip()
+            raw = m.group(1).strip() if m.lastindex else m.group(0).strip()
+            return _format_salary_number(raw)
     return ""
 
 
@@ -275,8 +329,18 @@ JOB_COLUMNS = [
 ]
 
 
+def _format_tier(tier, institute: str = "") -> str:
+    """Format tier for display: T1-T4 for institutions, 'Company' for companies, '' for unranked."""
+    if institute and is_company(institute):
+        return "Company"
+    if not tier or tier >= 5:
+        return ""
+    return f"T{tier}"
+
+
 def _job_to_row(job: dict) -> dict:
     tier = job.get("tier")
+    institute = job.get("institute") or ""
     desc = job.get("description") or ""
     req = job.get("requirements") or ""
     cond = job.get("conditions") or ""
@@ -293,9 +357,9 @@ def _job_to_row(job: dict) -> dict:
     return {
         "Title": _clean_text(job.get("title"), 100),
         "PI Name": job.get("pi_name") or "",
-        "Institute": job.get("institute") or "",
+        "Institute": institute,
         "Department": job.get("department") or "",
-        "Tier": f"T{tier}" if tier else "",
+        "Tier": _format_tier(tier, institute),
         "Country": job.get("country") or "",
         "Region": job.get("region") or "",
         # Research
@@ -314,12 +378,12 @@ def _job_to_row(job: dict) -> dict:
         "Duration": _parse_duration(cond, desc),
         "Contract Type": _parse_contract_type(cond, desc),
         "Start Date": _parse_start_date(cond, desc),
-        "Conditions (Full)": _clean_list(cond, 400),
+        "Conditions (Full)": _format_salary_number(_clean_list(cond, 400)),
         # Dates
         "Posted Date": job.get("posted_date") or "",
         "Deadline": job.get("deadline") or "",
         # Description
-        "Description": _clean_text(desc, 1500),
+        "Description": _clean_text(desc, 5000),
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
         **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
         **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
@@ -336,11 +400,12 @@ def _job_to_row(job: dict) -> dict:
 
 
 def _pi_to_row(pi: dict) -> dict:
+    institute = pi.get("institute", "")
     return {
         "PI Name": pi.get("name", ""),
-        "Institute": pi.get("institute", ""),
+        "Institute": institute,
         "Country": pi.get("country", ""),
-        "Tier": f"T{pi.get('tier', 4)}",
+        "Tier": _format_tier(pi.get("tier"), institute),
         "h-index": pi.get("h_index", ""),
         "Citations": pi.get("citations", ""),
         "Fields": pi.get("fields", ""),
@@ -470,7 +535,7 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
     if "Tier" in df.columns:
         tier_col = df.columns.get_loc("Tier")
         tier_range = f"{chr(65 + tier_col)}2:{chr(65 + tier_col)}{len(df) + 1}"
-        # T1 = gold, T2 = blue, T3 = green
+        # T1 = gold, T2 = blue, T3 = green, T4 = light gray
         worksheet.conditional_format(
             tier_range,
             {"type": "text", "criteria": "containing", "value": "T1",
@@ -485,6 +550,16 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
             tier_range,
             {"type": "text", "criteria": "containing", "value": "T3",
              "format": workbook.add_format({"bg_color": "#D4EDDA", "font_color": "#155724"})},
+        )
+        worksheet.conditional_format(
+            tier_range,
+            {"type": "text", "criteria": "containing", "value": "T4",
+             "format": workbook.add_format({"bg_color": "#E2E3E5", "font_color": "#383D41"})},
+        )
+        worksheet.conditional_format(
+            tier_range,
+            {"type": "text", "criteria": "containing", "value": "Company",
+             "format": workbook.add_format({"bg_color": "#E8DAEF", "font_color": "#6C3483", "bold": True})},
         )
 
     # Conditional formatting: color scale on Match Score
@@ -633,6 +708,51 @@ def _write_summary_dashboard(
     worksheet.set_column(2, 2, 5)
 
 
+def _is_excluded(job: dict) -> bool:
+    """Return True if the job matches any EXCLUDE_KEYWORDS (neuroscience etc)."""
+    blob = " ".join(
+        (job.get(k) or "") for k in ("title", "field", "keywords", "description")
+    ).lower()
+    return any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS)
+
+
+def _sort_by_tier(jobs: list[dict]) -> list[dict]:
+    """Sort jobs by tier (T1 first), companies grouped separately, then h-index descending.
+
+    Sort order: T1 → T2 → Company → T3 → T4 → Unranked
+    """
+    def _key(j: dict):
+        tier = j.get("tier")
+        tier_num = tier if isinstance(tier, int) else 999
+        company = is_company(j.get("institute") or "")
+        # Companies sort between T2 (2) and T3 (3)
+        if company:
+            sort_tier = 2.5
+        else:
+            sort_tier = tier_num
+        h = j.get("h_index") or 0
+        return (sort_tier, -h)
+    return sorted(jobs, key=_key)
+
+
+def _sort_pis_by_tier(pis: list[dict]) -> list[dict]:
+    """Sort recommended PIs by tier (T1 first), then h-index descending within each tier.
+
+    Sort order: T1 → T2 → T3 → T4 → Company → Unranked (no tier)
+    """
+    def _key(p: dict):
+        tier = p.get("tier")
+        tier_num = tier if isinstance(tier, int) and 1 <= tier <= 4 else 999
+        company = is_company(p.get("institute") or "")
+        if company and tier_num == 999:
+            sort_tier = 5  # companies after T4 but before unranked
+        else:
+            sort_tier = tier_num
+        h = p.get("h_index") or 0
+        return (sort_tier, -h)
+    return sorted(pis, key=_key)
+
+
 def export_to_excel(output_dir: Path = None) -> Path:
     """Export all job data to a multi-sheet Excel file with charts and formatting."""
     output_dir = output_dir or EXCEL_OUTPUT_DIR
@@ -641,12 +761,17 @@ def export_to_excel(output_dir: Path = None) -> Path:
     filename = f"JobSearch_Auto_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     filepath = output_dir / filename
 
-    # Gather data
-    all_jobs = get_jobs(limit=10000)
-    us_jobs = [j for j in all_jobs if j.get("region") == "US"]
-    eu_jobs = [j for j in all_jobs if j.get("region") == "EU"]
-    other_jobs = [j for j in all_jobs if j.get("region") not in ("US", "EU")]
-    rec_pis = get_recommended_pis()
+    # Gather data and filter out excluded keywords (neuroscience etc)
+    raw_jobs = get_jobs(limit=10000)
+    all_jobs = [j for j in raw_jobs if not _is_excluded(j)]
+    logger.info("Filtered %d → %d jobs (excluded %d by keywords)",
+                len(raw_jobs), len(all_jobs), len(raw_jobs) - len(all_jobs))
+
+    # Sort by tier within each region group
+    us_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "US"])
+    eu_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "EU"])
+    other_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") not in ("US", "EU")])
+    rec_pis = _sort_pis_by_tier(get_recommended_pis())
 
     with pd.ExcelWriter(str(filepath), engine="xlsxwriter") as writer:
         # Sheet 0: Summary Dashboard (charts + statistics)
@@ -679,12 +804,13 @@ def export_to_excel(output_dir: Path = None) -> Path:
         if len(df_rec) > 0:
             _style_worksheet(writer, "PI Recommendations", df_rec)
 
-        # Sheet 5: All History
-        df_all = pd.DataFrame([_job_to_row(j) for j in all_jobs], columns=JOB_COLUMNS)
+        # Sheet 5: All History (sorted by tier)
+        all_sorted = _sort_by_tier(all_jobs)
+        df_all = pd.DataFrame([_job_to_row(j) for j in all_sorted], columns=JOB_COLUMNS)
         df_all.to_excel(writer, sheet_name="All History", index=False)
         if len(df_all) > 0:
             _style_worksheet(writer, "All History", df_all)
-            _write_paper_links(writer, "All History", df_all, all_jobs)
+            _write_paper_links(writer, "All History", df_all, all_sorted)
 
     logger.info("Excel exported to %s (%d jobs)", filepath, len(all_jobs))
     return filepath

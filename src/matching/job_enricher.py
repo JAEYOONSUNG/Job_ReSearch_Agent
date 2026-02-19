@@ -33,6 +33,10 @@ _AGGREGATOR_INSTITUTES = {
     "higheredjobs",
     "academickeys",
     "chronicle of higher education",
+    "nature careers",
+    "nature",
+    "the",
+    "times higher education",
 }
 
 
@@ -128,17 +132,27 @@ def _resolve_linkedin_job(url: str) -> Optional[dict]:
             if not loc_inst:
                 # UGA-style: "About The University Of Georgia"
                 loc_inst = re.search(
-                    r'About\s+(?:The\s+)?(University\s+[Oo]f\s+[A-Z][\w]+(?:\s+[A-Za-z]+){0,3})',
+                    r'About\s+(?:The\s+)?(University\s+[Oo]f\s+[A-Z][\w]+(?:\s+(?:at\s+)?[A-Za-z]+){0,5})',
                     desc,
                 )
             if loc_inst:
-                result["institute"] = loc_inst.group(1).strip()
+                # Strip trailing non-name words (e.g. "consistently ranks")
+                _inst_trail = {
+                    "consistently", "ranks", "is", "has", "was", "the",
+                    "a", "an", "and", "or", "for", "in", "with", "where",
+                    "offers", "seeks", "invites", "located", "founded",
+                }
+                inst_text = loc_inst.group(1).strip()
+                words = inst_text.split()
+                while len(words) > 3 and words[-1].lower() in _inst_trail:
+                    words.pop()
+                result["institute"] = " ".join(words)
             else:
                 # Strategy B: "<Place> University" or "University of <Place>"
                 uni_patterns = re.findall(
                     r'((?:[A-Z][a-z]+\s+){0,3}'
                     r'(?:University|College|Institute|Hospital)'
-                    r'(?:\s+of\s+(?:the\s+)?[A-Z][a-z]+(?:\s+[A-Za-z]+){0,3})?)',
+                    r'(?:\s+of\s+(?:the\s+)?[A-Z][a-z]+(?:\s+(?:at\s+)?[A-Za-z]+){0,5})?)',
                     desc,
                 )
                 # Words that signal a department/section header, not an institute
@@ -148,9 +162,24 @@ def _resolve_linkedin_job(url: str) -> Optional[dict]:
                     "physics", "psychology", "sociology", "economics",
                     "position", "description", "overview", "summary",
                     "department", "division", "section", "school",
+                    "open", "date", "close", "closing", "posted",
+                    "review", "application", "apply", "submit",
+                }
+                # Trailing words that should be stripped from institute names
+                _trailing_noise = {
+                    "open", "date", "close", "posted", "review",
+                    "application", "apply", "submit", "is", "has", "was",
+                    "the", "a", "an", "and", "or", "for", "in", "at",
+                    "consistently", "ranks", "offers", "seeks", "invites",
+                    "located", "founded", "where", "with",
                 }
                 for candidate in uni_patterns:
                     candidate = candidate.strip().rstrip(",. ")
+                    # Strip trailing noise words
+                    words = candidate.split()
+                    while len(words) > 2 and words[-1].lower() in _trailing_noise:
+                        words.pop()
+                    candidate = " ".join(words)
                     if len(candidate) < 10:
                         continue
                     if candidate.lower().startswith(("the ", "a ", "center ")):
@@ -212,27 +241,228 @@ def _resolve_linkedin_job(url: str) -> Optional[dict]:
         return None
 
 
+def _resolve_from_description(job: dict) -> Optional[str]:
+    """Extract the real institute name from a job's description text.
+
+    Used for aggregator jobs (Nature Careers, Times Higher Education, etc.)
+    whose descriptions already contain the actual employer name.
+
+    Applies multiple strategies:
+    - Strategy A: Explicit labels like "Employer: X University"
+    - Strategy B: Regex for university/institute name patterns
+    - Strategy C: Contextual phrases like "X invites applications"
+    - Strategy D: ScholarshipDB leading institute text
+
+    Returns the resolved institute name, or None if not found.
+    Updates the job dict in-place with the resolved institute.
+    """
+    desc = (job.get("description") or "").strip()
+    if not desc:
+        return None
+
+    institute = None
+
+    # Words that signal a department/section header, not an institute
+    _noise_words = {
+        "about", "location", "biochemistry", "pathology",
+        "engineering", "medicine", "chemistry", "biology",
+        "physics", "psychology", "sociology", "economics",
+        "position", "description", "overview", "summary",
+        "department", "division", "section", "school", "college",
+        "open", "date", "close", "closing", "posted",
+        "review", "application", "apply", "submit",
+    }
+    # Trailing words that should be stripped from institute names
+    _trailing_noise = {
+        "open", "date", "close", "posted", "review",
+        "application", "apply", "submit", "is", "has", "was",
+        "the", "a", "an", "and", "or", "for", "in", "at",
+        "consistently", "ranks", "offers", "seeks", "invites",
+        "located", "founded", "where", "with", "since", "our",
+    }
+
+    def _clean_candidate(text: str) -> Optional[str]:
+        """Strip trailing noise words and validate a candidate name."""
+        text = text.strip().rstrip(",. ")
+        words = text.split()
+        while len(words) > 2 and words[-1].lower() in _trailing_noise:
+            words.pop()
+        text = " ".join(words)
+        if len(text) < 10:
+            return None
+        if text.lower().startswith(("the ", "a ", "center ")):
+            return None
+        first_word = text.split()[0].lower()
+        if first_word in _noise_words:
+            return None
+        lower = text.lower()
+        if any(w in lower for w in ("about the", "location", "overview")):
+            return None
+        return text
+
+    # Strategy 0: EURAXESS-style "Organisation/Company\nSome Institute Name"
+    org_match = re.search(
+        r'Organisation/Company\s*\n?\s*(.+?)(?:\n|Research Field|Department|$)',
+        desc,
+    )
+    if org_match:
+        org_name = org_match.group(1).strip()
+        if len(org_name) >= 3 and org_name.lower() not in (
+            "n/a", "unknown", "various", "multiple",
+        ):
+            institute = org_name
+
+    # Strategy A: Explicit label patterns (Employer/Organization/Institution)
+    if not institute:
+        loc_inst = re.search(
+            r'(?:Location|Employer|Organization|Institution)\s*:\s*'
+            r'((?:[A-Z][\w.]+\s+){1,6}(?:University|College|Institute|Hospital|Center|Centre|Universit[àéè]))',
+            desc,
+        )
+        if not loc_inst:
+            # "About The University Of Georgia"
+            loc_inst = re.search(
+                r'About\s+(?:The\s+)?(University\s+[Oo]f\s+[A-Z][\w]+(?:\s+(?:at\s+)?[A-Za-z]+){0,5})',
+                desc,
+            )
+        if loc_inst:
+            candidate = loc_inst.group(1).strip()
+            words = candidate.split()
+            while len(words) > 3 and words[-1].lower() in _trailing_noise:
+                words.pop()
+            institute = " ".join(words)
+
+    # Strategy C: Contextual invitation/seeking phrases
+    # "The Mohammed VI Polytechnic University invites applications"
+    # "King Abdullah University is seeking"
+    if not institute:
+        ctx_patterns = [
+            # "The <Name> invites applications" / "is seeking" / "is looking for"
+            r'(?:The\s+|At\s+)?'
+            r'((?:[A-Z][\w\'-]+\s+){1,6}'
+            r'(?:University|College|Institute|Hospital|Center|Centre|Universit[àéè]|Polytechnic)'
+            r'(?:\s+of\s+(?:the\s+)?[A-Z][\w]+(?:\s+[A-Za-z]+){0,3})?)'
+            r'\s+(?:invites?|is\s+(?:seeking|looking|recruiting|offering)|seeks|offers|has\s+an?\s+opening)',
+            # "<Name> — <dept> is seeking" (sometimes institute precedes a dash)
+            r'((?:[A-Z][\w\'-]+\s+){1,6}'
+            r'(?:University|College|Institute|Hospital|Center|Centre|Universit[àéè]))'
+            r'\s*[–—-]\s*.{0,80}?\s+(?:is\s+(?:seeking|looking|recruiting)|invites?)',
+        ]
+        for pat in ctx_patterns:
+            m = re.search(pat, desc)
+            if m:
+                candidate = _clean_candidate(m.group(1))
+                if candidate:
+                    institute = candidate
+                    break
+
+    # Strategy D: ScholarshipDB format — description often starts with
+    # institute-related text in the first ~300 chars
+    if not institute:
+        # Check the first 300 characters for an institute name
+        head = desc[:300]
+        head_inst = re.search(
+            r'((?:[A-Z][\w\'-]+\s+){0,4}'
+            r'(?:University|College|Institute|Hospital|Center|Centre|Universit[àéè]|Polytechnic)'
+            r'(?:\s+(?:of|for|de|di)\s+(?:the\s+)?[A-Z][\w]+(?:\s+[A-Za-z]+){0,3})?)',
+            head,
+        )
+        if head_inst:
+            candidate = _clean_candidate(head_inst.group(1))
+            if candidate:
+                institute = candidate
+
+    # Strategy B: General university/institute pattern scan (full description)
+    if not institute:
+        uni_patterns = re.findall(
+            r'((?:[A-Z][a-z]+\s+){0,3}'
+            r'(?:University|College|Institute|Hospital|Polytechnic)'
+            r'(?:\s+of\s+(?:the\s+)?[A-Z][a-z]+(?:\s+(?:at\s+)?[A-Za-z]+){0,5})?)',
+            desc,
+        )
+        for candidate in uni_patterns:
+            cleaned = _clean_candidate(candidate)
+            if cleaned:
+                institute = cleaned
+                break
+
+    # Also try broader patterns for European institutes
+    if not institute:
+        eu_patterns = re.findall(
+            r'((?:[A-Z][a-z]+\s+){1,3}'
+            r'(?:Research\s+)?(?:Center|Centre|Institut|Laboratory|Laboratorium)'
+            r'(?:\s+(?:of|for|de|di)\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,2})?)',
+            desc,
+        )
+        for candidate in eu_patterns:
+            cleaned = _clean_candidate(candidate)
+            if cleaned:
+                institute = cleaned
+                break
+
+    if institute:
+        old_inst = job.get("institute", "")
+        job["institute"] = institute
+        logger.info("Resolved institute from description: %s -> %s", old_inst, institute)
+
+    return institute
+
+
+def _persist_updates(job: dict, updates: dict) -> None:
+    """Write update dict to the DB for the given job (by URL)."""
+    if not updates or not job.get("url"):
+        return
+    with db.get_connection() as conn:
+        set_parts = []
+        vals = []
+        for k, v in updates.items():
+            set_parts.append(f"{k} = ?")
+            vals.append(v)
+        vals.append(job["url"])
+        conn.execute(
+            f"UPDATE jobs SET {', '.join(set_parts)} WHERE url = ?",
+            vals,
+        )
+
+
 def resolve_aggregator_jobs(jobs: list[dict]) -> list[dict]:
     """Resolve aggregator jobs to find real institute and description.
 
-    For jobs from Inside Higher Ed, PhDFinder etc., follows the LinkedIn
-    URL to extract the actual employer, location, and description.
+    For LinkedIn-sourced aggregator jobs (Inside Higher Ed, PhDFinder etc.),
+    follows the LinkedIn URL to extract the actual employer.
+
+    For non-LinkedIn aggregator jobs (Nature Careers via ScholarshipDB,
+    Times Higher Education via EURAXESS etc.), extracts the real institute
+    from the job description already stored in the DB.
 
     Updates jobs in-place and persists changes to DB.
     """
-    candidates = [
+    # --- Pass 1: LinkedIn-sourced aggregator jobs ---
+    linkedin_candidates = [
         j for j in jobs
         if _is_aggregator(j) and _is_linkedin_url(j.get("url", ""))
     ]
-    if not candidates:
+
+    # --- Pass 2: Non-LinkedIn aggregator jobs (description-based resolution) ---
+    description_candidates = [
+        j for j in jobs
+        if _is_aggregator(j) and not _is_linkedin_url(j.get("url", ""))
+    ]
+
+    total = len(linkedin_candidates) + len(description_candidates)
+    if total == 0:
         return jobs
 
-    logger.info("Resolving %d aggregator jobs", len(candidates))
+    logger.info(
+        "Resolving %d aggregator jobs (%d LinkedIn, %d description-based)",
+        total, len(linkedin_candidates), len(description_candidates),
+    )
     resolved = 0
 
-    for job in candidates:
+    # --- LinkedIn resolution (existing logic) ---
+    for job in linkedin_candidates:
         url = job["url"]
-        logger.debug("Resolving aggregator job: %s", url)
+        logger.debug("Resolving aggregator job (LinkedIn): %s", url)
 
         info = _resolve_linkedin_job(url)
         time.sleep(1.5)
@@ -246,7 +476,7 @@ def resolve_aggregator_jobs(jobs: list[dict]) -> list[dict]:
             old_inst = job.get("institute", "")
             job["institute"] = info["institute"]
             updates["institute"] = info["institute"]
-            logger.info("Resolved institute: %s → %s", old_inst, info["institute"])
+            logger.info("Resolved institute: %s -> %s", old_inst, info["institute"])
 
         if info.get("description") and len(info["description"]) > len(job.get("description") or ""):
             job["description"] = info["description"]
@@ -282,21 +512,20 @@ def resolve_aggregator_jobs(jobs: list[dict]) -> list[dict]:
                 updates["country"] = country
 
         # Persist to DB
-        if updates and job.get("url"):
-            with db.get_connection() as conn:
-                set_parts = []
-                vals = []
-                for k, v in updates.items():
-                    set_parts.append(f"{k} = ?")
-                    vals.append(v)
-                vals.append(job["url"])
-                conn.execute(
-                    f"UPDATE jobs SET {', '.join(set_parts)} WHERE url = ?",
-                    vals,
-                )
+        if updates:
+            _persist_updates(job, updates)
             resolved += 1
 
-    logger.info("Resolved %d/%d aggregator jobs", resolved, len(candidates))
+    # --- Description-based resolution (Nature Careers, THE, etc.) ---
+    for job in description_candidates:
+        logger.debug("Resolving aggregator job (description): %s", job.get("url", "?"))
+
+        inst = _resolve_from_description(job)
+        if inst:
+            _persist_updates(job, {"institute": inst})
+            resolved += 1
+
+    logger.info("Resolved %d/%d aggregator jobs", resolved, total)
     return jobs
 
 
@@ -396,3 +625,93 @@ def enrich_jobs_deep(jobs: list[dict]) -> list[dict]:
 
     logger.info("Deep enrichment complete")
     return jobs
+
+
+# ---------------------------------------------------------------------------
+# 4. One-time migration: fix existing aggregator institute names in the DB
+# ---------------------------------------------------------------------------
+
+def fix_existing_aggregators() -> int:
+    """Resolve institute names for existing aggregator jobs in the database.
+
+    Queries all jobs whose institute matches the aggregator list, then
+    attempts to extract the real institute from each job's description.
+    Updates the DB in-place.
+
+    Returns the number of jobs successfully resolved.
+    """
+    placeholders = ", ".join("?" for _ in _AGGREGATOR_INSTITUTES)
+    query = (
+        f"SELECT id, title, institute, description, url "
+        f"FROM jobs WHERE LOWER(TRIM(institute)) IN ({placeholders})"
+    )
+    params = list(_AGGREGATOR_INSTITUTES)
+
+    with db.get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    jobs = [dict(r) for r in rows]
+    if not jobs:
+        logger.info("fix_existing_aggregators: no aggregator jobs found")
+        return 0
+
+    logger.info("fix_existing_aggregators: found %d aggregator jobs to resolve", len(jobs))
+    resolved = 0
+
+    from src.matching.scorer import guess_country_from_institute, get_region, get_institution_tier
+
+    for job in jobs:
+        inst = _resolve_from_description(job)
+        if inst:
+            # Also infer country/region/tier from the resolved institute
+            country = guess_country_from_institute(inst)
+            region = get_region(country) if country else None
+            tier = get_institution_tier(inst)
+            with db.get_connection() as conn:
+                updates = ["institute = ?"]
+                params = [inst]
+                if country:
+                    updates.append("country = ?")
+                    params.append(country)
+                if region:
+                    updates.append("region = ?")
+                    params.append(region)
+                if tier:
+                    updates.append("tier = ?")
+                    params.append(tier)
+                params.append(job["id"])
+                conn.execute(
+                    f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?",
+                    params,
+                )
+            resolved += 1
+            logger.info(
+                "Fixed job #%d: %s -> %s (country=%s, tier=%s) (%s)",
+                job["id"], job.get("institute", ""), inst,
+                country or "?", tier,
+                (job.get("title") or "")[:60],
+            )
+        else:
+            logger.debug(
+                "Could not resolve institute for job #%d: %s",
+                job["id"], (job.get("title") or "")[:60],
+            )
+
+    logger.info(
+        "fix_existing_aggregators: resolved %d/%d aggregator jobs",
+        resolved, len(jobs),
+    )
+    return resolved
+
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
+    db.init_db()
+    n = fix_existing_aggregators()
+    print(f"Resolved {n} aggregator jobs.")
+    sys.exit(0)

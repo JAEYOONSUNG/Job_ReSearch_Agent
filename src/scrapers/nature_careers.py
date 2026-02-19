@@ -201,7 +201,7 @@ class NatureCareersScraper(BaseScraper):
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 50:
-                        job["description"] = text[:3000]
+                        job["description"] = text[:5000]
                         found_desc = True
                         break
 

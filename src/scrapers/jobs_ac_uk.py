@@ -18,11 +18,21 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.jobs.ac.uk"
 
 SEARCH_KEYWORDS = [
+    # Field-specific
     "postdoc synthetic biology",
     "postdoctoral CRISPR",
     "postdoc protein engineering",
     "postdoc microbiology",
     "postdoc biotechnology",
+    # Institution-specific (premier UK research institutes)
+    "Wellcome Sanger Institute",
+    "Francis Crick Institute",
+    "MRC Laboratory of Molecular Biology",
+    "European Bioinformatics Institute",
+    "Babraham Institute",
+    "University of Oxford biology",
+    "University of Cambridge biology",
+    "Imperial College London biology",
 ]
 
 MAX_PAGES = 2
@@ -145,7 +155,7 @@ class JobsAcUkScraper(BaseScraper):
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 100:
-                        job["description"] = text[:3000]
+                        job["description"] = text[:5000]
                         found_desc = True
                         break
 

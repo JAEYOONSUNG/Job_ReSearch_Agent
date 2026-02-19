@@ -1,4 +1,17 @@
-"""AcademicPositions.com scraper for postdoc listings in life sciences."""
+"""AcademicPositions.com scraper for postdoc listings in life sciences.
+
+The site uses Laravel Livewire for its frontend but renders job listings
+server-side, so plain HTTP GET requests work for both listing and detail
+pages.  Category browsing uses URL patterns like::
+
+    /jobs/position/post-doc          (all postdocs)
+    /jobs/field/molecular-biology    (by research field)
+    /jobs/field/microbiology?page=2  (pagination)
+
+There is no public GET-based keyword search; the search form uses a
+Livewire POST mechanism.  We therefore rely on browsing multiple
+field categories relevant to life sciences.
+"""
 
 from __future__ import annotations
 
@@ -17,25 +30,22 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://academicpositions.com"
 
-# AcademicPositions has category-based URLs for browsing
-SEARCH_URLS = [
-    f"{BASE_URL}/find-jobs/postdoc/life-sciences",
-    f"{BASE_URL}/find-jobs/postdoc/biological-sciences",
-    f"{BASE_URL}/find-jobs/postdoc/chemistry",
-    f"{BASE_URL}/find-jobs/postdoc/biotechnology",
+# ── Category URLs ────────────────────────────────────────────────────────
+# The site organises jobs by position type and by field.
+# We scrape the postdoc position listing plus several life-science fields.
+
+CATEGORY_URLS = [
+    # Position-based (all postdocs)
+    f"{BASE_URL}/jobs/position/post-doc",
+    # Field-based (life-science & adjacent)
+    f"{BASE_URL}/jobs/field/molecular-biology",
+    f"{BASE_URL}/jobs/field/cell-biology",
+    f"{BASE_URL}/jobs/field/biotechnology",
+    f"{BASE_URL}/jobs/field/microbiology",
+    f"{BASE_URL}/jobs/field/genetics",
 ]
 
-# Also search with keywords
-SEARCH_API_URL = f"{BASE_URL}/find-jobs"
-SEARCH_KEYWORDS_AP = [
-    "postdoc synthetic biology",
-    "postdoc CRISPR",
-    "postdoc protein engineering",
-    "postdoc microbiology",
-    "postdoc metabolic engineering",
-]
-
-MAX_PAGES = 3
+MAX_PAGES = 5  # 30 results per page => up to 150 per category
 
 
 class AcademicPositionsScraper(BaseScraper):
@@ -50,33 +60,32 @@ class AcademicPositionsScraper(BaseScraper):
     # ── Listing page ──────────────────────────────────────────────────────
 
     def _parse_listing_page(self, html: str) -> list[dict[str, Any]]:
-        """Parse a search/category results page."""
+        """Parse a search/category results page.
+
+        Each job card is a ``div.list-group-item`` containing:
+        - An employer link ``a.job-link[href*="/employer/"]``
+        - A location div ``div.job-locations``
+        - A detail link ``a[href*="/ad/"]`` wrapping an ``<h4>`` title
+        - A metadata row ``div.row.row-tight`` with published date,
+          optional closing date, and position type
+        """
         soup = BeautifulSoup(html, "html.parser")
         jobs: list[dict[str, Any]] = []
 
-        # AcademicPositions renders job cards in list items or divs
-        cards = soup.select(
-            "div.job-card, div.search-result, article.job-listing, "
-            "li.job-item, div.position-card, div[class*='JobCard'], "
-            "a[class*='JobCard']"
-        )
+        cards = soup.select("div.list-group-item")
 
         if not cards:
-            # Fallback: any links pointing to /ad/ or /jobs/ detail pages
-            for link in soup.select(
-                "a[href*='/ad/'], a[href*='/jobs/'], a[href*='/position/']"
-            ):
+            # Fallback: any links pointing to /ad/ detail pages
+            for link in soup.select("a[href*='/ad/']"):
                 href = link.get("href", "")
                 title = link.get_text(strip=True)
                 if title and len(title) > 5 and href:
                     full_url = urljoin(BASE_URL, href)
-                    # Avoid navigation/category links
-                    if re.search(r"/ad/|/position/|/jobs/\d+", href):
-                        jobs.append({
-                            "title": title,
-                            "url": full_url,
-                            "source": self.name,
-                        })
+                    jobs.append({
+                        "title": title,
+                        "url": full_url,
+                        "source": self.name,
+                    })
             return jobs
 
         for card in cards:
@@ -87,51 +96,42 @@ class AcademicPositionsScraper(BaseScraper):
         return jobs
 
     def _parse_card(self, card: Tag) -> dict[str, Any] | None:
-        """Extract job info from a search result card."""
-        # Title + link
-        link = card if card.name == "a" else card.select_one(
-            "a[href*='/ad/'], a[href*='/position/'], a[href*='/jobs/'], h2 a, h3 a"
-        )
-        if not link:
+        """Extract job info from a ``div.list-group-item`` card."""
+
+        # ── Title + detail link ──────────────────────────────────────────
+        detail_link = card.select_one("a[href*='/ad/']")
+        if not detail_link:
             return None
 
-        title_el = card.select_one("h2, h3, span.title, div.title, strong")
-        title = title_el.get_text(strip=True) if title_el else link.get_text(strip=True)
-        href = link.get("href", "")
+        title_el = detail_link.select_one("h4")
+        title = title_el.get_text(strip=True) if title_el else detail_link.get_text(strip=True)
+        href = detail_link.get("href", "")
         if not title or not href:
             return None
         url = urljoin(BASE_URL, href)
 
-        # Institute
-        inst_el = card.select_one(
-            "span.employer, span.institution, div.employer, "
-            "p.employer, span.company, div.university"
-        )
-        institute = inst_el.get_text(strip=True) if inst_el else None
+        # ── Employer / institute ─────────────────────────────────────────
+        inst_link = card.select_one("a.job-link[href*='/employer/']")
+        institute = inst_link.get_text(strip=True) if inst_link else None
 
-        # Location / Country
-        loc_el = card.select_one(
-            "span.location, div.location, span.country, "
-            "p.location, span.place"
-        )
-        location = loc_el.get_text(strip=True) if loc_el else None
+        # ── Location / country ───────────────────────────────────────────
+        loc_div = card.select_one("div.job-locations")
+        location = loc_div.get_text(strip=True) if loc_div else None
         country = self._extract_country(location)
 
-        # Deadline
-        deadline_el = card.select_one(
-            "span.deadline, time, span.date, div.deadline"
-        )
+        # ── Deadline (from the metadata row) ─────────────────────────────
         deadline = None
-        if deadline_el:
-            raw = deadline_el.get("datetime") or deadline_el.get_text(strip=True)
-            deadline = self._parse_date(raw)
+        meta_row = card.select_one("div.row.row-tight")
+        if meta_row:
+            for col in meta_row.select("div.col-auto"):
+                col_text = col.get_text(strip=True)
+                if "Closing on:" in col_text:
+                    deadline = self._parse_date(col_text)
+                    break
 
-        # Field
-        field_el = card.select_one(
-            "span.discipline, span.field, span.category, "
-            "div.discipline"
-        )
-        field = field_el.get_text(strip=True) if field_el else None
+        # ── Summary (the <p> snippet below the title) ────────────────────
+        summary_el = detail_link.select_one("p")
+        summary = summary_el.get_text(strip=True) if summary_el else None
 
         return {
             "title": title,
@@ -139,7 +139,7 @@ class AcademicPositionsScraper(BaseScraper):
             "country": country,
             "url": url,
             "deadline": deadline,
-            "field": field,
+            "summary": summary,
             "source": self.name,
         }
 
@@ -155,19 +155,20 @@ class AcademicPositionsScraper(BaseScraper):
             resp = self.fetch(url)
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Description (larger for structured parsing)
+            # ── Description ──────────────────────────────────────────────
+            # The main job description lives in a div with classes
+            # "editor ck-content" (CKEditor output).
             found_desc = False
             for sel in (
-                "div.job-description", "div.position-description",
-                "div[class*='Description']", "div.content-body",
-                "div.ad-description", "section.description",
-                "article",
+                "div.editor.ck-content",
+                "div.ck-content",
+                "div.editor",
             ):
                 desc_el = soup.select_one(sel)
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 50:
-                        job["description"] = text[:3000]
+                        job["description"] = text[:5000]
                         found_desc = True
                         break
 
@@ -176,104 +177,141 @@ class AcademicPositionsScraper(BaseScraper):
                 if fallback:
                     job["description"] = fallback
 
-            # Institute
+            # ── Institute (from header h6 > a) ───────────────────────────
             if not job.get("institute"):
                 inst_el = soup.select_one(
-                    "a.employer, span.employer, "
-                    "div.employer-name, h2.employer"
+                    "h6 a[href*='/employer/']"
                 )
                 if inst_el:
                     job["institute"] = inst_el.get_text(strip=True)
 
-            # Country
+            # ── Country (from header job-locations) ──────────────────────
             if not job.get("country"):
-                loc_el = soup.select_one(
-                    "span.location, div.location, "
-                    "span[itemprop='addressCountry']"
-                )
+                header = soup.select_one("#premium-template-header-content")
+                if header:
+                    loc_el = header.select_one("div.job-locations")
+                else:
+                    loc_el = soup.select_one("div.job-locations")
                 if loc_el:
                     job["country"] = self._extract_country(
                         loc_el.get_text(strip=True)
                     )
 
-            # Deadline
-            if not job.get("deadline"):
-                dl_el = soup.select_one(
-                    "span.deadline, div.application-deadline, "
-                    "time.deadline"
-                )
-                if dl_el:
-                    raw = dl_el.get("datetime") or dl_el.get_text(strip=True)
-                    job["deadline"] = self._parse_date(raw)
+            # ── Metadata rows (label → value pairs) ─────────────────────
+            # The detail page has rows like:
+            #   <div class="row mb-3">
+            #     <div class="col-12 col-md-4"><div class="font-weight-bold">Label</div></div>
+            #     <div class="col-auto col-md-8">Value</div>
+            #   </div>
+            metadata = self._parse_metadata_rows(soup)
 
-            # Department
-            dept_el = soup.select_one(
-                "span.department, div.department, "
-                "span[itemprop='department']"
-            )
-            if dept_el:
-                job["department"] = dept_el.get_text(strip=True)
+            if not job.get("deadline") and metadata.get("Application deadline"):
+                raw_dl = metadata["Application deadline"]
+                if raw_dl.lower() not in ("unspecified", "not specified", "n/a", ""):
+                    job["deadline"] = self._parse_date(raw_dl)
+
+            if not job.get("field") and metadata.get("Field"):
+                # Field value may have commas and "and N more" suffix
+                raw_field = metadata["Field"]
+                # Clean up: "Biotechnology,,Molecular Biology,,..." -> list
+                parts = [p.strip() for p in re.split(r",{1,2}", raw_field) if p.strip()]
+                # Remove "and N more..." suffix from last part
+                cleaned = []
+                for p in parts:
+                    m = re.match(r"^and \d+ more", p)
+                    if not m:
+                        cleaned.append(p)
+                job["field"] = ", ".join(cleaned[:5]) if cleaned else raw_field
 
         except Exception:
             self.logger.debug("Could not fetch detail: %s", url)
 
         return job
 
+    @staticmethod
+    def _parse_metadata_rows(soup: BeautifulSoup) -> dict[str, str]:
+        """Extract label-value metadata from the detail page.
+
+        Returns a dict like ``{"Application deadline": "2026-03-01", ...}``.
+        """
+        meta: dict[str, str] = {}
+        for label_div in soup.find_all("div", class_="font-weight-bold"):
+            label = label_div.get_text(strip=True)
+            if label not in (
+                "Title", "Employer", "Location", "Published",
+                "Application deadline", "Job type", "Field",
+            ):
+                continue
+            # Walk up: label_div -> col div -> row div
+            col = label_div.parent
+            if not col:
+                continue
+            row = col.parent
+            if not row:
+                continue
+            # The value is in the second col child
+            value_div = row.select_one("div.col-auto.col-md-8, div.col-md-8")
+            if value_div:
+                meta[label] = value_div.get_text(strip=True)
+        return meta
+
     # ── Main scrape ───────────────────────────────────────────────────────
 
     def scrape(self) -> list[dict[str, Any]]:
         all_jobs: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
 
-        # 1. Browse category pages
-        for category_url in SEARCH_URLS:
+        for category_url in CATEGORY_URLS:
             for page in range(MAX_PAGES):
                 try:
-                    url = category_url if page == 0 else f"{category_url}?page={page + 1}"
+                    url = (
+                        category_url
+                        if page == 0
+                        else f"{category_url}?page={page + 1}"
+                    )
                     resp = self.fetch(url)
                     page_jobs = self._parse_listing_page(resp.text)
                     if not page_jobs:
                         break
+                    # Deduplicate across categories
+                    new_jobs = []
+                    for j in page_jobs:
+                        if j["url"] not in seen_urls:
+                            seen_urls.add(j["url"])
+                            new_jobs.append(j)
                     self.logger.info(
-                        "%s page %d: %d results", category_url, page + 1, len(page_jobs)
+                        "%s page %d: %d results (%d new)",
+                        category_url, page + 1, len(page_jobs), len(new_jobs),
                     )
-                    all_jobs.extend(page_jobs)
+                    all_jobs.extend(new_jobs)
                 except Exception:
                     self.logger.exception(
-                        "Failed to fetch %s page %d", category_url, page + 1
+                        "Failed to fetch %s page %d", category_url, page + 1,
                     )
                     break
-
-        # 2. Keyword searches
-        for keyword in SEARCH_KEYWORDS_AP:
-            try:
-                params = {"q": keyword, "type": "postdoc"}
-                resp = self.fetch(SEARCH_API_URL, params=params)
-                kw_jobs = self._parse_listing_page(resp.text)
-                self.logger.info(
-                    "Keyword '%s': %d results", keyword, len(kw_jobs)
-                )
-                all_jobs.extend(kw_jobs)
-            except Exception:
-                self.logger.exception(
-                    "Failed keyword search: %s", keyword
-                )
 
         # Keyword filter
         filtered: list[dict[str, Any]] = []
         for job in all_jobs:
-            blob = f"{job.get('title', '')} {job.get('description', '')} {job.get('field', '')}"
+            blob = (
+                f"{job.get('title', '')} {job.get('summary', '')} "
+                f"{job.get('description', '')} {job.get('field', '')}"
+            )
             if self._keyword_match(blob):
                 filtered.append(job)
 
-        # Enrich top results (parallel, skip already-in-DB)
+        self.logger.info(
+            "AcademicPositions: %d total, %d after keyword filter",
+            len(all_jobs), len(filtered),
+        )
+
+        # Enrich all filtered results (parallel, skip already-in-DB)
         enriched = self._parallel_enrich(
-            filtered, self._enrich_from_detail, max_workers=4, limit=40,
+            filtered, self._enrich_from_detail, max_workers=4,
         )
 
         self.logger.info(
-            "AcademicPositions: %d total, %d after filter",
-            len(all_jobs),
-            len(enriched),
+            "AcademicPositions: %d enriched", len(enriched),
         )
         return enriched
 
@@ -298,8 +336,10 @@ class AcademicPositionsScraper(BaseScraper):
         if not raw:
             return None
         raw = raw.strip()
+        # Try direct date formats first
         for fmt in (
             "%Y-%m-%d",
+            "%Y-%m-%d %H:%M",
             "%Y-%m-%dT%H:%M:%S",
             "%B %d, %Y",
             "%d %B %Y",
@@ -310,5 +350,6 @@ class AcademicPositionsScraper(BaseScraper):
                 return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
             except ValueError:
                 continue
+        # Extract YYYY-MM-DD anywhere in string (e.g. "Closing on: 2026-02-28 (CET)")
         m = re.search(r"\d{4}-\d{2}-\d{2}", raw)
         return m.group(0) if m else None

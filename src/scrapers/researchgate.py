@@ -29,6 +29,10 @@ SEARCH_TERMS = [
     "postdoctoral researcher biology",
     "postdoc directed evolution",
     "postdoc genome engineering",
+    "postdoc biochemistry",
+    "postdoc extremophiles",
+    "postdoc systems biology",
+    "postdoc bioengineering",
 ]
 
 MAX_PAGES = 3
@@ -135,27 +139,47 @@ class ResearchGateScraper(BaseScraper):
 
     # ── Detail page ───────────────────────────────────────────────────────
 
+    @staticmethod
+    def _strip_html(raw: str) -> str:
+        """Strip HTML tags from a string, returning plain text."""
+        if "<" not in raw:
+            return raw
+        desc_soup = BeautifulSoup(raw, "html.parser")
+        return desc_soup.get_text(separator="\n", strip=True)
+
     def _enrich_from_detail(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Fetch the full job detail page (HTTP first, Playwright fallback)."""
+        """Fetch the full job detail page via Playwright (primary) with HTTP fallback.
+
+        ResearchGate uses Cloudflare bot protection which blocks plain HTTP
+        requests, so Playwright is used as the primary fetch method.
+        """
         url = job.get("url")
         if not url:
             return job
 
         html_text = None
-        # Try HTTP first
-        try:
-            resp = self.fetch(url)
-            html_text = resp.text
-        except Exception:
-            self.logger.debug("HTTP detail fetch failed for %s, trying Playwright", url)
 
-        # Playwright fallback on HTTP failure
+        # Playwright first (ResearchGate blocks HTTP with Cloudflare 403)
+        try:
+            from src.scrapers.browser import fetch_page
+            html_text = fetch_page(
+                url,
+                wait_selector="div.job-description, div.job-details-nova, script[type='application/ld+json']",
+                wait_ms=5000,
+                timeout=40000,
+            )
+        except Exception:
+            self.logger.debug("Playwright detail fetch failed for %s", url)
+
+        # HTTP fallback (rarely succeeds due to Cloudflare, but worth trying)
         if not html_text:
             try:
-                from src.scrapers.browser import fetch_page
-                html_text = fetch_page(url, wait_selector="div[itemprop='description'], article", wait_ms=4000)
+                resp = self.fetch(url)
+                # Check that we got a real page, not a Cloudflare challenge
+                if resp.status_code == 200 and "JobPosting" in resp.text:
+                    html_text = resp.text
             except Exception:
-                self.logger.debug("Playwright detail fetch also failed for %s", url)
+                self.logger.debug("HTTP detail fetch also failed for %s", url)
 
         if not html_text:
             return job
@@ -163,30 +187,65 @@ class ResearchGateScraper(BaseScraper):
         try:
             soup = BeautifulSoup(html_text, "html.parser")
 
-            # Full description — try multiple selectors
-            found_desc = False
-            for sel in (
-                "div.job-description",
-                "div.nova-legacy-o-stack",
-                "div.nova-o-stack",
-                "div[itemprop='description']",
-                "div.research-detail-middle-section",
-                "div[class*='description']",
-            ):
-                desc_el = soup.select_one(sel)
-                if desc_el:
-                    text = desc_el.get_text(separator="\n", strip=True)
-                    if len(text) > 50:
-                        job["description"] = text[:3000]
-                        found_desc = True
-                        break
+            # Try JSON-LD structured data first (most reliable)
+            import json as _json
+            for script in soup.select("script[type='application/ld+json']"):
+                try:
+                    ld = _json.loads(script.string or "")
+                    if isinstance(ld, dict) and ld.get("@type") == "JobPosting":
+                        if ld.get("description") and len(ld["description"]) > 50:
+                            # JSON-LD description contains HTML tags; strip them
+                            clean = self._strip_html(ld["description"])
+                            if len(clean) > 50:
+                                job["description"] = clean[:5000]
+                        org = ld.get("hiringOrganization", {})
+                        if isinstance(org, dict) and org.get("name"):
+                            job["institute"] = org["name"]
+                        if isinstance(org, dict) and org.get("department"):
+                            job.setdefault("department", org["department"])
+                        loc = ld.get("jobLocation", {})
+                        if isinstance(loc, dict):
+                            addr = loc.get("address", {})
+                            if isinstance(addr, dict) and addr.get("addressCountry"):
+                                job["country"] = addr["addressCountry"]
+                        # Posted date from JSON-LD
+                        if ld.get("datePosted") and not job.get("posted_date"):
+                            job["posted_date"] = self._parse_date(ld["datePosted"])
+                        # Deadline from JSON-LD
+                        if ld.get("validThrough") and not job.get("deadline"):
+                            job["deadline"] = self._parse_date(ld["validThrough"])
+                except (ValueError, TypeError):
+                    pass
+
+            # Full description from CSS selectors if JSON-LD didn't provide one
+            found_desc = bool(job.get("description") and len(job["description"]) > 50)
+            if not found_desc:
+                for sel in (
+                    "div.job-description",
+                    "div.job-description.c-cms-output",
+                    "div.c-cms-output",
+                    "div.job-details-nova",
+                    "div[class*='job-description']",
+                    "div.nova-legacy-o-stack",
+                    "div.nova-o-stack",
+                    "div[itemprop='description']",
+                    "div.research-detail-middle-section",
+                    "div[class*='description']",
+                ):
+                    desc_el = soup.select_one(sel)
+                    if desc_el:
+                        text = desc_el.get_text(separator="\n", strip=True)
+                        if len(text) > 50:
+                            job["description"] = text[:5000]
+                            found_desc = True
+                            break
 
             if not found_desc:
                 fallback = self._extract_description_fallback(html_text)
                 if fallback:
                     job["description"] = fallback
 
-            # Institute
+            # Institute (if not found via JSON-LD)
             if not job.get("institute"):
                 inst_el = soup.select_one(
                     "a[href*='/institution/'], "
@@ -221,8 +280,32 @@ class ResearchGateScraper(BaseScraper):
             if dept_el and not job.get("department"):
                 job["department"] = dept_el.get_text(strip=True)
 
+            # Extract PI name, field, and deadline from description
+            desc = job.get("description") or ""
+            if desc:
+                from src.matching.job_parser import (
+                    extract_deadline,
+                    extract_pi_name,
+                    infer_field,
+                )
+
+                if not job.get("pi_name"):
+                    pi = extract_pi_name(desc)
+                    if pi:
+                        job["pi_name"] = pi
+
+                if not job.get("field"):
+                    field = infer_field(desc)
+                    if field:
+                        job["field"] = field
+
+                if not job.get("deadline"):
+                    dl = extract_deadline(desc)
+                    if dl:
+                        job["deadline"] = dl
+
         except Exception:
-            self.logger.debug("Could not parse detail for %s", url)
+            self.logger.debug("Could not parse detail for %s", url, exc_info=True)
 
         return job
 
@@ -301,7 +384,7 @@ class ResearchGateScraper(BaseScraper):
 
         # Parallel detail-page enrichment (skip already-in-DB)
         filtered = self._parallel_enrich(
-            candidates, self._enrich_from_detail, max_workers=3, limit=40,
+            candidates, self._enrich_from_detail, max_workers=3,
         )
 
         self.logger.info(
@@ -341,7 +424,7 @@ class ResearchGateScraper(BaseScraper):
     def _parse_date(raw: str | None) -> str | None:
         if not raw:
             return None
-        for fmt in ("%Y-%m-%d", "%B %d, %Y", "%d %B %Y", "%d/%m/%Y"):
+        for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%d/%m/%Y"):
             try:
                 return datetime.strptime(raw.strip(), fmt).strftime("%Y-%m-%d")
             except ValueError:

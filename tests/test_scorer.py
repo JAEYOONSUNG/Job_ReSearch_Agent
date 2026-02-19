@@ -81,12 +81,12 @@ class TestGetInstitutionTier:
 
     def test_unranked_institution(self, mock_rankings):
         with patch("src.matching.scorer.load_rankings", return_value=mock_rankings):
-            assert get_institution_tier("Unknown University") == 4
+            assert get_institution_tier("Unknown University") == 5
 
     def test_empty_institution(self, mock_rankings):
         with patch("src.matching.scorer.load_rankings", return_value=mock_rankings):
-            assert get_institution_tier("") == 4
-            assert get_institution_tier(None) == 4
+            assert get_institution_tier("") == 5
+            assert get_institution_tier(None) == 5
 
     def test_partial_match(self, mock_rankings):
         """Partial string matching should work for institution lookup."""

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any
 
 from src.config import COUNTRY_TO_REGION, SEARCH_KEYWORDS
@@ -11,10 +13,24 @@ from src.scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 # Sites the jobspy library supports
-JOBSPY_SITES = ["indeed", "linkedin", "google", "zip_recruiter"]
+JOBSPY_SITES = ["indeed", "linkedin", "google", "glassdoor", "zip_recruiter"]
 
 # We limit results per query to avoid huge payloads
 RESULTS_PER_QUERY = 25
+
+# LinkedIn-specific CSS selectors for job descriptions (ordered by specificity)
+_LINKEDIN_DESC_SELECTORS = [
+    "div.show-more-less-html__markup",
+    "div.description__text",
+    "section.description",
+    "div[class*='description']",
+]
+
+# Regex to extract LinkedIn job ID from URL
+_LINKEDIN_JOB_ID_RE = re.compile(r"linkedin\.com/jobs/view/(\d+)")
+
+# LinkedIn guest API endpoint (works without authentication)
+_LINKEDIN_GUEST_API = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 
 
 def _safe_str(val: Any) -> str | None:
@@ -46,14 +62,144 @@ class JobSpyScraper(BaseScraper):
     def name(self) -> str:
         return "jobspy"
 
-    def _fetch_description(self, url: str) -> str | None:
-        """Fetch a job page and extract description when jobspy returned None."""
+    @staticmethod
+    def _is_linkedin_url(url: str) -> bool:
+        """Check if a URL is a LinkedIn job posting."""
+        return "linkedin.com/jobs" in url
+
+    @staticmethod
+    def _extract_linkedin_job_id(url: str) -> str | None:
+        """Extract the numeric job ID from a LinkedIn job URL."""
+        m = _LINKEDIN_JOB_ID_RE.search(url)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _extract_linkedin_description(html: str) -> str | None:
+        """Extract job description from LinkedIn HTML using known selectors.
+
+        Tries LinkedIn-specific selectors first, then falls back to JSON-LD,
+        which LinkedIn sometimes embeds in the page.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Try LinkedIn-specific selectors
+        for sel in _LINKEDIN_DESC_SELECTORS:
+            el = soup.select_one(sel)
+            if el:
+                text = el.get_text(separator="\n", strip=True)
+                if len(text) >= 100:
+                    return text[:5000]
+
+        # Try JSON-LD structured data
+        for script in soup.select("script[type='application/ld+json']"):
+            try:
+                ld = json.loads(script.string or "")
+                if isinstance(ld, dict) and ld.get("description"):
+                    desc = str(ld["description"]).strip()
+                    if len(desc) >= 100:
+                        return desc[:5000]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return None
+
+    def _fetch_linkedin_description(self, url: str) -> str | None:
+        """Fetch a LinkedIn job description using the guest API or direct URL.
+
+        Strategy:
+        1. Try the lightweight guest API endpoint (smaller payload, more reliable)
+        2. Fall back to the full job page URL
+        Both approaches work without LinkedIn authentication.
+        """
+        job_id = self._extract_linkedin_job_id(url)
+
+        # Strategy 1: Guest API (lighter payload, ~80KB vs ~330KB)
+        if job_id:
+            try:
+                api_url = _LINKEDIN_GUEST_API.format(job_id=job_id)
+                resp = self.fetch(api_url, timeout=15)
+                desc = self._extract_linkedin_description(resp.text)
+                if desc:
+                    return desc
+            except Exception:
+                self.logger.debug("LinkedIn guest API failed for job %s", job_id)
+
+        # Strategy 2: Direct page URL
         try:
             resp = self.fetch(url, timeout=15)
-            return self._extract_description_fallback(resp.text)
+            desc = self._extract_linkedin_description(resp.text)
+            if desc:
+                return desc
         except Exception:
-            self.logger.debug("Could not fetch description from %s", url)
+            self.logger.debug("LinkedIn direct fetch failed for %s", url)
+
+        return None
+
+    def _fetch_description_browser(self, url: str) -> str | None:
+        """Use Playwright to fetch job description when HTTP fails.
+
+        This is the last-resort fallback for pages that require JavaScript
+        rendering or block plain HTTP requests.
+        """
+        try:
+            from src.scrapers.browser import fetch_page
+
+            html = fetch_page(
+                url,
+                wait_selector="div.description__text, div.show-more-less-html__markup, div[class*='description']",
+                wait_ms=5000,
+                timeout=20000,
+            )
+            if not html:
+                return None
+
+            # For LinkedIn, use the targeted extractor
+            if self._is_linkedin_url(url):
+                desc = self._extract_linkedin_description(html)
+                if desc:
+                    return desc
+
+            # Generic fallback
+            return self._extract_description_fallback(html)
+        except Exception:
+            self.logger.debug("Browser fetch failed for %s", url)
             return None
+
+    def _fetch_description(self, url: str) -> str | None:
+        """Fetch a job page and extract description when jobspy returned None.
+
+        For LinkedIn URLs, uses a multi-strategy approach:
+        1. LinkedIn guest API (lightweight, no auth needed)
+        2. Direct HTTP to LinkedIn page
+        3. Playwright browser fallback
+
+        For other sites, uses standard HTTP with generic extraction,
+        falling back to Playwright if needed.
+        """
+        if self._is_linkedin_url(url):
+            # LinkedIn-specific path with targeted selectors
+            desc = self._fetch_linkedin_description(url)
+            if desc:
+                return desc
+            # Playwright fallback for LinkedIn
+            desc = self._fetch_description_browser(url)
+            if desc:
+                return desc
+            return None
+
+        # Non-LinkedIn: standard HTTP fetch
+        try:
+            resp = self.fetch(url, timeout=15)
+            desc = self._extract_description_fallback(resp.text)
+            if desc:
+                return desc
+        except Exception:
+            self.logger.debug("HTTP fetch failed for %s", url)
+
+        # Playwright fallback for non-LinkedIn
+        return self._fetch_description_browser(url)
 
     def scrape(self) -> list[dict[str, Any]]:
         try:
@@ -97,12 +243,32 @@ class JobSpyScraper(BaseScraper):
                     "JobSpy query failed for keyword: %s", keyword
                 )
 
-        # Back-fill descriptions for jobs that have none (up to 30)
+        # Back-fill descriptions for all jobs that have none
         empty_desc = [j for j in all_jobs if not j.get("description")]
-        for job in empty_desc[:30]:
-            desc = self._fetch_description(job["url"])
-            if desc:
-                job["description"] = desc
+        if empty_desc:
+            self.logger.info(
+                "Back-filling descriptions for %d/%d jobs",
+                len(empty_desc),
+                len(all_jobs),
+            )
+            filled = 0
+            for i, job in enumerate(empty_desc, 1):
+                desc = self._fetch_description(job["url"])
+                if desc:
+                    job["description"] = desc
+                    filled += 1
+                if i % 10 == 0:
+                    self.logger.info(
+                        "Back-fill progress: %d/%d checked, %d filled",
+                        i,
+                        len(empty_desc),
+                        filled,
+                    )
+            self.logger.info(
+                "Back-fill complete: %d/%d descriptions filled",
+                filled,
+                len(empty_desc),
+            )
 
         self.logger.info("Total JobSpy jobs collected: %d", len(all_jobs))
         return all_jobs
@@ -140,11 +306,20 @@ class JobSpyScraper(BaseScraper):
 
         conditions_parts = []
         if salary_min and salary_max:
-            conditions_parts.append(f"Salary: ${salary_min}-${salary_max}")
+            try:
+                smin = f"{int(float(salary_min)):,}"
+                smax = f"{int(float(salary_max)):,}"
+            except (ValueError, OverflowError):
+                smin, smax = salary_min, salary_max
+            conditions_parts.append(f"Salary: ${smin}-${smax}")
             if interval:
                 conditions_parts[-1] += f"/{interval}"
         elif salary_min:
-            conditions_parts.append(f"Salary: ${salary_min}+")
+            try:
+                smin = f"{int(float(salary_min)):,}"
+            except (ValueError, OverflowError):
+                smin = salary_min
+            conditions_parts.append(f"Salary: ${smin}+")
         if job_type:
             conditions_parts.append(f"Type: {job_type}")
 
@@ -152,7 +327,7 @@ class JobSpyScraper(BaseScraper):
             "title": title,
             "institute": company,
             "country": country,
-            "description": (description or "")[:3000],
+            "description": (description or "")[:5000],
             "url": url,
             "posted_date": date_posted,
             "source": f"jobspy_{site}" if site else "jobspy",

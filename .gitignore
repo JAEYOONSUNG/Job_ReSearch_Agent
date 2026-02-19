@@ -11,7 +11,7 @@ build/
 .venv/
 env/
 
-# Data
+# Data (user-specific)
 data/jobs.db
 data/cv_keywords.json
 data/*.xlsx
@@ -26,3 +26,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Claude Code
+.claude/

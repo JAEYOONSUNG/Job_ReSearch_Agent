@@ -194,6 +194,14 @@ def get_connection():
 # ── Job CRUD ───────────────────────────────────────────────────────────────
 
 
+_AGGREGATOR_INSTITUTES = {
+    "inside higher ed", "phdfinder", "higher ed jobs", "higheredjobs",
+    "academickeys", "chronicle of higher education",
+    "nature careers", "nature", "the",
+    "times higher education",
+}
+
+
 def upsert_job(job: dict) -> tuple[int, bool]:
     """Insert or update a job. Returns (job_id, is_new).
 
@@ -201,12 +209,19 @@ def upsert_job(job: dict) -> tuple[int, bool]:
     """
     with _DB_LOCK, get_connection() as conn:
         existing = conn.execute(
-            "SELECT id FROM jobs WHERE url = ?", (job.get("url"),)
+            "SELECT id, institute FROM jobs WHERE url = ?", (job.get("url"),)
         ).fetchone()
 
         if existing:
             job_id = existing["id"]
-            fields = {k: v for k, v in job.items() if k != "url" and v is not None}
+            fields = {k: v for k, v in job.items()
+                      if k != "url" and v is not None and v != ""}
+            # Don't overwrite a resolved institute with an aggregator name
+            if "institute" in fields:
+                new_inst = (fields["institute"] or "").lower().strip()
+                old_inst = (existing["institute"] or "").lower().strip()
+                if new_inst in _AGGREGATOR_INSTITUTES and old_inst not in _AGGREGATOR_INSTITUTES and old_inst:
+                    del fields["institute"]
             if fields:
                 set_clause = ", ".join(f"{k} = ?" for k in fields)
                 values = list(fields.values()) + [job_id]

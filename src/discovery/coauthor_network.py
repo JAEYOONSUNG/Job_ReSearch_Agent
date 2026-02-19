@@ -90,20 +90,40 @@ def _is_field_relevant(texts: list[str]) -> bool:
 
 
 def _get_institution_tier(affiliations: list[str]) -> Optional[int]:
-    """Return the best institution tier (1-3) from affiliations, or None."""
+    """Return the best institution tier (1-4) from affiliations, or None.
+
+    Also checks companies section (top_companies → 2, companies → 3).
+    """
     rankings = _get_rankings()
     if not rankings or not affiliations:
         return None
+
+    best: Optional[int] = None
+    tiers = rankings.get("tiers", {})
+    companies = rankings.get("companies", {})
+
     for aff in affiliations:
         aff_lower = aff.lower()
-        for tier_name, institutions in rankings.items():
-            tier_num = {"tier_1": 1, "tier_2": 2, "tier_3": 3}.get(tier_name)
-            if tier_num is None:
+        for tier_str, tier_data in tiers.items():
+            try:
+                tier_num = int(tier_str)
+            except (ValueError, TypeError):
                 continue
-            for inst in institutions:
+            for inst in tier_data.get("institutions", []):
                 if inst.lower() in aff_lower or aff_lower in inst.lower():
-                    return tier_num
-    return None
+                    if best is None or tier_num < best:
+                        best = tier_num
+        # Check companies
+        for inst in companies.get("top_companies", []):
+            if inst.lower() in aff_lower or aff_lower in inst.lower():
+                if best is None or 2 < best:
+                    best = 2
+        for inst in companies.get("companies", []):
+            if inst.lower() in aff_lower or aff_lower in inst.lower():
+                if best is None or 3 < best:
+                    best = 3
+
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +288,8 @@ def _process_coauthor(
         "name": name,
         "institute": institute,
         "semantic_id": semantic_id,
+        "s2_author_id": semantic_id,  # also store in s2_author_id for enrichment
+        "scholar_url": f"https://www.semanticscholar.org/author/{semantic_id}",
         "is_recommended": 1,
         "connected_seeds": source_pi_name,
         "h_index": metadata.get("h_index", 0),
@@ -288,19 +310,30 @@ def _process_coauthor(
             source_pi_name,
         )
     else:
-        # Append connected seed if not already listed
+        # Append connected seed if not already listed; backfill s2_author_id
         with db.get_connection() as conn:
             row = conn.execute(
-                "SELECT connected_seeds FROM pis WHERE id = ?", (pi_id,)
+                "SELECT connected_seeds, s2_author_id, scholar_url FROM pis WHERE id = ?",
+                (pi_id,),
             ).fetchone()
             existing = row["connected_seeds"] or "" if row else ""
+            updates: list[str] = ["is_recommended = 1", "updated_at = datetime('now')"]
+            params: list = []
             if source_pi_name not in existing:
-                updated = f"{existing}, {source_pi_name}" if existing else source_pi_name
-                conn.execute(
-                    "UPDATE pis SET connected_seeds = ?, is_recommended = 1, "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    (updated, pi_id),
-                )
+                updated_seeds = f"{existing}, {source_pi_name}" if existing else source_pi_name
+                updates.append("connected_seeds = ?")
+                params.append(updated_seeds)
+            if row and not row["s2_author_id"] and semantic_id:
+                updates.append("s2_author_id = ?")
+                params.append(semantic_id)
+            if row and not row["scholar_url"] and semantic_id:
+                updates.append("scholar_url = ?")
+                params.append(f"https://www.semanticscholar.org/author/{semantic_id}")
+            params.append(pi_id)
+            conn.execute(
+                f"UPDATE pis SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
 
     # Record coauthorship
     shared = len(coauthor.get("paper_titles", []))

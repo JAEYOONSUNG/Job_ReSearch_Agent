@@ -65,6 +65,16 @@ _PI_PATTERNS = [
     rf"(?:directed|headed|led|supervised)\s+(?:at|in)\s+(?:the\s+)?\w[\w\s,]{{0,60}}?\s+by\s+{_TITLE_OPT}{_FULL_NAME}",
     # Parenthetical PI mention: "(Prof. Name, url)" or "(supervised by Dr. Name)"
     rf"\({_TITLE}{_FULL_NAME}(?:\s*,|\s*\))",
+    # "About the PI: Prof. Name" / "About the supervisor: Dr. Name"
+    rf"[Aa]bout the (?:PI|supervisor|mentor|advisor|adviser)\s*[:]\s*{_TITLE_OPT}{_FULL_NAME}",
+    # "faculty mentor Name" (in titles or descriptions, e.g. "faculty mentor Lynette Cegelski")
+    rf"faculty\s+(?:mentor|advisor|adviser|sponsor)\s+{_TITLE_OPT}{_FULL_NAME}",
+    # "group leader Name" / "lab director Name" / "lab head Name"
+    rf"(?:group\s+leader|lab(?:oratory)?\s+(?:director|head|manager))\s*[:,]?\s*{_TITLE_OPT}{_FULL_NAME}",
+    # "(PI), Dr. Name" / "PI, Dr. Name" — comma between role and titled name
+    rf"\b(?:PI|Principal\s+Investigator)\)?\s*,\s*{_TITLE}{_FULL_NAME}",
+    # "Name, Group Leader" / "Name, Lab Head" (name before role, allows 2-4 part names)
+    rf"({_FIRST}(?:\s+{_UC}{_LC}+){{1,3}})\s*,\s*(?:Group\s+Leader|Lab(?:oratory)?\s+(?:Head|Director)|Principal\s+Investigator|[Pp]roject\s+[Ll]eader)",
 ]
 
 _PI_COMPILED = [re.compile(p, re.IGNORECASE) for p in _PI_PATTERNS]
@@ -305,6 +315,15 @@ def _is_valid_name(name: str) -> bool:
         "genetic", "genomic", "proteomic", "prokaryotic", "eukaryotic",
         "human", "tissue", "stem", "drug", "vaccine",
         "climate", "public", "global", "digital", "quantum",
+        "chromatin", "driven", "nurse", "oxidative", "membrane",
+        "peatland", "cement", "repair", "response", "sensing",
+        "prague", "hematology", "electrochemistry", "electrophysiology",
+        "energy", "nanotechnology", "cardiovascular", "postdoc",
+        "world", "news",
+        "aiming", "performing", "communicates", "collaborate", "collaborating",
+        "further", "former", "info", "weekend", "smart", "spring",
+        "professor", "doc", "phd", "ellis",  # titles/acronyms, not first names
+        "principal",  # "Principal Investigator" false match
     }
     if first_word in non_name_starters:
         return False
@@ -336,8 +355,13 @@ def _is_valid_name(name: str) -> bool:
         "research", "biology", "dna", "hr", "national", "modelling",
         "energy", "equity", "signalling", "signaling",
         "employment", "apply", "expired", "status", "description",
+        "systems", "skills", "schedule", "leadership", "networks",
+        "people", "harbor", "harbour", "acoustics", "university",
     }
     if len(words) == 2 and words[1] in non_surname_seconds:
+        return False
+    # Reject phrases with common prepositions/conjunctions as second word
+    if len(words) >= 2 and words[1] in {"and", "from", "with", "at", "the", "for", "or", "in", "on"}:
         return False
     return True
 
@@ -359,19 +383,45 @@ def infer_field(text: str) -> Optional[str]:
 
 
 def extract_pi_name(text: str) -> Optional[str]:
-    """Try to extract a PI / supervisor name from job text."""
+    """Try to extract a PI / supervisor name from job text.
+
+    First tries patterns requiring full names (First Last).  If none match,
+    falls back to single-surname Lab/Group/Laboratory patterns and attempts
+    to expand the last name to a full name from surrounding text.
+    """
     if not text:
         return None
 
     # Normalize whitespace (newlines inside names break matching)
-    text = re.sub(r"\s+", " ", text)
+    norm = re.sub(r"\s+", " ", text)
 
+    # Pass 1: full-name patterns
     for pattern in _PI_COMPILED:
-        m = pattern.search(text)
+        m = pattern.search(norm)
         if m:
             name = m.group(1).strip()
             if _is_valid_name(name):
                 return name
+
+    # Pass 2: single-surname Lab/Group/Laboratory patterns from description
+    for pattern in _TITLE_LAB_COMPILED:
+        m = pattern.search(norm)
+        if m:
+            last = m.group(1).strip()
+            if last.lower() in _LAB_FALSE_POSITIVES:
+                continue
+            if len(last) < 3:
+                continue
+            # For multi-word names, validate
+            if " " in last and not _is_valid_name(last):
+                continue
+            # Try to expand to a full name from the same text
+            full = expand_pi_last_name(last, norm)
+            if full:
+                return full
+            # Return just the last name if expansion fails
+            return last
+
     return None
 
 
@@ -426,17 +476,42 @@ _LAB_FALSE_POSITIVES = {
     "mobile", "advanced", "applied", "general", "special",
     "teaching", "testing", "training", "fabrication", "innovation",
     "computer", "media", "data", "design",
+    # Additional false positives from description context
+    "peatland", "cement", "chromatin", "discovery", "magnetic",
+    "neuropsychiatry", "membrane", "structural", "chemical",
+    "biophysics", "ecology", "electron", "infection", "inflammation",
+    "cancer", "tumor", "immune", "genomics", "proteomics",
+    "metabolic", "synthetic", "computational", "translational",
+    "alamos", "prague", "ridge", "harbor", "harbour",
+    "driven", "nurse", "wallenberg", "the", "field",
+    "sciences", "systems", "muscle", "time", "acoustics",
+    "physics", "skills", "doc",
+    "repair", "response", "signaling", "sensing", "imaging",
+    "precision", "regenerative", "functional", "oxidative",
+    "energy", "life", "nanotechnology", "electrophysiology",
+    "electrochemistry", "cardiovascular", "hematology",
 }
 
 
 def extract_pi_from_title(title: str) -> Optional[str]:
     """Extract a PI last name (or full name) from a job title.
 
-    Targets patterns like "Badran Lab", "Dr. Wan's Lab", "(Coruzzi Lab)".
+    Targets patterns like "Badran Lab", "Dr. Wan's Lab", "(Coruzzi Lab)",
+    and "faculty mentor Lynette Cegelski".
     Returns the extracted name, or None.
     """
     if not title:
         return None
+
+    # Check "faculty mentor/advisor Name" in title first (yields full name)
+    m = re.search(
+        rf"(?:faculty\s+)?(?:mentor|advisor|adviser|sponsor)\s+{_TITLE_OPT}{_FULL_NAME}",
+        title, re.IGNORECASE,
+    )
+    if m:
+        name = m.group(1).strip()
+        if _is_valid_name(name):
+            return name
 
     for pattern in _TITLE_LAB_COMPILED:
         m = pattern.search(title)

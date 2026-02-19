@@ -137,25 +137,26 @@ def _score_institution_ranking(pi: dict, rankings: dict) -> float:
 
     Tier mapping from ``institution_rankings.json``:
     - Tier 1 -> 1.0
-    - Tier 2 -> 0.75
-    - Tier 3 -> 0.5
-    - Unknown -> 0.25
+    - Tier 2 / top_companies -> 0.75
+    - Tier 3 / companies -> 0.5
+    - Tier 4 -> 0.3
+    - Tier 5 (unknown) -> 0.15
     """
     tier = pi.get("tier")
+    tier_scores = {1: 1.0, 2: 0.75, 3: 0.5, 4: 0.3, 5: 0.15}
+
     if tier is not None:
-        tier_scores = {1: 1.0, 2: 0.75, 3: 0.5, 4: 0.25}
-        return tier_scores.get(tier, 0.25)
+        return tier_scores.get(tier, 0.15)
 
     # Try to look up institute in rankings
     institute = pi.get("institute", "")
     if institute and rankings:
         for inst_name, info in rankings.items():
             if inst_name.lower() in institute.lower() or institute.lower() in inst_name.lower():
-                tier_val = info if isinstance(info, int) else info.get("tier", 4)
-                tier_scores = {1: 1.0, 2: 0.75, 3: 0.5, 4: 0.25}
-                return tier_scores.get(tier_val, 0.25)
+                tier_val = info if isinstance(info, int) else info.get("tier", 5)
+                return tier_scores.get(tier_val, 0.15)
 
-    return 0.25  # unknown
+    return 0.15  # unknown
 
 
 def _score_h_index(pi: dict, max_h: int) -> float:

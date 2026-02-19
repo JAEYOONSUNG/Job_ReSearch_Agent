@@ -426,14 +426,40 @@ class BaseScraper(abc.ABC):
 
     @staticmethod
     def _build_tier_lookup() -> dict[str, int]:
-        """Build a lowercase institution-name -> tier mapping."""
+        """Build a lowercase institution-name -> tier mapping.
+
+        Includes tiers 1-4, top_companies (→ 2), and companies (→ 3).
+        Also includes aliases from tier_lookup_aliases.
+        """
         lookup: dict[str, int] = {}
         rankings = load_rankings()
         tiers = rankings.get("tiers", {})
         for tier_str, info in tiers.items():
-            tier = int(tier_str)
+            try:
+                tier = int(tier_str)
+            except (ValueError, TypeError):
+                continue
             for inst in info.get("institutions", []):
                 lookup[inst.lower()] = tier
+
+        # Companies (nested dict with "institutions" key)
+        companies = rankings.get("companies", {})
+        top_co = companies.get("top_companies", {})
+        top_list = top_co.get("institutions", []) if isinstance(top_co, dict) else top_co
+        for inst in top_list:
+            lookup[inst.lower()] = top_co.get("tier_equivalent", 2) if isinstance(top_co, dict) else 2
+        std_co = companies.get("companies", {})
+        std_list = std_co.get("institutions", []) if isinstance(std_co, dict) else std_co
+        for inst in std_list:
+            lookup[inst.lower()] = std_co.get("tier_equivalent", 3) if isinstance(std_co, dict) else 3
+
+        # Aliases
+        aliases = rankings.get("tier_lookup_aliases", {})
+        for alias, canonical in aliases.items():
+            canonical_lower = canonical.lower()
+            if canonical_lower in lookup and alias.lower() not in lookup:
+                lookup[alias.lower()] = lookup[canonical_lower]
+
         return lookup
 
     def resolve_region(self, country: str | None) -> str:
@@ -522,7 +548,7 @@ class BaseScraper(abc.ABC):
             if el:
                 text = el.get_text(separator="\n", strip=True)
                 if len(text) >= min_length:
-                    return text[:3000]
+                    return text[:5000]
 
         # Fallback: find the div with the most text
         best_text = ""
@@ -532,7 +558,7 @@ class BaseScraper(abc.ABC):
                 best_text = text
 
         if len(best_text) >= min_length:
-            return best_text[:3000]
+            return best_text[:5000]
 
         return None
 
@@ -603,12 +629,18 @@ class BaseScraper(abc.ABC):
                 job["pi_name"] = full_name
 
         if desc:
-            from src.matching.job_parser import parse_job_posting, extract_pi_name, extract_deadline
+            from src.matching.job_parser import parse_job_posting, extract_pi_name, extract_deadline, expand_pi_last_name
             # Always try PI name extraction from description
             if not job.get("pi_name"):
                 pi = extract_pi_name(desc)
                 if pi:
                     job["pi_name"] = pi
+
+            # Expand single last name from description extraction too
+            if job.get("pi_name") and " " not in job["pi_name"]:
+                full_name = expand_pi_last_name(job["pi_name"], desc)
+                if full_name:
+                    job["pi_name"] = full_name
             # Extract deadline if not already set
             if not job.get("deadline"):
                 deadline = extract_deadline(desc)

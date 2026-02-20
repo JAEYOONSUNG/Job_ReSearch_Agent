@@ -390,6 +390,10 @@ class BaseScraper(abc.ABC):
                             "SELECT description FROM jobs WHERE url = ?", (url,)
                         ).fetchone()
                         if row and row["description"] and len(row["description"]) > 100:
+                            # Re-enrich if description is truncated
+                            if row["description"].rstrip().endswith("..."):
+                                need_enrich.append(job)
+                                continue
                             already_done.append(job)
                             continue
                     need_enrich.append(job)
@@ -713,6 +717,10 @@ class BaseScraper(abc.ABC):
                             "SELECT description FROM jobs WHERE url = ?", (url,)
                         ).fetchone()
                         if row and row["description"] and len(row["description"]) > 100:
+                            # Re-enrich if description is truncated
+                            if row["description"].rstrip().endswith("..."):
+                                need_enrich.append(job)
+                                continue
                             already_done.append(job)
                             continue
                     need_enrich.append(job)

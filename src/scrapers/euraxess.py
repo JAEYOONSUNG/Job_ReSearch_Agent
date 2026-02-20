@@ -281,6 +281,9 @@ class EuraxessScraper(BaseScraper):
             if desc_section:
                 desc_parts = []
                 for sibling in desc_section.find_next_siblings():
+                    # Stop at next section heading (h2, h3, etc.)
+                    if sibling.name and sibling.name in ("h2", "h3", "h4"):
+                        break
                     text = sibling.get_text(separator="\n", strip=True)
                     if text:
                         desc_parts.append(text)
@@ -295,10 +298,11 @@ class EuraxessScraper(BaseScraper):
                 if len(full_desc) > len(job.get("description") or ""):
                     job["description"] = full_desc[:5000]
 
-            # Fallback description
-            if not job.get("description") or len(job.get("description", "")) < 50:
+            # Fallback description: also retry if description is truncated ('...')
+            desc_val = job.get("description") or ""
+            if not desc_val or len(desc_val) < 50 or desc_val.rstrip().endswith("..."):
                 fallback = self._extract_description_fallback(resp.text)
-                if fallback:
+                if fallback and len(fallback) > len(desc_val):
                     job["description"] = fallback
 
             # === Requirements from h2#requirements ===

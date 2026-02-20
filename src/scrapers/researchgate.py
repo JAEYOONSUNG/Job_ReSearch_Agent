@@ -318,6 +318,9 @@ class ResearchGateScraper(BaseScraper):
         http_blocked = False
 
         for term in SEARCH_TERMS:
+            if http_blocked:
+                break  # Skip remaining HTTP attempts, go straight to Playwright
+
             self.logger.info("ResearchGate search: %s", term)
 
             for page in range(MAX_PAGES):
@@ -339,7 +342,7 @@ class ResearchGateScraper(BaseScraper):
 
                 except _requests.exceptions.HTTPError as e:
                     if e.response is not None and e.response.status_code == 403:
-                        self.logger.info("ResearchGate 403, will try Playwright")
+                        self.logger.info("ResearchGate 403, switching to Playwright")
                         http_blocked = True
                     else:
                         self.logger.warning(

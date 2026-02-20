@@ -51,11 +51,14 @@ def _init_browser():
             logger.debug("Real Chrome not found, falling back to bundled Chromium")
             _BROWSER = _PW.chromium.launch(headless=True)
 
+        # Use the actual browser version in the UA string to avoid
+        # Cloudflare detecting a mismatch between UA and JS navigator.
+        _chrome_ver = _BROWSER.version.split(".")[0]
         _CONTEXT = _BROWSER.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
+                f"Chrome/{_chrome_ver}.0.0.0 Safari/537.36"
             ),
             locale="en-US",
             viewport={"width": 1280, "height": 800},
@@ -213,11 +216,12 @@ async def _async_init_browser():
         except Exception:
             _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(headless=True)
 
+        _async_chrome_ver = _ASYNC_BROWSER.version.split(".")[0]
         _ASYNC_CONTEXT = await _ASYNC_BROWSER.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
+                f"Chrome/{_async_chrome_ver}.0.0.0 Safari/537.36"
             ),
             locale="en-US",
             viewport={"width": 1280, "height": 800},

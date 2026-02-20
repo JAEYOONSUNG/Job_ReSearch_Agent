@@ -133,15 +133,17 @@ class AcademicPositionsScraper(BaseScraper):
         summary_el = detail_link.select_one("p")
         summary = summary_el.get_text(strip=True) if summary_el else None
 
-        return {
+        job: dict[str, Any] = {
             "title": title,
             "institute": institute,
             "country": country,
             "url": url,
             "deadline": deadline,
-            "summary": summary,
             "source": self.name,
         }
+        if summary:
+            job["_summary"] = summary  # used for keyword filtering only
+        return job
 
     # ── Detail page ───────────────────────────────────────────────────────
 
@@ -294,7 +296,7 @@ class AcademicPositionsScraper(BaseScraper):
         filtered: list[dict[str, Any]] = []
         for job in all_jobs:
             blob = (
-                f"{job.get('title', '')} {job.get('summary', '')} "
+                f"{job.get('title', '')} {job.get('_summary', '')} "
                 f"{job.get('description', '')} {job.get('field', '')}"
             )
             if self._keyword_match(blob):
@@ -309,6 +311,10 @@ class AcademicPositionsScraper(BaseScraper):
         enriched = self._parallel_enrich(
             filtered, self._enrich_from_detail, max_workers=4,
         )
+
+        # Remove internal-only keys before returning to pipeline
+        for job in enriched:
+            job.pop("_summary", None)
 
         self.logger.info(
             "AcademicPositions: %d enriched", len(enriched),

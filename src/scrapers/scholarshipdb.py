@@ -65,7 +65,17 @@ _AGGREGATOR_SOURCES = {
 class ScholarshipDBScraper(BaseScraper):
     """Scrape ScholarshipDB for postdoc fellowship and position opportunities."""
 
-    rate_limit: float = 3.5  # ScholarshipDB frequently returns 520; be gentle
+    rate_limit: float = 3.0  # ScholarshipDB can be flaky; retry config handles 520s
+
+    def __init__(self) -> None:
+        super().__init__()
+        # ScholarshipDB returns 520 (Cloudflare) frequently — include in retry list
+        from src.scrapers.base import _build_session
+        self.session = _build_session(
+            total_retries=3,
+            backoff_factor=2.0,
+            status_forcelist=(429, 500, 502, 503, 504, 520, 521, 522, 523, 524),
+        )
 
     @property
     def name(self) -> str:
@@ -161,17 +171,28 @@ class ScholarshipDBScraper(BaseScraper):
 
     # ── Detail page ───────────────────────────────────────────────────────
 
+    # Circuit breaker: stop enriching after this many consecutive failures
+    _enrich_fail_count: int = 0
+    _ENRICH_FAIL_LIMIT: int = 3
+
     def _enrich_from_detail(self, job: dict[str, Any]) -> dict[str, Any]:
         """Fetch the detail page and extract full description + metadata."""
         url = job.get("url")
         if not url:
             return job
 
+        # Circuit breaker: stop hitting the site after repeated failures
+        if self._enrich_fail_count >= self._ENRICH_FAIL_LIMIT:
+            return job
+
         try:
-            resp = self.fetch(url)
+            resp = self.fetch(url, timeout=45)
             if resp.status_code != 200:
                 self.logger.debug("Detail page %d: %s", resp.status_code, url)
+                self._enrich_fail_count += 1
                 return job
+            # Reset on success
+            self._enrich_fail_count = 0
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -280,7 +301,14 @@ class ScholarshipDBScraper(BaseScraper):
                 job["country"] = self._guess_country_from_text(desc)
 
         except Exception:
-            self.logger.debug("Could not enrich detail: %s", url, exc_info=True)
+            self._enrich_fail_count += 1
+            if self._enrich_fail_count >= self._ENRICH_FAIL_LIMIT:
+                self.logger.warning(
+                    "ScholarshipDB circuit breaker: %d consecutive failures, "
+                    "skipping remaining enrichment", self._enrich_fail_count,
+                )
+            else:
+                self.logger.debug("Could not enrich detail: %s", url, exc_info=True)
 
         return job
 
@@ -296,7 +324,7 @@ class ScholarshipDBScraper(BaseScraper):
             for page in range(MAX_PAGES):
                 try:
                     params = {"q": query, "page": str(page + 1)}
-                    resp = self.fetch(SEARCH_URL, params=params)
+                    resp = self.fetch(SEARCH_URL, params=params, timeout=45)
                     page_jobs = self._parse_listing_page(resp.text)
                     if not page_jobs:
                         break
@@ -318,6 +346,9 @@ class ScholarshipDBScraper(BaseScraper):
                     self.logger.exception(
                         "ScholarshipDB failed: '%s' page %d", query, page + 1
                     )
+                    # Skip remaining pages for this query, try next query
+                    import time as _time
+                    _time.sleep(5)  # back off before next query
                     break
 
         # Filter for relevance and remove fake listing pages
@@ -339,7 +370,7 @@ class ScholarshipDBScraper(BaseScraper):
             len(all_jobs), len(filtered),
         )
 
-        # Enrich from detail pages (all jobs, not just first N)
+        # Enrich from detail pages (circuit breaker stops after 3 consecutive failures)
         enriched = self._parallel_enrich(
             filtered, self._enrich_from_detail, max_workers=2,
         )

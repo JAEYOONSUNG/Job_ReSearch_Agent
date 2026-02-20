@@ -83,21 +83,24 @@ def _run_single_scraper(scraper) -> list[dict]:
 
 
 SCRAPER_TIMEOUT = 300  # 5 minutes per scraper
+# Scrapers that need more time (many detail-page fetches with rate limiting)
+_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 600}
 
 
 async def _async_run_single_scraper(scraper) -> list[dict]:
     """Run a single scraper as an async coroutine with timeout."""
+    timeout = _SLOW_SCRAPERS.get(scraper.name, SCRAPER_TIMEOUT)
     try:
         logger.info("Running async scraper: %s", scraper.name)
         jobs = await asyncio.wait_for(
             scraper.async_run(),
-            timeout=SCRAPER_TIMEOUT,
+            timeout=timeout,
         )
         logger.info("%s: found %d jobs", scraper.name, len(jobs))
         return jobs
     except asyncio.TimeoutError:
-        logger.warning("%s timed out after %ds, skipping", scraper.name, SCRAPER_TIMEOUT)
-        log_scrape(scraper.name, "error", error=f"Timed out after {SCRAPER_TIMEOUT}s")
+        logger.warning("%s timed out after %ds, skipping", scraper.name, timeout)
+        log_scrape(scraper.name, "error", error=f"Timed out after {timeout}s")
         return []
     except Exception as e:
         logger.error("%s failed: %s", scraper.name, e, exc_info=True)
@@ -179,8 +182,45 @@ def run_scoring(jobs: list[dict]) -> list[dict]:
 
     keywords = load_cached_keywords()
     jobs = deduplicate_jobs(jobs)
+
+    # Persist alt_url from cross-source dedup merges into the DB
+    _persist_alt_urls(jobs)
+
     jobs = score_and_sort_jobs(jobs, keywords)
     return jobs
+
+
+def _persist_alt_urls(jobs: list[dict]) -> None:
+    """Write alt_url (from cross-source dedup) back to the database.
+
+    Runs dedup on ALL DB jobs (not just the current batch) so that
+    cross-source duplicates from previous runs are also detected.
+    """
+    from src.db import get_connection, get_jobs
+    from src.matching.dedup import deduplicate_jobs
+
+    all_jobs = get_jobs(limit=10000)
+    deduped = deduplicate_jobs(all_jobs)
+
+    updates = []
+    for job in deduped:
+        alt_urls = job.get("alt_urls")
+        if alt_urls and job.get("url"):
+            # Also persist pi_name if it was merged from the other source
+            updates.append((alt_urls[0]["url"], job.get("pi_name") or "", job["url"]))
+    if not updates:
+        return
+    with get_connection() as conn:
+        conn.executemany(
+            "UPDATE jobs SET alt_url = ? WHERE url = ? AND (alt_url IS NULL OR alt_url = '')",
+            [(u[0], u[2]) for u in updates],
+        )
+        # Backfill pi_name from merged data
+        conn.executemany(
+            "UPDATE jobs SET pi_name = ? WHERE url = ? AND (pi_name IS NULL OR pi_name = '') AND ? != ''",
+            [(u[1], u[2], u[1]) for u in updates],
+        )
+    logger.info("Persisted alt_url for %d cross-source duplicates", len(updates))
 
 
 def run_pi_enrichment(jobs: list[dict], max_workers: int = 2) -> list[dict]:

@@ -164,7 +164,11 @@ def is_duplicate(job_a: dict, job_b: dict, threshold: float = 0.85) -> bool:
         return True
 
     # Same institute + very similar normalised title
-    if inst_a and inst_b and inst_a == inst_b and title_sim >= 0.6:
+    # Safety: if either PI name is missing, require much higher title similarity
+    # to avoid merging distinct positions at the same institute
+    has_both_pis = bool(job_a.get("pi_name")) and bool(job_b.get("pi_name"))
+    inst_title_threshold = 0.6 if has_both_pis else 0.85
+    if inst_a and inst_b and inst_a == inst_b and title_sim >= inst_title_threshold:
         return True
 
     # High title + institute similarity
@@ -185,6 +189,19 @@ def _pick_best(job_a: dict, job_b: dict) -> dict:
                 "scholar_url", "lab_url", "dept_url", "h_index", "citations"):
         if not best.get(key) and other.get(key):
             best[key] = other[key]
+
+    # Preserve alt URL from the other source for cross-source duplicates.
+    # Skip if same source (separate postings on one site are distinct jobs)
+    # or if either side lacks a PI name (risk of false merge).
+    if (
+        best.get("source") != other.get("source")
+        and best.get("pi_name")
+        and other.get("pi_name")
+        and other.get("url")
+    ):
+        alt_urls = best.get("alt_urls", [])
+        alt_urls.append({"url": other["url"], "source": other.get("source", "")})
+        best["alt_urls"] = alt_urls
 
     return best
 

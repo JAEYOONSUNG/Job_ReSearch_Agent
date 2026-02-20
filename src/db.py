@@ -142,6 +142,7 @@ _MIGRATIONS = [
     ("pis", "recent_papers", "TEXT"),
     ("pis", "top_cited_papers", "TEXT"),
     ("pis", "s2_author_id", "TEXT"),
+    ("jobs", "alt_url", "TEXT"),
 ]
 
 

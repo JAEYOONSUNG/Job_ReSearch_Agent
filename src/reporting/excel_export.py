@@ -319,6 +319,7 @@ JOB_COLUMNS = [
     *[f"Top Cited Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
     # Links
     "Job URL",
+    "Job URL 2",
     "Lab URL",
     "Scholar URL",
     "Dept URL",
@@ -389,6 +390,7 @@ def _job_to_row(job: dict) -> dict:
         **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
         # Links
         "Job URL": job.get("url") or "",
+        "Job URL 2": job.get("alt_url") or "",
         "Lab URL": job.get("lab_url") or "",
         "Scholar URL": job.get("scholar_url") or "",
         "Dept URL": job.get("dept_url") or "",
@@ -510,7 +512,7 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
         "Description": 50,
         **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
         **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
-        "Job URL": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
+        "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
         "Match Score": 8, "Source": 12, "Status": 7,
     }
 
@@ -519,7 +521,7 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
 
     for i, col in enumerate(df.columns):
         width = width_map.get(col, 15)
-        if col in ("Job URL", "Lab URL", "Scholar URL", "Dept URL"):
+        if col in ("Job URL", "Job URL 2", "Lab URL", "Scholar URL", "Dept URL"):
             worksheet.set_column(i, i, width, url_fmt)
         else:
             worksheet.set_column(i, i, width, default_fmt)

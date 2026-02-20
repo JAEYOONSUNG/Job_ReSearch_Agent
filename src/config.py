@@ -23,7 +23,7 @@ CV_KEYWORDS_PATH = DATA_DIR / "cv_keywords.json"
 
 EXCEL_OUTPUT_DIR = Path(os.getenv(
     "EXCEL_OUTPUT_DIR",
-    str(Path.home() / "Dropbox/0.Personal folder/1. CV/0. Postdoc/Putative list"),
+    str(Path.home() / "Dropbox/0.Personal folder/1. CV/0. Postdoc"),
 ))
 
 # ── Email ──────────────────────────────────────────────────────────────────

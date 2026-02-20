@@ -383,7 +383,7 @@ def _job_to_row(job: dict) -> dict:
         "Posted Date": job.get("posted_date") or "",
         "Deadline": job.get("deadline") or "",
         # Description
-        "Description": _clean_text(desc, 5000),
+        "Description": _clean_text(desc, 15000),
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
         **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
         **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),

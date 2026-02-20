@@ -155,7 +155,7 @@ class JobsAcUkScraper(BaseScraper):
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 100:
-                        job["description"] = text[:5000]
+                        job["description"] = text[:15000]
                         found_desc = True
                         break
 

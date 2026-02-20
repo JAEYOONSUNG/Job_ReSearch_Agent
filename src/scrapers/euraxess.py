@@ -296,7 +296,7 @@ class EuraxessScraper(BaseScraper):
 
                 full_desc = "\n\n".join(desc_parts)
                 if len(full_desc) > len(job.get("description") or ""):
-                    job["description"] = full_desc[:5000]
+                    job["description"] = full_desc[:15000]
 
             # Fallback description: also retry if description is truncated ('...')
             desc_val = job.get("description") or ""

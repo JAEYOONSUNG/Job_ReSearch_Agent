@@ -189,6 +189,37 @@ class _AsyncSessionManager:
             cls._session = None
 
 
+_SENTENCE_ENDERS = frozenset(".!?;:)\"'")
+_CAPTCHA_MARKERS = {"security check", "captcha", "verification successful",
+                    "ray id:", "unusual activity"}
+
+
+def _description_needs_refresh(desc: str) -> bool:
+    """Return True if description looks incomplete and should be re-fetched.
+
+    Checks for:
+    - Truncation marker ("...")
+    - Mid-sentence cutoff (doesn't end with sentence-ending punctuation)
+    - Captcha/bot-block text instead of real content
+    - Very short descriptions (<500 chars)
+    """
+    if not desc:
+        return True
+    desc = desc.rstrip()
+    if len(desc) < 500:
+        return True
+    if desc.endswith("..."):
+        return True
+    # Check for captcha/bot-block content
+    desc_lower = desc.lower()
+    if any(marker in desc_lower for marker in _CAPTCHA_MARKERS):
+        return True
+    # Check if description ends mid-sentence
+    if desc[-1] not in _SENTENCE_ENDERS:
+        return True
+    return False
+
+
 class BaseScraper(abc.ABC):
     """Base class every scraper must inherit from.
 
@@ -390,8 +421,7 @@ class BaseScraper(abc.ABC):
                             "SELECT description FROM jobs WHERE url = ?", (url,)
                         ).fetchone()
                         if row and row["description"] and len(row["description"]) > 100:
-                            # Re-enrich if description is truncated
-                            if row["description"].rstrip().endswith("..."):
+                            if _description_needs_refresh(row["description"]):
                                 need_enrich.append(job)
                                 continue
                             already_done.append(job)
@@ -552,7 +582,7 @@ class BaseScraper(abc.ABC):
             if el:
                 text = el.get_text(separator="\n", strip=True)
                 if len(text) >= min_length:
-                    return text[:5000]
+                    return text[:15000]
 
         # Fallback: find the div with the most text
         best_text = ""
@@ -562,7 +592,7 @@ class BaseScraper(abc.ABC):
                 best_text = text
 
         if len(best_text) >= min_length:
-            return best_text[:5000]
+            return best_text[:15000]
 
         return None
 
@@ -717,8 +747,7 @@ class BaseScraper(abc.ABC):
                             "SELECT description FROM jobs WHERE url = ?", (url,)
                         ).fetchone()
                         if row and row["description"] and len(row["description"]) > 100:
-                            # Re-enrich if description is truncated
-                            if row["description"].rstrip().endswith("..."):
+                            if _description_needs_refresh(row["description"]):
                                 need_enrich.append(job)
                                 continue
                             already_done.append(job)

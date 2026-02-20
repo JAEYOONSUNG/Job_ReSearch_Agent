@@ -147,7 +147,7 @@ class GlassdoorScraper(BaseScraper):
             detail_desc = self._extract_right_panel_description(soup)
             if detail_desc and (not jobs[0].get("description") or
                                 len(detail_desc) > len(jobs[0].get("description", ""))):
-                jobs[0]["description"] = detail_desc[:5000]
+                jobs[0]["description"] = detail_desc[:15000]
 
         return jobs
 
@@ -296,7 +296,7 @@ class GlassdoorScraper(BaseScraper):
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 50 and not self._is_captcha_page(text):
-                        job["description"] = text[:5000]
+                        job["description"] = text[:15000]
                         found_desc = True
                         break
 

@@ -561,13 +561,19 @@ def main() -> None:
     # Dept URL enrichment (always runs, uses persistent cache)
     jobs = run_dept_enrichment(jobs)
 
+    # Export Excel (always)
+    try:
+        from src.reporting.excel_export import export_to_excel
+        excel_path = export_to_excel()
+        logger.info("Excel exported to %s", excel_path)
+    except Exception as e:
+        logger.error("Excel export failed: %s", e, exc_info=True)
+
     if args.summary:
         print_summary(jobs)
 
-    if args.email and not args.no_email:
-        run_report(send_email=True)
-    elif not args.no_email:
-        run_report(send_email=False)
+    if not args.no_email:
+        run_report(send_email=True if args.email else False)
 
 
 if __name__ == "__main__":

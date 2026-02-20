@@ -90,7 +90,7 @@ class JobSpyScraper(BaseScraper):
             if el:
                 text = el.get_text(separator="\n", strip=True)
                 if len(text) >= 100:
-                    return text[:5000]
+                    return text[:15000]
 
         # Try JSON-LD structured data
         for script in soup.select("script[type='application/ld+json']"):
@@ -99,7 +99,7 @@ class JobSpyScraper(BaseScraper):
                 if isinstance(ld, dict) and ld.get("description"):
                     desc = str(ld["description"]).strip()
                     if len(desc) >= 100:
-                        return desc[:5000]
+                        return desc[:15000]
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -327,7 +327,7 @@ class JobSpyScraper(BaseScraper):
             "title": title,
             "institute": company,
             "country": country,
-            "description": (description or "")[:5000],
+            "description": (description or "")[:15000],
             "url": url,
             "posted_date": date_posted,
             "source": f"jobspy_{site}" if site else "jobspy",

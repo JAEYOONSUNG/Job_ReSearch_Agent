@@ -197,7 +197,7 @@ class ResearchGateScraper(BaseScraper):
                             # JSON-LD description contains HTML tags; strip them
                             clean = self._strip_html(ld["description"])
                             if len(clean) > 50:
-                                job["description"] = clean[:5000]
+                                job["description"] = clean[:15000]
                         org = ld.get("hiringOrganization", {})
                         if isinstance(org, dict) and org.get("name"):
                             job["institute"] = org["name"]
@@ -236,7 +236,7 @@ class ResearchGateScraper(BaseScraper):
                     if desc_el:
                         text = desc_el.get_text(separator="\n", strip=True)
                         if len(text) > 50:
-                            job["description"] = text[:5000]
+                            job["description"] = text[:15000]
                             found_desc = True
                             break
 

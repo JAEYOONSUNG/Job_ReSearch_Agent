@@ -191,7 +191,7 @@ class NatureCareersScraper(BaseScraper):
             resp = self.fetch(url)
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Full description (keep up to 5000 chars for parsing, store 3000)
+            # Full description (keep up to 15000 chars)
             found_desc = False
             for sel in (
                 "div.job-description", "div.content-body",
@@ -201,7 +201,7 @@ class NatureCareersScraper(BaseScraper):
                 if desc_el:
                     text = desc_el.get_text(separator="\n", strip=True)
                     if len(text) > 50:
-                        job["description"] = text[:5000]
+                        job["description"] = text[:15000]
                         found_desc = True
                         break
 

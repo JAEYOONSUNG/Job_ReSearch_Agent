@@ -178,26 +178,37 @@ class ScholarshipDBScraper(BaseScraper):
             # === Full description from div.position-details ===
             pos_detail = soup.select_one("div.position-details")
             if pos_detail:
-                # The description is in the div children after summary
+                # Strategy 1: Get ALL text from position-details,
+                # excluding only header/summary/navigation elements
+                skip_classes = {"summary", "mh-100", "space10", "row",
+                                "breadcrumb", "nav", "pagination"}
+                skip_tags = {"h1", "h2", "h3", "nav", "script", "style"}
                 desc_parts: list[str] = []
-                skip_classes = {"summary", "mh-100", "space10", "row"}
-                for child in pos_detail.children:
-                    if not hasattr(child, "name") or not child.name:
-                        continue
-                    classes = set(child.get("class", []))
-                    # Skip title, institute header, summary, and spacer divs
-                    if child.name in ("h1", "h2", "h3"):
-                        continue
-                    if classes & skip_classes:
-                        continue
-                    text = child.get_text(separator="\n", strip=True)
-                    if len(text) > 20:
-                        desc_parts.append(text)
+
+                def _collect_text(el):
+                    """Recursively collect text, skipping noise elements."""
+                    for child in el.children:
+                        if not hasattr(child, "name") or not child.name:
+                            # Text node
+                            t = child.strip() if isinstance(child, str) else ""
+                            if t:
+                                desc_parts.append(t)
+                            continue
+                        if child.name in skip_tags:
+                            continue
+                        classes = set(child.get("class", []))
+                        if classes & skip_classes:
+                            continue
+                        text = child.get_text(separator="\n", strip=True)
+                        if len(text) > 20:
+                            desc_parts.append(text)
+
+                _collect_text(pos_detail)
 
                 if desc_parts:
                     full_desc = "\n\n".join(desc_parts)
                     if len(full_desc) > len(job.get("description") or ""):
-                        job["description"] = full_desc[:5000]
+                        job["description"] = full_desc[:15000]
 
                 # === Metadata from div.summary ===
                 summary_div = pos_detail.select_one("div.summary")

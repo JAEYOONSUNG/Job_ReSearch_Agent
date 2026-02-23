@@ -84,7 +84,7 @@ def _run_single_scraper(scraper) -> list[dict]:
 
 SCRAPER_TIMEOUT = 300  # 5 minutes per scraper
 # Scrapers that need more time (many detail-page fetches with rate limiting)
-_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 600}
+_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 900, "euraxess": 900, "researchgate": 900}
 
 
 async def _async_run_single_scraper(scraper) -> list[dict]:

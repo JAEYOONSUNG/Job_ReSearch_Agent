@@ -309,7 +309,8 @@ class NatureCareersScraper(BaseScraper):
                         html = fetch_page(
                             pw_url,
                             wait_selector="div.card, div.job-card, a[href*='/job/']",
-                            wait_ms=5000,
+                            wait_ms=8000,
+                            timeout=30000,
                         )
                         if html:
                             page_jobs = self._parse_html_page(html)

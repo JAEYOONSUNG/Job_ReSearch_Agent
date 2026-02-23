@@ -50,7 +50,7 @@ class JobsAcUkScraper(BaseScraper):
     def _fetch_with_browser(self, url: str) -> str | None:
         """Fetch URL using Playwright headless browser."""
         from src.scrapers.browser import fetch_page
-        return fetch_page(url, wait_selector="div.j-search-result, div.search-results, article", wait_ms=3000)
+        return fetch_page(url, wait_selector="div.j-search-result, div.search-results, article", wait_ms=5000, timeout=30000)
 
     def _parse_listing_page(self, html: str) -> list[dict[str, Any]]:
         """Parse a jobs.ac.uk search results page."""

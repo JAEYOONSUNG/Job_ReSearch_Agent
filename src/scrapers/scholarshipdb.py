@@ -235,6 +235,7 @@ class ScholarshipDBScraper(BaseScraper):
                 summary_div = pos_detail.select_one("div.summary")
                 if summary_div:
                     labels = summary_div.select("span.col-sm-2")
+                    deadline_candidates: list[str] = []
                     for label_span in labels:
                         label = label_span.get_text(strip=True).rstrip(":")
                         value_span = label_span.find_next_sibling("span")
@@ -246,8 +247,12 @@ class ScholarshipDBScraper(BaseScraper):
                             job["location"] = value
                         elif label == "Job Type" and value:
                             job["job_type"] = value
-                        elif label == "Deadline" and value:
-                            job["deadline"] = self._parse_date(value)
+                        elif label in ("Deadline", "Apply Before") and value:
+                            parsed = self._parse_date(value)
+                            if parsed:
+                                deadline_candidates.append(parsed)
+                    if deadline_candidates:
+                        job["deadline"] = max(deadline_candidates)
 
                 # === Institute from h2 (overrides aggregator) ===
                 h2 = pos_detail.select_one("h2")

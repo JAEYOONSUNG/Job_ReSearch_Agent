@@ -1,3 +1,7 @@
+---
+allowed-tools: Bash(/Users/JaeYoon/miniconda3/envs/jobsearch/bin/python:*)
+---
+
 Run the weekly pipeline including PI network discovery. Execute:
 
 ```bash

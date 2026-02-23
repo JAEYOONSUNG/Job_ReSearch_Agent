@@ -101,6 +101,14 @@ EXCLUDE_KEYWORDS = [
     "optogenetics",
     "electrophysiology",
     "patch clamp",
+    # PhD positions (not postdoc)
+    "PhD position",
+    "PhD student",
+    "doctoral position",
+    "doctoral student",
+    "PhD candidate",
+    "doctoral candidate",
+    "PhD fellowship",
 ]
 
 # Keywords to detect job openings on lab websites

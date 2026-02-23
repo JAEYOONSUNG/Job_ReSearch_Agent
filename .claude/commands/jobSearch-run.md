@@ -1,3 +1,7 @@
+---
+allowed-tools: Bash(/Users/JaeYoon/miniconda3/envs/jobsearch/bin/python:*)
+---
+
 Run the job search pipeline. Execute the following command and report the results:
 
 ```bash

@@ -44,12 +44,22 @@ def _init_browser():
 
         _PW = sync_playwright().start()
 
-        # Prefer real Chrome (harder to detect) with fallback to Chromium
+        # Prefer real Chrome (harder to detect) with fallback to Chromium.
+        # --headless=new uses Chrome's new headless mode which is
+        # indistinguishable from headed mode for bot-detection purposes.
+        _LAUNCH_ARGS = [
+            "--headless=new",
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
         try:
-            _BROWSER = _PW.chromium.launch(headless=True, channel="chrome")
+            _BROWSER = _PW.chromium.launch(
+                headless=True, channel="chrome", args=_LAUNCH_ARGS,
+            )
         except Exception:
             logger.debug("Real Chrome not found, falling back to bundled Chromium")
-            _BROWSER = _PW.chromium.launch(headless=True)
+            _BROWSER = _PW.chromium.launch(headless=True, args=_LAUNCH_ARGS)
 
         # Use the actual browser version in the UA string to avoid
         # Cloudflare detecting a mismatch between UA and JS navigator.
@@ -62,6 +72,11 @@ def _init_browser():
             ),
             locale="en-US",
             viewport={"width": 1280, "height": 800},
+            color_scheme="light",
+        )
+        # Hide navigator.webdriver (supplements playwright-stealth)
+        _CONTEXT.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
     return _CONTEXT
@@ -98,7 +113,7 @@ def _apply_stealth_sync(page):
             logger.debug("apply_stealth_sync failed", exc_info=True)
 
 
-def _do_fetch(url: str, wait_selector: str, wait_ms: int, timeout: int) -> Optional[str]:
+def _do_fetch(url: str, wait_selector: str, wait_ms: int, timeout: int = 30000) -> Optional[str]:
     """Fetch a page (runs in worker thread)."""
     try:
         ctx = _init_browser()
@@ -146,7 +161,7 @@ def fetch_page(
     url: str,
     wait_selector: str = None,
     wait_ms: int = 1500,
-    timeout: int = 20000,
+    timeout: int = 30000,
 ) -> Optional[str]:
     """Fetch a page using headless Chromium.
 
@@ -170,7 +185,11 @@ def fetch_page(
         The page HTML, or None on failure.
     """
     future: Future = _EXECUTOR.submit(_do_fetch, url, wait_selector, wait_ms, timeout)
-    return future.result(timeout=timeout / 1000 + 30)
+    try:
+        return future.result(timeout=timeout / 1000 + 120)
+    except Exception:
+        logger.warning("fetch_page timed out waiting for executor: %s", url)
+        return None
 
 
 def close_browser() -> None:
@@ -209,12 +228,20 @@ async def _async_init_browser():
         _ASYNC_PW = await async_playwright().start()
 
         # Prefer real Chrome with fallback to Chromium
+        _LAUNCH_ARGS = [
+            "--headless=new",
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
         try:
             _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(
-                headless=True, channel="chrome",
+                headless=True, channel="chrome", args=_LAUNCH_ARGS,
             )
         except Exception:
-            _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(headless=True)
+            _ASYNC_BROWSER = await _ASYNC_PW.chromium.launch(
+                headless=True, args=_LAUNCH_ARGS,
+            )
 
         _async_chrome_ver = _ASYNC_BROWSER.version.split(".")[0]
         _ASYNC_CONTEXT = await _ASYNC_BROWSER.new_context(
@@ -225,6 +252,11 @@ async def _async_init_browser():
             ),
             locale="en-US",
             viewport={"width": 1280, "height": 800},
+            color_scheme="light",
+        )
+        # Hide navigator.webdriver (supplements playwright-stealth)
+        await _ASYNC_CONTEXT.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
         # Pre-create a page pool for reuse
@@ -281,7 +313,7 @@ async def async_fetch_page(
     url: str,
     wait_selector: str | None = None,
     wait_ms: int = 1500,
-    timeout: int = 20000,
+    timeout: int = 30000,
 ) -> str | None:
     """Fetch a page using async headless Chromium with page pooling.
 

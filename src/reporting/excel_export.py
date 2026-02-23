@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -586,6 +586,110 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
     worksheet.freeze_panes(1, 0)
 
 
+def _deadline_bg_color(deadline_str: str) -> tuple[str, int] | tuple[None, int]:
+    """Return (hex background color, days_remaining) based on deadline urgency.
+
+    Smooth gradient: dark red #CC0000 (0 days) → light green #D5F5E3 (90+ days).
+    Expired: gray #AAAAAA. Empty/unparseable: (None, 999).
+    """
+    if not deadline_str:
+        return None, 999
+    try:
+        dl = date.fromisoformat(deadline_str)
+    except (ValueError, TypeError):
+        return None, 999
+
+    days_remaining = (dl - date.today()).days
+    if days_remaining < 0:
+        return "#AAAAAA", days_remaining
+
+    # Clamp to 0–90 range for interpolation
+    t = min(days_remaining, 90) / 90.0
+    # Dark red (0.80, 0.00, 0.00) → Light green (0.84, 0.96, 0.89)
+    r = int((0.80 * (1 - t) + 0.84 * t) * 255)
+    g = int((0.00 * (1 - t) + 0.96 * t) * 255)
+    b = int((0.00 * (1 - t) + 0.89 * t) * 255)
+    return f"#{r:02X}{g:02X}{b:02X}", days_remaining
+
+
+def _style_deadline_cells(
+    writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame
+) -> None:
+    """Apply urgency-based background colors to Deadline column cells."""
+    if "Deadline" not in df.columns:
+        return
+    worksheet = writer.sheets[sheet_name]
+    workbook = writer.book
+    col_idx = df.columns.get_loc("Deadline")
+
+    for row_idx in range(len(df)):
+        val = df.iloc[row_idx, col_idx]
+        deadline_str = str(val) if pd.notna(val) else ""
+        color, days_remaining = _deadline_bg_color(deadline_str)
+        if not color:
+            continue
+
+        fmt_props: dict = {
+            "bg_color": color,
+            "valign": "vcenter",
+            "font_size": 9,
+        }
+        if days_remaining < 0:
+            fmt_props["font_color"] = "#666666"
+        elif days_remaining <= 7:
+            fmt_props["bold"] = True
+            fmt_props["font_color"] = "white"
+        elif days_remaining <= 30:
+            fmt_props["font_color"] = "white"
+
+        cell_fmt = workbook.add_format(fmt_props)
+        worksheet.write(row_idx + 1, col_idx, deadline_str, cell_fmt)
+
+
+_CITIZENSHIP_PATTERNS = re.compile(
+    r"U\.?S\.?\s*citizen|"
+    r"citizenship\s+(?:is\s+)?require|"
+    r"must\s+be\s+a?\s*(?:U\.?S\.?|American)\s*citizen|"
+    r"U\.?S\.?\s*persons?\s+only|"
+    r"(?:require|need)s?\s+(?:U\.?S\.?\s*)?(?:security\s+)?clearance|"
+    r"\bITAR\b|"
+    r"\bEAR\b.*(?:restrict|require|compliance)|"
+    r"(?:only\s+)?(?:U\.?S\.?\s*)?(?:citizens?\s+(?:and|or)\s+)?permanent\s+residents?\s+(?:only|eligible|may\s+apply)",
+    re.IGNORECASE,
+)
+
+
+def _has_citizenship_restriction(job: dict) -> bool:
+    """Return True if the job requires specific citizenship/visa status."""
+    blob = " ".join(
+        (job.get(k) or "") for k in ("description", "conditions", "requirements")
+    )
+    return bool(_CITIZENSHIP_PATTERNS.search(blob))
+
+
+def _style_citizenship_cells(
+    writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame, jobs: list[dict],
+) -> None:
+    """Apply red text to the Institute cell when citizenship restrictions are detected."""
+    if "Institute" not in df.columns:
+        return
+    worksheet = writer.sheets[sheet_name]
+    workbook = writer.book
+    col_idx = df.columns.get_loc("Institute")
+
+    red_fmt = workbook.add_format({
+        "font_color": "#CC0000",
+        "bold": True,
+        "valign": "vcenter",
+    })
+
+    for row_idx, job in enumerate(jobs):
+        if _has_citizenship_restriction(job):
+            val = df.iloc[row_idx, col_idx]
+            institute_str = str(val) if pd.notna(val) else ""
+            worksheet.write(row_idx + 1, col_idx, institute_str, red_fmt)
+
+
 def _write_summary_dashboard(
     writer: pd.ExcelWriter,
     all_jobs: list[dict],
@@ -785,6 +889,8 @@ def export_to_excel(output_dir: Path = None) -> Path:
         if len(df_us) > 0:
             _style_worksheet(writer, "US Positions", df_us)
             _write_paper_links(writer, "US Positions", df_us, us_jobs)
+            _style_deadline_cells(writer, "US Positions", df_us)
+            _style_citizenship_cells(writer, "US Positions", df_us, us_jobs)
 
         # Sheet 2: EU Positions
         df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
@@ -792,6 +898,8 @@ def export_to_excel(output_dir: Path = None) -> Path:
         if len(df_eu) > 0:
             _style_worksheet(writer, "EU Positions", df_eu)
             _write_paper_links(writer, "EU Positions", df_eu, eu_jobs)
+            _style_deadline_cells(writer, "EU Positions", df_eu)
+            _style_citizenship_cells(writer, "EU Positions", df_eu, eu_jobs)
 
         # Sheet 3: Other Positions
         df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
@@ -799,6 +907,8 @@ def export_to_excel(output_dir: Path = None) -> Path:
         if len(df_other) > 0:
             _style_worksheet(writer, "Other Positions", df_other)
             _write_paper_links(writer, "Other Positions", df_other, other_jobs)
+            _style_deadline_cells(writer, "Other Positions", df_other)
+            _style_citizenship_cells(writer, "Other Positions", df_other, other_jobs)
 
         # Sheet 4: PI Recommendations
         df_rec = pd.DataFrame([_pi_to_row(p) for p in rec_pis], columns=PI_COLUMNS)
@@ -813,6 +923,8 @@ def export_to_excel(output_dir: Path = None) -> Path:
         if len(df_all) > 0:
             _style_worksheet(writer, "All History", df_all)
             _write_paper_links(writer, "All History", df_all, all_sorted)
+            _style_deadline_cells(writer, "All History", df_all)
+            _style_citizenship_cells(writer, "All History", df_all, all_sorted)
 
     logger.info("Excel exported to %s (%d jobs)", filepath, len(all_jobs))
     return filepath

@@ -74,7 +74,7 @@ MAX_PAGES = 3
 class EuraxessScraper(BaseScraper):
     """Scrape EURAXESS for postdoc positions in life sciences across Europe."""
 
-    rate_limit: float = 3.0
+    rate_limit: float = 5.0
 
     @property
     def name(self) -> str:
@@ -448,7 +448,7 @@ class EuraxessScraper(BaseScraper):
 
         # Enrich from detail pages
         all_enriched = self._parallel_enrich(
-            all_jobs, self._enrich_from_detail, max_workers=4,
+            all_jobs, self._enrich_from_detail, max_workers=3,
         )
 
         # Keyword filter on enriched results

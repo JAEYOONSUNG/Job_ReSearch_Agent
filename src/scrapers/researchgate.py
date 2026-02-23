@@ -366,14 +366,20 @@ class ResearchGateScraper(BaseScraper):
             try:
                 from src.scrapers.browser import fetch_page
                 import time as _time
-                for term in SEARCH_TERMS:
+                seen_urls: set[str] = set()
+                for term in SEARCH_TERMS[:4]:  # cap at 4 terms (RG returns same results)
                     url = f"{JOBS_URL}?query={term.replace(' ', '+')}&page=1"
-                    html = fetch_page(url, wait_selector="div[class*='entity-item'], div.search-result-item", wait_ms=5000)
+                    html = fetch_page(url, wait_selector="div[class*='entity-item'], div.search-result-item", wait_ms=8000)
                     if html:
                         page_jobs = self._parse_listing_page(html)
                         if page_jobs:
-                            self.logger.info("Playwright '%s': %d results", term, len(page_jobs))
-                            all_jobs.extend(page_jobs)
+                            new_jobs = [j for j in page_jobs if j.get("url") not in seen_urls]
+                            seen_urls.update(j.get("url") for j in page_jobs if j.get("url"))
+                            self.logger.info("Playwright '%s': %d results (%d new)", term, len(page_jobs), len(new_jobs))
+                            all_jobs.extend(new_jobs)
+                            if not new_jobs:
+                                self.logger.info("No new unique results, stopping Playwright searches")
+                                break
                     _time.sleep(3.0)
             except ImportError:
                 self.logger.warning("Playwright not installed")

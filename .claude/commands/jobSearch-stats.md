@@ -1,3 +1,7 @@
+---
+allowed-tools: Bash(/Users/JaeYoon/miniconda3/envs/jobsearch/bin/python3:*)
+---
+
 Show current database statistics. Run:
 
 ```python

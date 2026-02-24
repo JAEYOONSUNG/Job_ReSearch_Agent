@@ -17,6 +17,7 @@ import hashlib
 import logging
 import re
 import struct
+import unicodedata
 from collections import defaultdict
 from difflib import SequenceMatcher
 from typing import Optional
@@ -74,18 +75,77 @@ def normalize_title(title: str) -> str:
     return title
 
 
+# Names that are aggregator site names, not real institutions.
+# If normalize_institute() returns one of these, treat the institute as empty.
+_AGGREGATOR_INSTITUTES = {
+    "academic positions", "academicpositions", "the university",
+    "inside higher ed", "phdfinder", "higher ed jobs", "higheredjobs",
+    "academickeys", "chronicle of higher education",
+    "nature careers", "nature", "the",
+    "times higher education", "researchgate", "scholarshipdb",
+    "linkedin", "indeed", "glassdoor",
+}
+
+# Substrings that indicate an aggregator/portal (not a real institute)
+_AGGREGATOR_SUBSTRINGS = [
+    "stipendier", "stipendiemodul",
+]
+
+# Regex to strip long institutional suffixes that vary across sources
+_INST_SUFFIX_RE = re.compile(
+    r"\s*(?:[-–—,]\s*(?:research center|centre|center|faculty|"
+    r"of the [\w\s]+academy[\w\s]*|"
+    r"stipendier|stipendiemodul).*)",
+    re.IGNORECASE,
+)
+
+# Common abbreviation expansions (applied after lowercasing)
+_INST_ABBREVIATIONS: list[tuple[str, str]] = [
+    ("university of california, ", "uc "),
+    ("university of california ", "uc "),
+    ("massachusetts institute of technology", "mit"),
+    ("california institute of technology", "caltech"),
+    ("university of north carolina at chapel hill", "unc"),
+    ("university of north carolina", "unc"),
+    ("unc school of medicine", "unc"),
+    ("komen graduate training program ut mdacc", "md anderson"),
+    ("md anderson cancer center", "md anderson"),
+    ("washington university in st. louis", "washu"),
+    ("georgia institute of technology", "georgia tech"),
+    ("eth zürich", "eth zurich"),
+]
+
+
+def _strip_diacritics(text: str) -> str:
+    """Remove diacritics (ü→u, é→e, å→a, etc.)."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def normalize_institute(name: str) -> str:
-    """Normalize institution name."""
+    """Normalize institution name for comparison.
+
+    Handles diacritics, abbreviations, aggregator names, and long suffixes.
+    """
     name = (name or "").lower().strip()
-    replacements = {
-        "university of california, ": "uc ",
-        "university of california ": "uc ",
-        "massachusetts institute of technology": "mit",
-        "california institute of technology": "caltech",
-    }
-    for old, new in replacements.items():
+    if not name:
+        return ""
+    # Strip diacritics early
+    name = _strip_diacritics(name)
+    # Apply abbreviation expansions
+    for old, new in _INST_ABBREVIATIONS:
         name = name.replace(old, new)
-    return re.sub(r"\s+", " ", name)
+    # Remove long suffixes that vary across sources
+    name = _INST_SUFFIX_RE.sub("", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    # Return empty if it's an aggregator name
+    if name in _AGGREGATOR_INSTITUTES:
+        return ""
+    # Check aggregator substrings
+    for sub in _AGGREGATOR_SUBSTRINGS:
+        if sub in name:
+            return ""
+    return name
 
 
 def similarity(a: str, b: str) -> float:
@@ -134,12 +194,21 @@ def _lsh_buckets(signature: list[int]) -> list[bytes]:
 # ── Duplicate detection (unchanged public API) ───────────────────────────
 
 
+def _is_full_name(name: str) -> bool:
+    """Check if a PI name looks like a full name (first + last)."""
+    parts = name.strip().split()
+    return len(parts) >= 2 and all(len(p) > 1 for p in parts)
+
+
 def is_duplicate(job_a: dict, job_b: dict, threshold: float = 0.85) -> bool:
     """Check if two jobs are duplicates.
 
-    Performs the same logical checks as before — URL match, PI+institute
-    match, title similarity, combined score — so existing callers see
-    identical behaviour.
+    Uses multi-level matching:
+    1. Exact URL match
+    2. Same PI name (full name) — very lenient on institute/title
+    3. Same PI name (last name only) — moderate institute/title check
+    4. Same institute + similar title
+    5. High combined title+institute similarity
     """
     # Same URL = definite duplicate
     if job_a.get("url") and job_a.get("url") == job_b.get("url"):
@@ -151,27 +220,47 @@ def is_duplicate(job_a: dict, job_b: dict, threshold: float = 0.85) -> bool:
     )
     inst_a = normalize_institute(job_a.get("institute", ""))
     inst_b = normalize_institute(job_b.get("institute", ""))
-    inst_sim = similarity(inst_a, inst_b)
+    inst_sim = similarity(inst_a, inst_b) if inst_a and inst_b else 0.0
 
-    # Same PI at same institute with loosely similar title -> duplicate
-    if (
-        job_a.get("pi_name")
-        and job_b.get("pi_name")
-        and job_a["pi_name"].lower() == job_b["pi_name"].lower()
-        and inst_sim > 0.7
-        and title_sim > 0.4
-    ):
-        return True
+    pi_a = (job_a.get("pi_name") or "").strip()
+    pi_b = (job_b.get("pi_name") or "").strip()
+    both_have_pis = bool(pi_a) and bool(pi_b)
+    same_pi = both_have_pis and pi_a.lower() == pi_b.lower()
+
+    # GUARD: different PIs at the same institute → distinct jobs, never merge
+    if both_have_pis and not same_pi:
+        return False
+
+    if same_pi:
+        full_name = _is_full_name(pi_a)
+        if full_name:
+            # Full name match (e.g. "Basile Wicky") — very strong signal.
+            # Only need minimal title OR institute overlap to confirm.
+            if title_sim > 0.3 or inst_sim > 0.3:
+                return True
+            # If one institute is empty (aggregator), accept unconditionally.
+            # ScholarshipDB often has garbage titles like "100%, Basel, fixed-term".
+            if not inst_a or not inst_b:
+                return True
+        else:
+            # Last-name-only match (e.g. "Bock") — need more evidence.
+            # Very similar titles → almost certainly the same job
+            if title_sim > 0.7:
+                return True
+            # Moderate title similarity + some institute overlap
+            if title_sim > 0.35 and inst_sim > 0.3:
+                return True
+            if inst_sim > 0.5 and title_sim > 0.25:
+                return True
 
     # Same institute + very similar normalised title
     # Safety: if either PI name is missing, require much higher title similarity
     # to avoid merging distinct positions at the same institute
-    has_both_pis = bool(job_a.get("pi_name")) and bool(job_b.get("pi_name"))
-    inst_title_threshold = 0.6 if has_both_pis else 0.85
+    inst_title_threshold = 0.6 if both_have_pis else 0.85
     if inst_a and inst_b and inst_a == inst_b and title_sim >= inst_title_threshold:
         return True
 
-    # High title + institute similarity
+    # High title + institute similarity (only when PI names don't conflict)
     combined = (title_sim * 0.6) + (inst_sim * 0.4)
     return combined >= threshold
 
@@ -239,6 +328,9 @@ def deduplicate_jobs(jobs: list[dict], threshold: float = 0.85) -> list[dict]:
     url_index: dict[str, int] = {}
     # Fast-path index: (pi_name_lower, institute_normalized) -> index in unique[]
     pi_inst_index: dict[tuple[str, str], int] = {}
+    # Fast-path index: pi_name_lower -> list of indices in unique[]
+    # Used for PI-only matching (full names across different institutes)
+    pi_only_index: dict[str, list[int]] = defaultdict(list)
     # LSH band tables: band_number -> {bucket_key -> set of indices in unique[]}
     lsh_tables: list[dict[bytes, list[int]]] = [defaultdict(list) for _ in range(_NUM_BANDS)]
     # Cached signatures for jobs in unique[]
@@ -253,6 +345,8 @@ def deduplicate_jobs(jobs: list[dict], threshold: float = 0.85) -> list[dict]:
         inst = normalize_institute(job.get("institute", ""))
         if pi and inst:
             pi_inst_index[(pi, inst)] = idx
+        if pi:
+            pi_only_index[pi].append(idx)
         buckets = _lsh_buckets(sig)
         for band_num, bucket_key in enumerate(buckets):
             lsh_tables[band_num][bucket_key].append(idx)
@@ -276,7 +370,6 @@ def deduplicate_jobs(jobs: list[dict], threshold: float = 0.85) -> list[dict]:
         inst = normalize_institute(job.get("institute", ""))
         if pi and inst and (pi, inst) in pi_inst_index:
             dup_idx = pi_inst_index[(pi, inst)]
-            # Still verify with title similarity (PI+inst alone isn't enough)
             title_sim = similarity(
                 normalize_title(job.get("title", "")),
                 normalize_title(unique[dup_idx].get("title", "")),
@@ -288,6 +381,22 @@ def deduplicate_jobs(jobs: list[dict], threshold: float = 0.85) -> list[dict]:
                     unique[dup_idx].get("title", "")[:50],
                 )
                 unique[dup_idx] = _pick_best(unique[dup_idx], job)
+                continue
+
+        # ── Fast path 3: same PI name across different institutes ─────
+        if pi and pi in pi_only_index:
+            matched_idx: Optional[int] = None
+            for cand_idx in pi_only_index[pi]:
+                if is_duplicate(job, unique[cand_idx], threshold):
+                    matched_idx = cand_idx
+                    break
+            if matched_idx is not None:
+                logger.debug(
+                    "Duplicate (PI-only): '%s' ≈ '%s'",
+                    job.get("title", "")[:50],
+                    unique[matched_idx].get("title", "")[:50],
+                )
+                unique[matched_idx] = _pick_best(unique[matched_idx], job)
                 continue
 
         # ── LSH candidate generation ──────────────────────────────────

@@ -187,39 +187,80 @@ def run_scoring(jobs: list[dict]) -> list[dict]:
     _persist_alt_urls(jobs)
 
     jobs = score_and_sort_jobs(jobs, keywords)
+
+    # Persist match_score to DB
+    _persist_match_scores(jobs)
+
     return jobs
 
 
+def _persist_match_scores(jobs: list[dict]) -> None:
+    """Write match_score back to the DB for all scored jobs."""
+    from src.db import get_connection
+
+    updates = [
+        (j["match_score"], j["url"])
+        for j in jobs
+        if j.get("url") and j.get("match_score", 0) > 0
+    ]
+    if not updates:
+        return
+    with get_connection() as conn:
+        conn.executemany(
+            "UPDATE jobs SET match_score = ? WHERE url = ?",
+            updates,
+        )
+    logger.info("Persisted match_score for %d jobs", len(updates))
+
+
 def _persist_alt_urls(jobs: list[dict]) -> None:
-    """Write alt_url (from cross-source dedup) back to the database.
+    """Write alt_url and dismiss duplicate rows in the database.
 
     Runs dedup on ALL DB jobs (not just the current batch) so that
     cross-source duplicates from previous runs are also detected.
+    The "winner" (longest description) keeps its row and gets alt_url set.
+    The "loser" (duplicate) rows are marked status='merged' so they
+    don't appear in Excel export.
     """
     from src.db import get_connection, get_jobs
     from src.matching.dedup import deduplicate_jobs
 
     all_jobs = get_jobs(limit=10000)
-    deduped = deduplicate_jobs(all_jobs)
+    all_urls = {j.get("url") for j in all_jobs if j.get("url")}
 
+    deduped = deduplicate_jobs(all_jobs)
+    kept_urls = {j.get("url") for j in deduped if j.get("url")}
+
+    # URLs that were in the original but not in the deduped list = losers
+    loser_urls = all_urls - kept_urls
+
+    # Collect alt_url updates from cross-source merges
     updates = []
     for job in deduped:
         alt_urls = job.get("alt_urls")
         if alt_urls and job.get("url"):
-            # Also persist pi_name if it was merged from the other source
             updates.append((alt_urls[0]["url"], job.get("pi_name") or "", job["url"]))
-    if not updates:
+
+    if not updates and not loser_urls:
         return
     with get_connection() as conn:
-        conn.executemany(
-            "UPDATE jobs SET alt_url = ? WHERE url = ? AND (alt_url IS NULL OR alt_url = '')",
-            [(u[0], u[2]) for u in updates],
-        )
-        # Backfill pi_name from merged data
-        conn.executemany(
-            "UPDATE jobs SET pi_name = ? WHERE url = ? AND (pi_name IS NULL OR pi_name = '') AND ? != ''",
-            [(u[1], u[2], u[1]) for u in updates],
-        )
+        if updates:
+            conn.executemany(
+                "UPDATE jobs SET alt_url = ? WHERE url = ? AND (alt_url IS NULL OR alt_url = '')",
+                [(u[0], u[2]) for u in updates],
+            )
+            # Backfill pi_name from merged data
+            conn.executemany(
+                "UPDATE jobs SET pi_name = ? WHERE url = ? AND (pi_name IS NULL OR pi_name = '') AND ? != ''",
+                [(u[1], u[2], u[1]) for u in updates],
+            )
+        # Dismiss all loser rows so they don't appear in exports
+        if loser_urls:
+            conn.executemany(
+                "UPDATE jobs SET status = 'merged' WHERE url = ? AND status = 'new'",
+                [(url,) for url in loser_urls],
+            )
+            logger.info("Dismissed %d duplicate rows (status='merged')", len(loser_urls))
     logger.info("Persisted alt_url for %d cross-source duplicates", len(updates))
 
 

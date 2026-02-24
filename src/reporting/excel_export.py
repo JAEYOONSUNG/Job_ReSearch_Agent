@@ -285,11 +285,11 @@ def _parse_skills(requirements: str, description: str) -> str:
 # ---------------------------------------------------------------------------
 
 JOB_COLUMNS = [
+    "Tier",
     "Title",
     "PI Name",
     "Institute",
     "Department",
-    "Tier",
     "Country",
     "Region",
     # Research
@@ -317,6 +317,11 @@ JOB_COLUMNS = [
     # PI Papers — individual columns
     *[f"Recent Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
     *[f"Top Cited Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
+    # Contact & info
+    "Contact Email",
+    "Info URL 1",
+    "Info URL 2",
+    "Info URL 3",
     # Links
     "Job URL",
     "Job URL 2",
@@ -328,6 +333,24 @@ JOB_COLUMNS = [
     "Source",
     "Status",
 ]
+
+
+_MAX_INFO_URLS = 3  # number of Info URL columns
+
+
+def _info_urls_to_columns(info_urls_json: str | None) -> dict[str, str]:
+    """Convert info_urls JSON to individual column values."""
+    urls: list[str] = []
+    if info_urls_json:
+        try:
+            urls = json.loads(info_urls_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    result: dict[str, str] = {}
+    for i in range(_MAX_INFO_URLS):
+        col = f"Info URL {i + 1}"
+        result[col] = urls[i] if i < len(urls) else ""
+    return result
 
 
 def _format_tier(tier, institute: str = "") -> str:
@@ -388,6 +411,9 @@ def _job_to_row(job: dict) -> dict:
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
         **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
         **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
+        # Contact & info
+        "Contact Email": job.get("contact_email") or "",
+        **_info_urls_to_columns(job.get("info_urls")),
         # Links
         "Job URL": job.get("url") or "",
         "Job URL 2": job.get("alt_url") or "",
@@ -512,6 +538,8 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
         "Description": 50,
         **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
         **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
+        "Contact Email": 25,
+        **{f"Info URL {i+1}": 20 for i in range(_MAX_INFO_URLS)},
         "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
         "Match Score": 8, "Source": 12, "Status": 7,
     }
@@ -521,7 +549,8 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
 
     for i, col in enumerate(df.columns):
         width = width_map.get(col, 15)
-        if col in ("Job URL", "Job URL 2", "Lab URL", "Scholar URL", "Dept URL"):
+        if col in ("Job URL", "Job URL 2", "Lab URL", "Scholar URL", "Dept URL",
+                   "Info URL 1", "Info URL 2", "Info URL 3"):
             worksheet.set_column(i, i, width, url_fmt)
         else:
             worksheet.set_column(i, i, width, default_fmt)
@@ -822,56 +851,210 @@ def _is_excluded(job: dict) -> bool:
     return any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS)
 
 
-def _sort_by_tier(jobs: list[dict]) -> list[dict]:
-    """Sort jobs by tier (T1 first), companies grouped separately, then h-index descending.
+def _build_institute_rank() -> dict[str, int]:
+    """Build lowercase institute -> ranking position within its tier.
 
-    Sort order: T1 → T2 → Company → T3 → T4 → Unranked
+    Lower number = higher ranked.  Institutions not in the rankings
+    get a large default value.
+    """
+    from src.config import load_rankings
+    rankings = load_rankings()
+    rank: dict[str, int] = {}
+    pos = 0
+    for tier_key in ("1", "2", "3", "4"):
+        info = rankings.get("tiers", {}).get(tier_key, {})
+        for inst in info.get("institutions", []):
+            rank[inst.lower()] = pos
+            pos += 1
+    # Companies
+    companies = rankings.get("companies", {})
+    for section in ("top_companies", "companies"):
+        sec = companies.get(section, {})
+        insts = sec.get("institutions", []) if isinstance(sec, dict) else sec
+        for inst in insts:
+            rank[inst.lower()] = pos
+            pos += 1
+    # Aliases
+    aliases = rankings.get("tier_lookup_aliases", {})
+    for alias, canonical in aliases.items():
+        if canonical.lower() in rank and alias.lower() not in rank:
+            rank[alias.lower()] = rank[canonical.lower()]
+    return rank
+
+
+_INSTITUTE_RANK: dict[str, int] | None = None
+
+
+def _get_institute_rank(institute: str) -> int:
+    """Return the ranking position for an institute (lower = better)."""
+    global _INSTITUTE_RANK
+    if _INSTITUTE_RANK is None:
+        _INSTITUTE_RANK = _build_institute_rank()
+    key = institute.strip().lower()
+    if key in _INSTITUTE_RANK:
+        return _INSTITUTE_RANK[key]
+    # Partial match
+    for name, pos in _INSTITUTE_RANK.items():
+        if name in key or key in name:
+            return pos
+    return 99999
+
+
+def _sort_by_tier(jobs: list[dict]) -> list[dict]:
+    """Sort jobs by tier, then by institution ranking within each tier.
+
+    Sort order: Company → T1 → T2 → T3 → T4 → Unranked
+    Within each tier: institution ranking order (descending).
     """
     def _key(j: dict):
         tier = j.get("tier")
         tier_num = tier if isinstance(tier, int) else 999
         company = is_company(j.get("institute") or "")
-        # Companies sort between T2 (2) and T3 (3)
+        # Companies sort at the top (before T1)
         if company:
-            sort_tier = 2.5
+            sort_tier = 0
         else:
             sort_tier = tier_num
-        h = j.get("h_index") or 0
-        return (sort_tier, -h)
+        inst_rank = _get_institute_rank(j.get("institute") or "")
+        return (sort_tier, inst_rank)
     return sorted(jobs, key=_key)
 
 
 def _sort_pis_by_tier(pis: list[dict]) -> list[dict]:
-    """Sort recommended PIs by tier (T1 first), then h-index descending within each tier.
+    """Sort recommended PIs: Company first, then by tier and institution ranking.
 
-    Sort order: T1 → T2 → T3 → T4 → Company → Unranked (no tier)
+    Sort order: Company → T1 → T2 → T3 → T4 → Unranked (no tier)
+    Within each tier: institution ranking order.
     """
     def _key(p: dict):
         tier = p.get("tier")
         tier_num = tier if isinstance(tier, int) and 1 <= tier <= 4 else 999
         company = is_company(p.get("institute") or "")
-        if company and tier_num == 999:
-            sort_tier = 5  # companies after T4 but before unranked
+        if company:
+            sort_tier = 0
         else:
             sort_tier = tier_num
-        h = p.get("h_index") or 0
-        return (sort_tier, -h)
+        inst_rank = _get_institute_rank(p.get("institute") or "")
+        return (sort_tier, inst_rank)
     return sorted(pis, key=_key)
 
 
+def _find_previous_excel(output_dir: Path) -> Path | None:
+    """Find the most recent previous Excel file to preserve user edits."""
+    import glob as _glob
+
+    # Fixed name first
+    fixed = output_dir / "JobSearch_Auto.xlsx"
+    if fixed.exists():
+        return fixed
+    # Fallback: dated files
+    pattern = str(output_dir / "JobSearch_Auto_*.xlsx")
+    files = sorted(_glob.glob(pattern), key=lambda f: Path(f).stat().st_mtime, reverse=True)
+    return Path(files[0]) if files else None
+
+
+def _sync_from_previous_excel(output_dir: Path, exportable_urls: set[str]) -> set[str]:
+    """Read previous Excel to detect user deletions and preserve status edits.
+
+    Returns set of dismissed Job URLs that should be excluded from export.
+    """
+    prev_path = _find_previous_excel(output_dir)
+    if not prev_path:
+        return set()
+
+    # Read all Job URLs and Status from previous Excel
+    prev_urls: dict[str, str] = {}  # url -> status
+    for sheet in ("US Positions", "EU Positions", "Other Positions"):
+        try:
+            df = pd.read_excel(str(prev_path), sheet_name=sheet, engine="openpyxl")
+            for _, row in df.iterrows():
+                url = str(row.get("Job URL", ""))
+                status = row.get("Status", "")
+                if url and url != "nan" and url.startswith("http"):
+                    prev_urls[url] = str(status) if pd.notna(status) else "new"
+        except Exception:
+            continue
+
+    if not prev_urls:
+        return set()
+
+    from src.db import get_connection
+
+    dismissed: set[str] = set()
+
+    with get_connection() as conn:
+        # 1. Preserve user's status changes from Excel → DB
+        for url, status in prev_urls.items():
+            if status and status not in ("new", "", "nan"):
+                conn.execute(
+                    "UPDATE jobs SET status = ? WHERE url = ?",
+                    (status, url),
+                )
+
+        # 2. Detect dismissed: previously exported but removed from Excel
+        exported_rows = conn.execute(
+            "SELECT url FROM jobs WHERE exported_at IS NOT NULL "
+            "AND (status IS NULL OR status NOT IN ('dismissed'))"
+        ).fetchall()
+
+        for row in exported_rows:
+            url = row["url"]
+            if url in exportable_urls and url not in prev_urls:
+                # Was exported before, should be in Excel, but user removed it
+                dismissed.add(url)
+                conn.execute(
+                    "UPDATE jobs SET status = 'dismissed' WHERE url = ?",
+                    (url,),
+                )
+
+    if dismissed:
+        logger.info("Detected %d user-dismissed jobs from previous Excel", len(dismissed))
+
+    return dismissed
+
+
+def _mark_exported(urls: list[str]) -> None:
+    """Set exported_at timestamp for all exported job URLs."""
+    if not urls:
+        return
+    from src.db import get_connection
+    with get_connection() as conn:
+        conn.executemany(
+            "UPDATE jobs SET exported_at = datetime('now') WHERE url = ?",
+            [(u,) for u in urls],
+        )
+
+
 def export_to_excel(output_dir: Path = None) -> Path:
-    """Export all job data to a multi-sheet Excel file with charts and formatting."""
+    """Export all job data to a multi-sheet Excel file with charts and formatting.
+
+    Preserves user edits: if the user deleted rows from a previous Excel,
+    those jobs are marked 'dismissed' and excluded from future exports.
+    Status changes made in Excel are synced back to the DB.
+    """
     output_dir = output_dir or EXCEL_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"JobSearch_Auto_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
-    filepath = output_dir / filename
+    filepath = output_dir / "JobSearch_Auto.xlsx"
 
-    # Gather data and filter out excluded keywords (neuroscience etc)
+    # Phase 1: Sync from previous Excel BEFORE loading jobs
+    # (detects user deletions, preserves status edits → writes to DB)
+    raw_pre = get_jobs(limit=10000)
+    _skip_statuses = {"dismissed", "merged"}
+    pre_urls = {j.get("url") for j in raw_pre
+                if j.get("url") and not _is_excluded(j) and j.get("status") not in _skip_statuses}
+    dismissed = _sync_from_previous_excel(output_dir, pre_urls)
+
+    # Phase 2: Reload jobs from DB (now includes synced status changes)
     raw_jobs = get_jobs(limit=10000)
-    all_jobs = [j for j in raw_jobs if not _is_excluded(j)]
-    logger.info("Filtered %d → %d jobs (excluded %d by keywords)",
-                len(raw_jobs), len(all_jobs), len(raw_jobs) - len(all_jobs))
+    all_jobs = [j for j in raw_jobs
+                if not _is_excluded(j)
+                and j.get("status") not in _skip_statuses
+                and j.get("url") not in dismissed]
+
+    logger.info("Filtered %d → %d jobs (excluded %d by keywords, %d dismissed)",
+                len(raw_jobs), len(all_jobs),
+                len(raw_jobs) - len(all_jobs) - len(dismissed), len(dismissed))
 
     # Sort by tier within each region group
     us_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "US"])
@@ -916,15 +1099,9 @@ def export_to_excel(output_dir: Path = None) -> Path:
         if len(df_rec) > 0:
             _style_worksheet(writer, "PI Recommendations", df_rec)
 
-        # Sheet 5: All History (sorted by tier)
-        all_sorted = _sort_by_tier(all_jobs)
-        df_all = pd.DataFrame([_job_to_row(j) for j in all_sorted], columns=JOB_COLUMNS)
-        df_all.to_excel(writer, sheet_name="All History", index=False)
-        if len(df_all) > 0:
-            _style_worksheet(writer, "All History", df_all)
-            _write_paper_links(writer, "All History", df_all, all_sorted)
-            _style_deadline_cells(writer, "All History", df_all)
-            _style_citizenship_cells(writer, "All History", df_all, all_sorted)
+    # Mark all exported jobs so we can detect user deletions next time
+    exported_urls = [j.get("url") for j in all_jobs if j.get("url")]
+    _mark_exported(exported_urls)
 
     logger.info("Excel exported to %s (%d jobs)", filepath, len(all_jobs))
     return filepath

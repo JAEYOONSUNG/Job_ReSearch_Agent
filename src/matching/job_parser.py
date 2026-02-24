@@ -10,8 +10,11 @@ Parses free-form job posting text to extract:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -38,17 +41,17 @@ _FULL_NAME = rf"({_FIRST}{_MID}\s+{_LAST})"  # captured full name
 # Patterns that typically precede a PI name in job postings
 _PI_PATTERNS = [
     # "Lab of Dr. John Smith", "Laboratory of Prof. Jane Doe"
-    rf"(?:lab(?:oratory)?|group|team)\s+(?:of|led by|headed by|directed by)\s+{_TITLE_OPT}{_FULL_NAME}",
+    rf"(?:lab(?:orator(?:y|ies))?|group|team)\s+(?:of|led by|headed by|directed by)\s+{_TITLE_OPT}{_FULL_NAME}",
     # "PI: John Smith" or "Principal Investigator: Dr. Jane Doe"
     # Also: "Project leader:", "Program Coordinator", "Reporting to:", "Head of project"
     # \b prevents matching "PI" inside "EXPIRED", "OPIS" etc.
     rf"\b(?:PI|Principal\s+Investigator|Supervisor|Advisor|Adviser|Project\s+(?:leader|coordinator)|Program\s+Coordinator|Reporting\s+to|Head\s+of\s+(?:programme|project))\s*[:=\-]?\s*{_TITLE_OPT}{_FULL_NAME}",
     # "Prof. John Smith's lab" or "Dr. Jane Doe's group"
-    rf"{_TITLE}{_FULL_NAME}'?s?\s+(?:lab(?:oratory)?|group|team|research)",
+    rf"{_TITLE}{_FULL_NAME}'?s?\s+(?:lab(?:orator(?:y|ies))?|group|team|research)",
     # "under the supervision of Dr. John Smith"
     rf"(?:under the )?(?:supervision|direction|guidance|mentorship)\s+of\s+{_TITLE_OPT}{_FULL_NAME}",
     # "contact Dr. John Smith" or "Contact: Prof. Jane Doe"
-    rf"(?:contact|inquiries?|questions?|message\s+to|directed\s+to(?:\s+both)?)\s*:?\s*{_TITLE_OPT}{_FULL_NAME}\s*(?:at|@|\(|\[at\])",
+    rf"(?:contact|inquiries?|questions?|(?:message|se(?:nd|nt))\s+to|directed\s+to(?:\s+both)?)\s*:?\s*{_TITLE_OPT}{_FULL_NAME}\s*(?:at|@|\(|\[at\])",
     # "The [Name] Lab" or "[Name] Laboratory"
     rf"(?:The\s+)?{_FULL_NAME}\s+(?:Lab(?:oratory)?|Group|Team)(?:\s|,|\.)",
     # "directed/supervised by Dr. Mitchell Ho" (lab/group prefix not required)
@@ -56,9 +59,9 @@ _PI_PATTERNS = [
     # "join Dr. Mitchell Ho" or "work with Prof. Smith"
     rf"(?:join|work\s+with|collaborat\w+\s+with|assist)\s+{_TITLE}{_FULL_NAME}",
     # "lab/group/team led by Dr. Name" (passive)
-    rf"(?:lab(?:oratory)?|group|team|unit)\s+(?:is\s+)?(?:led|headed|directed|supervised|run)\s+by\s+{_TITLE_OPT}{_FULL_NAME}",
+    rf"(?:lab(?:orator(?:y|ies))?|group|team|unit)\s+(?:is\s+)?(?:led|headed|directed|supervised|run)\s+by\s+{_TITLE_OPT}{_FULL_NAME}",
     # "in the Name lab/group" (embedded)
-    rf"in\s+(?:the\s+)?(?:(?:Prof|Dr)\.?\s+)?{_FULL_NAME}\s+(?:lab(?:oratory)?|group|team)",
+    rf"in\s+(?:the\s+)?(?:(?:Prof|Dr)\.?\s+)?{_FULL_NAME}\s+(?:lab(?:orator(?:y|ies))?|group|team)",
     # "mentor: Dr. Name" or "mentored by Name"
     rf"(?:mentor(?:ed)?|mentoring)\s*(?:by|is|:)\s*{_TITLE_OPT}{_FULL_NAME}",
     # "led at [institution] by Prof. Name" (gap between verb and "by")
@@ -272,6 +275,180 @@ _FIELD_MAPPING: list[tuple[list[str], str]] = [
       "cloning", "transformation"],
      "Molecular Biology"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Department extraction
+# ---------------------------------------------------------------------------
+
+_DEPARTMENT_PATTERNS = [
+    # "Department of Molecular Biology" / "Dept. of Chemistry"
+    re.compile(r"(?:Department|Dept\.?)\s+of\s+([\w\s&,/()-]+?)(?:\s*[,.\n(]|\s+(?:at|in|is|and)\b)", re.IGNORECASE),
+    # "School of Medicine" / "School of Public Health"
+    re.compile(r"School\s+of\s+([\w\s&,/()-]+?)(?:\s*[,.\n(]|\s+(?:at|in|is|and)\b)", re.IGNORECASE),
+    # "Faculty of Science and Technology"
+    re.compile(r"Faculty\s+of\s+([\w\s&,/()-]+?)(?:\s*[,.\n(]|\s+(?:at|in|is|and)\b)", re.IGNORECASE),
+    # "Division of Applied Chemistry"
+    re.compile(r"Division\s+of\s+([\w\s&,/()-]+?)(?:\s*[,.\n(]|\s+(?:at|in|is|and)\b)", re.IGNORECASE),
+]
+
+# Map from pattern prefix keyword to human-readable prefix
+_DEPT_PREFIX_MAP = {
+    "department": "Department of",
+    "dept": "Department of",
+    "dept.": "Department of",
+    "school": "School of",
+    "faculty": "Faculty of",
+    "division": "Division of",
+}
+
+
+def extract_department(text: str) -> str | None:
+    """Extract department/school/faculty name from description text.
+
+    Scans for patterns like "Department of X", "School of X", etc.
+    Returns the full name including the prefix (e.g. "Department of Neuroscience").
+    """
+    if not text:
+        return None
+
+    for pattern in _DEPARTMENT_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        name = m.group(1).strip().rstrip(",.")
+        if len(name) < 3 or len(name) > 80:
+            continue
+        # Determine prefix from the matched text
+        matched_prefix = m.group(0).split()[0].lower().rstrip(".")
+        prefix = _DEPT_PREFIX_MAP.get(matched_prefix, "Department of")
+        return f"{prefix} {name}"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Contact email & info URL extraction
+# ---------------------------------------------------------------------------
+
+_EMAIL_RE = re.compile(
+    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+)
+
+# Emails to skip (no-reply, generic HR systems, tracking pixels)
+_EMAIL_SKIP = re.compile(
+    r"(?:noreply|no-reply|donotreply|mailer-daemon|example\.com|"
+    r"\.png$|\.jpg$|\.gif$|sentry\.io|email\.com$)",
+    re.IGNORECASE,
+)
+
+# Context keywords that indicate a contact/question email
+_EMAIL_CONTEXT = re.compile(
+    r"(?:contact|e-?mail|inquir|question|information|apply|"
+    r"send\s+(?:your|a|an)|submit|reach\s+(?:out|us)|"
+    r"directed\s+to|correspondence|where\s+to\s+apply)",
+    re.IGNORECASE,
+)
+
+
+def extract_contact_email(text: str) -> str | None:
+    """Extract the most relevant contact email from description text.
+
+    Prefers emails near context words like 'contact', 'email', 'inquiries'.
+    Falls back to first valid email found.
+    """
+    if not text:
+        return None
+
+    candidates: list[tuple[str, bool]] = []  # (email, has_context)
+    for m in _EMAIL_RE.finditer(text):
+        email = m.group(0).rstrip(".,;:)")
+        if _EMAIL_SKIP.search(email):
+            continue
+        # Check context: 80 chars before the match
+        start = max(0, m.start() - 80)
+        context = text[start:m.start()]
+        has_ctx = bool(_EMAIL_CONTEXT.search(context))
+        candidates.append((email, has_ctx))
+
+    if not candidates:
+        return None
+    # Prefer contextual matches
+    for email, has_ctx in candidates:
+        if has_ctx:
+            return email
+    return candidates[0][0]
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\"')\]\},]+")
+
+# URL patterns to skip (boilerplate, legal, EEO, benefit pages, etc.)
+_URL_SKIP = re.compile(
+    r"(?:eeoc\.gov|eeo|equal.?employ|affirmative.?action|"
+    r"privacy.?policy|cookie.?policy|terms.?of.?(?:use|service)|"
+    r"legal.?statement|policymanual|"
+    r"/hr/benefits|/hr/learning|/hr/orientation|"
+    r"annualclery\.pdf|police\..*\.edu|"
+    r"linkedin\.com|facebook\.com|twitter\.com|instagram\.com|"
+    r"youtube\.com|glassdoor\.com|indeed\.com|"
+    r"fonts\.googleapis|cdn\.|\.css|\.js(?:\?|$)|"
+    r"google\.com/maps|maps\.google|"
+    r"mission\.php|about/mission)",
+    re.IGNORECASE,
+)
+
+# Context keywords that indicate a useful info/detail/apply URL
+_URL_CONTEXT = re.compile(
+    r"(?:apply|application|detail|more\s+info|learn\s+more|"
+    r"full\s+(?:description|posting|details|announcement)|"
+    r"lab(?:oratory)?|group|team|research|"
+    r"where\s+to\s+apply|visit|click\s+here|"
+    r"see\s+(?:link|here|below))",
+    re.IGNORECASE,
+)
+
+
+def extract_info_urls(text: str, job_url: str | None = None, max_urls: int = 3) -> list[str]:
+    """Extract notable info/detail/apply URLs from description text.
+
+    Filters out boilerplate (EEO, privacy, social media) and the job's own URL.
+    Returns up to *max_urls* unique URLs, prioritising those near context words.
+    """
+    if not text:
+        return []
+
+    job_domain = ""
+    if job_url:
+        # Extract domain of the job URL to avoid returning the same link
+        dm = re.search(r"https?://([^/]+)", job_url)
+        if dm:
+            job_domain = dm.group(1).lower()
+
+    contextual: list[str] = []
+    other: list[str] = []
+    seen: set[str] = set()
+
+    for m in _URL_RE.finditer(text):
+        url = m.group(0).rstrip(".,;:)\"'")
+        if url in seen:
+            continue
+        seen.add(url)
+        if _URL_SKIP.search(url):
+            continue
+        # Skip the job's own URL
+        if job_url and url == job_url:
+            continue
+
+        # Check context
+        start = max(0, m.start() - 80)
+        context = text[start:m.start()]
+        if _URL_CONTEXT.search(context):
+            contextual.append(url)
+        else:
+            other.append(url)
+
+    result = contextual + other
+    return result[:max_urls]
 
 
 # ---------------------------------------------------------------------------
@@ -648,32 +825,61 @@ _STRUCTURED_SECTIONS = {
         r"^(?:Position |Job )?Summary\s*[:.]?\s*$|"
         r"^About (?:the |this )?(?:Position|Role|Opportunity)\s*[:.]?\s*$|"
         r"^Overview\s*[:.]?\s*$|"
-        r"^Description\s*[:.]?\s*$",
+        r"^Description\s*[:.]?\s*$|"
+        # EURAXESS / AcademicPositions / ScholarshipDB patterns
+        r"^Job [Dd]escription\s*[:.]?\s*$|"
+        r"^About the (?:research |)project\s*[:.]?\s*$|"
+        r"^About (?:us|the (?:lab|group|team|institute))\s*[:.]?\s*$|"
+        r"^Offer [Dd]escription\s*[:.]?\s*$|"
+        r"^Project [Dd]escription\s*[:.]?\s*$|"
+        r"^Presentation of the (?:position|organisation)\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "responsibilities": re.compile(
         r"^(?:Position |Key |Primary )?Responsibilities\s*[:.]?\s*$|"
         r"^(?:Key |Major )?(?:Duties|Tasks)\s*[:.]?\s*$|"
         r"^What (?:you'll|you will) do\s*[:.]?\s*$|"
-        r"^The Role\s*[:.]?\s*$",
+        r"^The Role\s*[:.]?\s*$|"
+        # EURAXESS / AcademicPositions patterns
+        r"^(?:Key |Main )?(?:Tasks?|Activities)\s*[:.]?\s*$|"
+        r"^Your (?:tasks?|role|mission)\s*[:.]?\s*$|"
+        r"^The (?:Postdoc(?:toral)?|position|role|fellow)\s+will\s*[:.]?\s*$|"
+        r"^Key [Dd]uties\s*[:.]?\s*$|"
+        r"^(?:Main |Key )?[Rr]esponsibilities\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "requirements": re.compile(
         r"^(?:Position |Minimum )?(?:Requirements?|Qualifications?)\s*[:.]?\s*$|"
         r"^(?:Required |Minimum )?(?:Education|Experience|Skills)(?: and Experience)?\s*[:.]?\s*$|"
         r"^What (?:you'll|you will) (?:need|bring)\s*[:.]?\s*$|"
-        r"^Who you are\s*[:.]?\s*$",
+        r"^Who you are\s*[:.]?\s*$|"
+        # EURAXESS / AcademicPositions patterns
+        r"^(?:Your |Candidate )?[Pp]rofile\s*[:.]?\s*$|"
+        r"^(?:Essential |Required )?(?:Criteria|Competencies)\s*[:.]?\s*$|"
+        r"^Eligibility\s*[:.]?\s*$|"
+        r"^(?:We|The candidate|Applicants?)\s+(?:should|must|are expected)\s*[:.]?\s*$|"
+        r"^(?:Minimum |Essential )?(?:Education|Experience)\s+(?:and |&\s+)?(?:Experience |Education )?[Rr]equirements?\s*[:.]?\s*$|"
+        r"^Who we are looking for\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "preferred": re.compile(
         r"^Preferred\s+(?:Experience|Education|Skills|Qualifications?)\s*[:.]?\s*$|"
         r"^(?:Nice to have|Desired|Bonus)\s*[:.]?\s*$|"
-        r"^Additional (?:Skills|Qualifications?)\s*[:.]?\s*$",
+        r"^Additional (?:Skills|Qualifications?)\s*[:.]?\s*$|"
+        # EURAXESS / AcademicPositions patterns
+        r"^Preferred [Ss]kills?\s*[:.]?\s*$|"
+        r"^(?:Assets?|Advantages?|Plus)\s*[:.]?\s*$|"
+        r"^(?:Desired|Preferred)\s+(?:Criteria|Competencies)\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "conditions": re.compile(
         r"^(?:Compensation|Salary|Pay|Benefits?|What we offer)\s*[:.]?\s*$|"
-        r"^(?:Contract|Employment) (?:Type|Details?|Terms?)\s*[:.]?\s*$",
+        r"^(?:Contract|Employment) (?:Type|Details?|Terms?)\s*[:.]?\s*$|"
+        # EURAXESS / AcademicPositions patterns
+        r"^(?:We )?[Oo]ffer\s*[:.]?\s*$|"
+        r"^(?:Employment |Working )?[Cc]onditions?\s*[:.]?\s*$|"
+        r"^(?:Benefits? (?:and |& )?)?[Ss]ervices\s*[:.]?\s*$|"
+        r"^(?:Contract |Position )?[Dd]etails?\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
 }

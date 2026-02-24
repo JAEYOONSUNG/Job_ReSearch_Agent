@@ -143,6 +143,9 @@ _MIGRATIONS = [
     ("pis", "top_cited_papers", "TEXT"),
     ("pis", "s2_author_id", "TEXT"),
     ("jobs", "alt_url", "TEXT"),
+    ("jobs", "contact_email", "TEXT"),
+    ("jobs", "info_urls", "TEXT"),
+    ("jobs", "exported_at", "TEXT"),
 ]
 
 
@@ -200,6 +203,9 @@ _AGGREGATOR_INSTITUTES = {
     "academickeys", "chronicle of higher education",
     "nature careers", "nature", "the",
     "times higher education",
+    "academic positions", "academicpositions",
+    "the university", "researchgate", "scholarshipdb",
+    "linkedin", "indeed", "glassdoor",
 }
 
 

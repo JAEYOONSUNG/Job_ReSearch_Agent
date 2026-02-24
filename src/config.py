@@ -87,6 +87,7 @@ CV_KEYWORDS = [
     "systems biology",
     "bioinformatics",
     "enzyme engineering",
+    "microbiome",
 ]
 
 # Keywords to EXCLUDE — fields irrelevant to the user's background
@@ -101,6 +102,18 @@ EXCLUDE_KEYWORDS = [
     "optogenetics",
     "electrophysiology",
     "patch clamp",
+    # Stem cell / regenerative
+    "stem cell",
+    "stem cells",
+    # Cancer / Immunology
+    "cancer biology",
+    "oncology",
+    "tumor",
+    "tumour",
+    "immunology",
+    "immunotherapy",
+    "antibody engineering",
+    "CAR-T",
     # PhD positions (not postdoc)
     "PhD position",
     "PhD student",

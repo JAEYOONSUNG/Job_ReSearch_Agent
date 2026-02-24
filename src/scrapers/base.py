@@ -690,6 +690,28 @@ class BaseScraper(abc.ABC):
                 if parsed.get("keywords") and not job.get("keywords"):
                     job["keywords"] = parsed["keywords"]
 
+        # Extract department if not already set
+        if not job.get("department") and desc:
+            from src.matching.job_parser import extract_department
+            dept = extract_department(desc)
+            if dept:
+                job["department"] = dept
+
+        # Extract contact email if not already set
+        if not job.get("contact_email") and desc:
+            from src.matching.job_parser import extract_contact_email
+            email = extract_contact_email(desc)
+            if email:
+                job["contact_email"] = email
+
+        # Extract info URLs from description
+        if not job.get("info_urls") and desc:
+            from src.matching.job_parser import extract_info_urls
+            urls = extract_info_urls(desc, job_url=job.get("url"))
+            if urls:
+                import json as _json
+                job["info_urls"] = _json.dumps(urls)
+
         # Infer research field if still empty
         if not job.get("field"):
             from src.matching.job_parser import infer_field

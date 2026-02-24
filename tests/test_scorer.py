@@ -166,7 +166,23 @@ class TestScoreJob:
             result = score_job(job)
             assert result["region"] == "EU"
 
-    def test_uses_existing_tier(self, mock_rankings):
+    def test_recalculates_tier_from_rankings(self, mock_rankings):
+        """Tier is always recalculated from rankings, ignoring stale cached value."""
+        with patch("src.matching.scorer.load_rankings", return_value=mock_rankings):
+            job = {
+                "title": "Job",
+                "description": "",
+                "field": "",
+                "pi_name": "",
+                "institute": "MIT",
+                "tier": 4,  # stale cached tier
+                "country": "",
+            }
+            result = score_job(job)
+            assert result["tier"] == 1  # recalculated from rankings
+
+    def test_unranked_institute_gets_tier_5(self, mock_rankings):
+        """Unknown institutes get tier 5 (recalculated, not cached)."""
         with patch("src.matching.scorer.load_rankings", return_value=mock_rankings):
             job = {
                 "title": "Job",
@@ -178,7 +194,7 @@ class TestScoreJob:
                 "country": "",
             }
             result = score_job(job)
-            assert result["tier"] == 2
+            assert result["tier"] == 5
 
     def test_sort_key_structure(self, mock_rankings):
         with patch("src.matching.scorer.load_rankings", return_value=mock_rankings):

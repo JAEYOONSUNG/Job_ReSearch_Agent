@@ -595,9 +595,14 @@ class ScholarshipDBScraper(BaseScraper):
             if pi:
                 job["pi_name"] = pi
 
-        if not job.get("deadline"):
-            dl = extract_deadline(desc)
-            if dl:
+        # Always try to extract deadline from description body;
+        # keep the earliest between existing (structured) and description-based
+        dl = extract_deadline(desc)
+        if dl:
+            existing = job.get("deadline")
+            if existing:
+                job["deadline"] = min(existing, dl)
+            else:
                 job["deadline"] = dl
 
         if not job.get("field"):

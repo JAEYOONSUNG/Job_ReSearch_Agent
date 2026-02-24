@@ -66,6 +66,12 @@ SEARCH_KEYWORDS = [
     "Sanger Institute",
     "Pasteur Institute postdoc",
     "Francis Crick postdoc",
+    "Helmholtz postdoc",
+    "Leibniz postdoc",
+    "ETH Zurich postdoc",
+    "EPFL postdoc",
+    "Weizmann postdoc",
+    "Technion postdoc",
 ]
 
 MAX_PAGES = 3

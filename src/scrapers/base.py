@@ -15,6 +15,7 @@ import logging
 import random
 import re
 import time
+import unicodedata
 from datetime import datetime
 from html import unescape as html_unescape
 from typing import Any
@@ -143,6 +144,12 @@ def _build_session(
 
 def _random_ua() -> str:
     return random.choice(_USER_AGENTS)
+
+
+def _strip_accents(text: str) -> str:
+    """Remove accents/diacritics: Zürich→Zurich, Poznań→Poznan."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
 # ── Async HTTP helpers ──────────────────────────────────────────────────
@@ -460,7 +467,7 @@ class BaseScraper(abc.ABC):
 
     @staticmethod
     def _build_tier_lookup() -> dict[str, int]:
-        """Build a lowercase institution-name -> tier mapping.
+        """Build an accent-stripped, lowercase institution-name -> tier mapping.
 
         Includes tiers 1-4, top_companies (→ 2), and companies (→ 3).
         Also includes aliases from tier_lookup_aliases.
@@ -474,25 +481,26 @@ class BaseScraper(abc.ABC):
             except (ValueError, TypeError):
                 continue
             for inst in info.get("institutions", []):
-                lookup[inst.lower()] = tier
+                lookup[_strip_accents(inst.lower())] = tier
 
         # Companies (nested dict with "institutions" key)
         companies = rankings.get("companies", {})
         top_co = companies.get("top_companies", {})
         top_list = top_co.get("institutions", []) if isinstance(top_co, dict) else top_co
         for inst in top_list:
-            lookup[inst.lower()] = top_co.get("tier_equivalent", 2) if isinstance(top_co, dict) else 2
+            lookup[_strip_accents(inst.lower())] = top_co.get("tier_equivalent", 2) if isinstance(top_co, dict) else 2
         std_co = companies.get("companies", {})
         std_list = std_co.get("institutions", []) if isinstance(std_co, dict) else std_co
         for inst in std_list:
-            lookup[inst.lower()] = std_co.get("tier_equivalent", 3) if isinstance(std_co, dict) else 3
+            lookup[_strip_accents(inst.lower())] = std_co.get("tier_equivalent", 3) if isinstance(std_co, dict) else 3
 
         # Aliases
         aliases = rankings.get("tier_lookup_aliases", {})
         for alias, canonical in aliases.items():
-            canonical_lower = canonical.lower()
-            if canonical_lower in lookup and alias.lower() not in lookup:
-                lookup[alias.lower()] = lookup[canonical_lower]
+            canonical_key = _strip_accents(canonical.lower())
+            alias_key = _strip_accents(alias.lower())
+            if canonical_key in lookup and alias_key not in lookup:
+                lookup[alias_key] = lookup[canonical_key]
 
         return lookup
 
@@ -521,7 +529,7 @@ class BaseScraper(abc.ABC):
         """Map an institution name to a ranking tier (1/2/3) or None."""
         if not institute:
             return None
-        key = institute.strip().lower()
+        key = _strip_accents(institute.strip().lower())
         if key in self._tier_lookup:
             return self._tier_lookup[key]
         # Partial match: check if any known institution name is contained

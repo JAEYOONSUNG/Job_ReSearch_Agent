@@ -7,6 +7,7 @@ Use ``ALL_SCRAPERS`` for a convenient list of all available scraper classes.
 from src.scrapers.academicpositions import AcademicPositionsScraper
 from src.scrapers.base import BaseScraper
 from src.scrapers.euraxess import EuraxessScraper
+from src.scrapers.institutional import InstitutionalPortalScraper
 from src.scrapers.jobs_ac_kr import JobsAcKrScraper
 from src.scrapers.jobspy_scraper import JobSpyScraper
 from src.scrapers.lab_websites import LabWebsiteScraper
@@ -19,6 +20,7 @@ ALL_SCRAPERS: list[type[BaseScraper]] = [
     NatureCareersScraper,
     JobSpyScraper,
     EuraxessScraper,
+    InstitutionalPortalScraper,
     JobsAcKrScraper,
     ResearchGateScraper,
     WantedScraper,
@@ -32,6 +34,7 @@ __all__ = [
     "NatureCareersScraper",
     "JobSpyScraper",
     "EuraxessScraper",
+    "InstitutionalPortalScraper",
     "JobsAcKrScraper",
     "ResearchGateScraper",
     "WantedScraper",

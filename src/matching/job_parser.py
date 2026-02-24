@@ -981,16 +981,26 @@ _DATE_EU = r"(\d{1,2})[./](\d{1,2})[./](\d{4})"
 _DEADLINE_CONTEXT_PATTERNS = [
     # "Deadline: <date>" or "Application deadline: <date>"
     r"(?:application\s+)?deadline\s*[:=]\s*",
-    # "Closing date: <date>"
-    r"closing\s+date\s*[:=]\s*",
+    # "Closing date: <date>" or "Closing date for applications is <date>"
+    r"closing\s+date\s*(?:for\s+\w+\s*)?(?:[:=]|is)\s*",
     # "Applications must be received by <date>"
     r"(?:applications?|submissions?)\s+(?:must be|should be|are)\s+(?:received|submitted)\s+(?:by|before|no later than)\s+",
+    # "Submit your application by/before/no later than <date>"
+    r"submit\s+(?:your\s+)?(?:application|documents?|materials?)\s+(?:by|before|no later than)\s+",
     # "Apply by <date>" or "Apply before <date>"
-    r"apply\s+(?:by|before)\s+",
+    r"apply\s+(?:by|before|no later than)\s+",
+    # "Applications (are) due (by) <date>"
+    r"(?:applications?\s+)?(?:are\s+)?due\s*(?:[:=]|by|before|on)?\s*",
+    # "no later than <date>" (standalone — strong deadline indicator)
+    r"no later than\s+",
     # "open until <date>"
     r"(?:position|posting|vacancy|job)\s+(?:is\s+)?open\s+(?:until|through|till)\s+",
-    # "Review of applications will begin <date>"
-    r"review\s+of\s+(?:applications?|candidates?)\s+(?:will\s+)?(?:begin|start|commence)\s*(?:on)?\s*",
+    # "please submit/apply before <date>"
+    r"please\s+(?:submit|apply)\s+(?:by|before|no later than)\s+",
+    # "Review of applications will begin/begins <date>"
+    r"review\s+of\s+(?:applications?|candidates?)\s+(?:will\s+)?(?:begins?|starts?|commences?)\s*(?:on)?\s*",
+    # "for full consideration, apply/submit by <date>"
+    r"for\s+full\s+consideration[,\s]+(?:please\s+)?(?:apply|submit)\s+(?:by|before)\s+",
 ]
 
 _DEADLINE_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DEADLINE_CONTEXT_PATTERNS]
@@ -1050,21 +1060,22 @@ def extract_deadline(text: str) -> Optional[str]:
     """Extract application deadline date from job posting text.
 
     Searches for deadline-related keywords followed by date patterns.
-    Returns the date in ISO format (YYYY-MM-DD) or None.
+    Collects all candidate dates and returns the earliest one in ISO format
+    (YYYY-MM-DD) or None.
     """
     if not text:
         return None
 
+    candidates: list[str] = []
+
     # Strategy 1: Look for deadline keywords followed by a date
     for pattern in _DEADLINE_COMPILED:
-        m = pattern.search(text)
-        if not m:
-            continue
-        # Extract the text after the keyword (up to 50 chars)
-        after = text[m.end():m.end() + 50]
-        date = _parse_date_string(after.strip())
-        if date:
-            return date
+        for m in pattern.finditer(text):
+            # Extract the text after the keyword (up to 60 chars)
+            after = text[m.end():m.end() + 60]
+            date = _parse_date_string(after.strip())
+            if date:
+                candidates.append(date)
 
     # Strategy 2: Look for "Deadline" section header
     deadline_section = extract_section(text, [r"deadline\s*[:.]"])
@@ -1075,9 +1086,13 @@ def extract_deadline(text: str) -> Optional[str]:
             if dm:
                 date = _parse_date_string(dm.group(0))
                 if date:
-                    return date
+                    candidates.append(date)
 
-    return None
+    if not candidates:
+        return None
+
+    # Return the earliest deadline (most urgent)
+    return min(candidates)
 
 
 def parse_job_posting(text: str) -> dict[str, Any]:

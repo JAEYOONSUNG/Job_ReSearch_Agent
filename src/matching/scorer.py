@@ -178,7 +178,7 @@ def score_job(job: dict, keywords: list[str] = None) -> dict:
     if not country:
         country = guess_country_from_institute(job.get("institute", ""))
     region = job.get("region") or get_region(country)
-    tier = job.get("tier") or get_institution_tier(job.get("institute", ""))
+    tier = get_institution_tier(job.get("institute", "")) or job.get("tier") or 5
     h_index = job.get("h_index") or 0
 
     job["match_score"] = round(match_score, 3)

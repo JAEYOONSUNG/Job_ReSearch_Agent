@@ -63,6 +63,14 @@ SEARCH_KEYWORDS = [
     "postdoc Francis Crick Institute",
     "postdoc Max Planck biology",
     "postdoc ETH Zurich biology",
+    "postdoc Institut Pasteur",
+    "postdoc Helmholtz biology",
+    "postdoc Weizmann Institute",
+    "postdoc Technion biology",
+    "postdoc Leibniz biology",
+    "postdoc EPFL biology",
+    "postdoc Salk Institute",
+    "postdoc Broad Institute",
 ]
 
 # Keywords for matching CV to job postings
@@ -469,6 +477,9 @@ INSTITUTE_COUNTRY_RULES: list[tuple[str, str]] = [
     ("university of queensland", "Australia"),
     ("monash university", "Australia"),
     ("university of auckland", "New Zealand"),
+    # --- Israel ---
+    ("technion", "Israel"),
+    ("weizmann", "Israel"),
     # --- EMBL (pan-European) ---
     ("embl", "Germany"),
     ("european molecular biology", "Germany"),

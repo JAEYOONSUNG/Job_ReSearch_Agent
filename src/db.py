@@ -146,6 +146,7 @@ _MIGRATIONS = [
     ("jobs", "contact_email", "TEXT"),
     ("jobs", "info_urls", "TEXT"),
     ("jobs", "exported_at", "TEXT"),
+    ("jobs", "application_materials", "TEXT"),
 ]
 
 

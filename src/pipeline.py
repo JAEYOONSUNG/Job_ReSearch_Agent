@@ -40,11 +40,13 @@ def _build_scrapers() -> list:
     from src.scrapers.scholarshipdb import ScholarshipDBScraper
     from src.scrapers.researchgate import ResearchGateScraper
     from src.scrapers.lab_websites import LabWebsiteScraper
+    from src.scrapers.institutional import InstitutionalPortalScraper
 
     scrapers = [
         NatureCareersScraper(),
         JobSpyScraper(),
         EuraxessScraper(),
+        InstitutionalPortalScraper(),
         AcademicPositionsScraper(),
         ScholarshipDBScraper(),
         ResearchGateScraper(),
@@ -84,7 +86,7 @@ def _run_single_scraper(scraper) -> list[dict]:
 
 SCRAPER_TIMEOUT = 300  # 5 minutes per scraper
 # Scrapers that need more time (many detail-page fetches with rate limiting)
-_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 900, "euraxess": 900, "researchgate": 900}
+_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 900, "euraxess": 900, "researchgate": 900, "institutional": 600}
 
 
 async def _async_run_single_scraper(scraper) -> list[dict]:

@@ -247,7 +247,11 @@ class ScholarshipDBScraper(BaseScraper):
                             job["location"] = value
                         elif label == "Job Type" and value:
                             job["job_type"] = value
-                        elif label in ("Deadline", "Apply Before") and value:
+                        elif label.lower() in (
+                            "deadline", "apply before",
+                            "application deadline", "closing date",
+                            "expiry date",
+                        ) and value:
                             parsed = self._parse_date(value)
                             if parsed:
                                 deadline_candidates.append(parsed)
@@ -410,6 +414,7 @@ class ScholarshipDBScraper(BaseScraper):
             "%d %B %Y",
             "%d/%m/%Y",
             "%m/%d/%Y",
+            "%m/%d/%Y, %I:%M %p",
             "%Y-%m-%dT%H:%M:%S",
         ):
             try:
@@ -583,10 +588,11 @@ class ScholarshipDBScraper(BaseScraper):
 
     @staticmethod
     def _parse_fields_from_desc(job: dict, desc: str) -> None:
-        """Extract PI name, deadline, and field from description text."""
+        """Extract PI name, deadline, field, and application materials from description text."""
         from src.matching.job_parser import (
             extract_pi_name,
             extract_deadline,
+            extract_application_materials,
             infer_field,
         )
 
@@ -609,3 +615,8 @@ class ScholarshipDBScraper(BaseScraper):
             field = infer_field(desc)
             if field:
                 job["field"] = field
+
+        if not job.get("application_materials"):
+            app_mat = extract_application_materials(desc)
+            if app_mat:
+                job["application_materials"] = app_mat

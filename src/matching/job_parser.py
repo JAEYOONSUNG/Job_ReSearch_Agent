@@ -777,6 +777,103 @@ def extract_conditions(text: str) -> Optional[str]:
     return " | ".join(snippets) if snippets else None
 
 
+# ---------------------------------------------------------------------------
+# Application materials extraction
+# ---------------------------------------------------------------------------
+
+_APPLICATION_HEADERS = [
+    r"how\s+to\s+apply\s*[:.]?",
+    r"application\s+procedure\s*[:.]?",
+    r"required\s+documents?\s*[:.]?",
+    r"your\s+application\s+should\s+include\s*[:.]?",
+    r"please\s+(?:submit|send|include)\s+the\s+following\s*[:.]?",
+    r"application\s+(?:documents?|materials?|package)\s*[:.]?",
+    r"to\s+apply[,\s]+(?:please\s+)?(?:submit|send|include)\s*[:.]?",
+]
+
+_APPLICATION_MATERIAL_KEYWORDS = [
+    ("cover letter", "Cover letter"),
+    ("motivation letter", "Cover letter"),
+    ("letter of motivation", "Cover letter"),
+    ("curriculum vitae", "CV"),
+    ("resume", "CV"),
+    (" cv ", "CV"),
+    (" cv,", "CV"),
+    (" cv.", "CV"),
+    ("research statement", "Research statement"),
+    ("research plan", "Research plan"),
+    ("research proposal", "Research proposal"),
+    ("statement of research", "Research statement"),
+    ("publication list", "Publication list"),
+    ("list of publications", "Publication list"),
+    ("publications list", "Publication list"),
+    ("reference letter", "Reference letters"),
+    ("letters of reference", "Reference letters"),
+    ("recommendation letter", "Reference letters"),
+    ("letters of recommendation", "Reference letters"),
+    ("names of referees", "Reference letters"),
+    ("names of references", "Reference letters"),
+    ("contact details of referees", "Reference letters"),
+    ("diploma", "Diplomas/Certificates"),
+    ("degree certificate", "Diplomas/Certificates"),
+    ("transcript", "Transcripts"),
+    ("academic record", "Transcripts"),
+    ("teaching statement", "Teaching statement"),
+    ("diversity statement", "Diversity statement"),
+]
+
+# Context words that suggest application-related sentences
+_APPLICATION_CONTEXT = re.compile(
+    r"(?:submit|send|include|attach|upload|provide|enclose|forward|prepare)",
+    re.IGNORECASE,
+)
+
+
+def extract_application_materials(text: str) -> Optional[str]:
+    """Extract required application materials from a job posting.
+
+    Returns a semicolon-separated list of required materials, or None.
+    """
+    if not text:
+        return None
+
+    found: set[str] = set()
+    lower = text.lower()
+
+    # Strategy 1: Find "How to Apply" section and scan for material keywords
+    section = extract_section(text, _APPLICATION_HEADERS, max_chars=1500)
+    if section:
+        sec_lower = section.lower()
+        for keyword, label in _APPLICATION_MATERIAL_KEYWORDS:
+            if keyword in sec_lower:
+                found.add(label)
+
+    # Strategy 2: Scan full text for material keywords near context words
+    if len(found) < 2:
+        for ctx_match in _APPLICATION_CONTEXT.finditer(text):
+            window_start = max(0, ctx_match.start() - 20)
+            window_end = min(len(text), ctx_match.end() + 200)
+            window = text[window_start:window_end].lower()
+            for keyword, label in _APPLICATION_MATERIAL_KEYWORDS:
+                if keyword in window:
+                    found.add(label)
+
+    if not found:
+        return None
+
+    # Deterministic order
+    order = [
+        "CV", "Cover letter", "Research statement", "Research plan",
+        "Research proposal", "Publication list", "Reference letters",
+        "Diplomas/Certificates", "Transcripts", "Teaching statement",
+        "Diversity statement",
+    ]
+    sorted_materials = [m for m in order if m in found]
+    # Include any not in the predefined order
+    sorted_materials.extend(sorted(found - set(order)))
+    return "; ".join(sorted_materials)
+
+
 def extract_keywords(text: str) -> list[str]:
     """Extract research keywords found in the text."""
     if not text:
@@ -989,6 +1086,8 @@ _DEADLINE_CONTEXT_PATTERNS = [
     r"submit\s+(?:your\s+)?(?:application|documents?|materials?)\s+(?:by|before|no later than)\s+",
     # "Apply by <date>" or "Apply before <date>"
     r"apply\s+(?:by|before|no later than)\s+",
+    # "Apply Before <date>" (ScholarshipDB format)
+    r"apply\s+before\s+",
     # "Applications (are) due (by) <date>"
     r"(?:applications?\s+)?(?:are\s+)?due\s*(?:[:=]|by|before|on)?\s*",
     # "no later than <date>" (standalone — strong deadline indicator)
@@ -1001,6 +1100,18 @@ _DEADLINE_CONTEXT_PATTERNS = [
     r"review\s+of\s+(?:applications?|candidates?)\s+(?:will\s+)?(?:begins?|starts?|commences?)\s*(?:on)?\s*",
     # "for full consideration, apply/submit by <date>"
     r"for\s+full\s+consideration[,\s]+(?:please\s+)?(?:apply|submit)\s+(?:by|before)\s+",
+    # "applications accepted until <date>"
+    r"applications?\s+accepted\s+(?:until|till)\s+",
+    # "position/vacancy closes on <date>"
+    r"(?:position|vacancy|posting)\s+closes?\s+(?:on\s+)?",
+    # "screening/review begins <date>"
+    r"(?:screening|review)\s+(?:of\s+\w+\s+)?begins?\s*(?:on)?\s*",
+    # "priority consideration by <date>"
+    r"priority\s+consideration\s+(?:by|before)\s+",
+    # German: "Bewerbungsfrist: <date>"
+    r"Bewerbungsfrist\s*[:=]\s*",
+    # French: "Date limite: <date>"
+    r"Date\s+limite\s*[:=]?\s*",
 ]
 
 _DEADLINE_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DEADLINE_CONTEXT_PATTERNS]
@@ -1024,7 +1135,14 @@ def _parse_date_string(text: str) -> Optional[str]:
 
     Handles: "March 15, 2026", "15 March 2026", "2026-03-15",
     "15/03/2026", "Mar 15, 2026".
+    Strips trailing time components like ", 10:59 PM" or " at 23:59 Danish time".
     """
+    # Strip trailing time components before parsing
+    text = re.sub(
+        r",?\s+(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AP]M)?(?:\s+\w+\s+time)?",
+        "", text, flags=re.IGNORECASE,
+    ).strip()
+
     # MDY: "March 15, 2026"
     m = re.match(_DATE_MDY, text, re.IGNORECASE)
     if m:
@@ -1088,6 +1206,22 @@ def extract_deadline(text: str) -> Optional[str]:
                 if date:
                     candidates.append(date)
 
+    # Strategy 3: Scan for any date within 120 chars of deadline keywords
+    _DEADLINE_PROXIMITY_KW = re.compile(
+        r"(?:deadline|closing\s+date|apply\s+before|bewerbungsfrist|date\s+limite"
+        r"|applications?\s+accepted\s+until|vacancy\s+closes)",
+        re.IGNORECASE,
+    )
+    if not candidates:
+        for kw_match in _DEADLINE_PROXIMITY_KW.finditer(text):
+            window = text[kw_match.start():kw_match.start() + 120]
+            for dp in _DATE_PATTERNS:
+                dm = dp.search(window)
+                if dm:
+                    date = _parse_date_string(dm.group(0))
+                    if date:
+                        candidates.append(date)
+
     if not candidates:
         return None
 
@@ -1111,16 +1245,19 @@ def parse_job_posting(text: str) -> dict[str, Any]:
             "requirements": None,
             "conditions": None,
             "keywords": None,
+            "application_materials": None,
         }
 
     pi_name = extract_pi_name(text)
     requirements = extract_requirements(text)
     conditions = extract_conditions(text)
     keywords = extract_keywords(text)
+    app_materials = extract_application_materials(text)
 
     return {
         "pi_name": pi_name,
         "requirements": requirements,
         "conditions": conditions,
         "keywords": ", ".join(keywords) if keywords else None,
+        "application_materials": app_materials,
     }

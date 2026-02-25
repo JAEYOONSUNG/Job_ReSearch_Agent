@@ -32,14 +32,33 @@ _BIO_KEYWORDS = {
     "molecular", "cell", "genetic", "genomic", "microbio", "protein",
     "crispr", "synthetic", "metabol", "enzyme", "immunol", "neuro",
     "evolution", "ecology", "chemistry", "chemical", "life science",
-    "postdoc", "postdoctoral",
+}
+
+# Topics that are clearly outside bio/life sciences
+_EXCLUDE_TOPICS = {
+    "astrophysics", "astronomy", "quantum physics", "condensed matter",
+    "particle physics", "high energy physics", "plasma physics",
+    "law", "political science", "linguistics", "architecture",
+    "mechanical engineering", "aerospace engineering", "electrical engineering",
+    "art history", "musicology", "theology", "accounting",
+    "materials science", "meteorology", "geophysics", "seismology",
+    "nuclear physics", "cosmology", "dark matter", "string theory",
+    "fluid dynamics", "optics", "photonics", "semiconductor",
 }
 
 
 def _is_bio_related(text: str) -> bool:
-    """Check if text mentions biology/life-science topics."""
+    """Check if text mentions biology/life-science topics.
+
+    Requires at least 1 bio keyword hit AND rejects if >=2 exclude topic hits.
+    """
     lower = text.lower()
-    return any(kw in lower for kw in _BIO_KEYWORDS)
+    if not any(kw in lower for kw in _BIO_KEYWORDS):
+        return False
+    exclude_hits = sum(1 for kw in _EXCLUDE_TOPICS if kw in lower)
+    if exclude_hits >= 2:
+        return False
+    return True
 
 
 def _parse_date(raw: str | None) -> str | None:
@@ -86,6 +105,7 @@ class InstitutionalPortalScraper(BaseScraper):
             (self._scrape_ethz, "ETH Zurich"),
             (self._scrape_weizmann, "Weizmann"),
             (self._scrape_broad, "Broad Institute"),
+            (self._scrape_wyss, "Wyss Institute"),
         ]:
             try:
                 result = method_name()
@@ -146,6 +166,11 @@ class InstitutionalPortalScraper(BaseScraper):
                 "source": self.name,
             })
 
+        # Enrich with full detail pages
+        if jobs:
+            jobs = self._parallel_enrich(
+                jobs, self._enrich_mpg_detail, max_workers=3, limit=30,
+            )
         return jobs
 
     # ── Max Planck PostDoc Program ─────────────────────────────────────
@@ -214,6 +239,11 @@ class InstitutionalPortalScraper(BaseScraper):
                 job["conditions"] = f"City: {city}"
             jobs.append(job)
 
+        # Enrich with full detail pages
+        if jobs:
+            jobs = self._parallel_enrich(
+                jobs, self._enrich_mpg_detail, max_workers=3, limit=30,
+            )
         return jobs
 
     # ── Institut Pasteur ───────────────────────────────────────────────
@@ -293,6 +323,19 @@ class InstitutionalPortalScraper(BaseScraper):
                 fallback = self._extract_description_fallback(resp.text)
                 if fallback:
                     job["description"] = fallback
+
+            # Extract deadline + application materials from enriched description
+            enriched_desc = job.get("description") or ""
+            if enriched_desc:
+                from src.matching.job_parser import extract_deadline, extract_application_materials
+                if not job.get("deadline"):
+                    dl = extract_deadline(enriched_desc)
+                    if dl:
+                        job["deadline"] = dl
+                if not job.get("application_materials"):
+                    app_mat = extract_application_materials(enriched_desc)
+                    if app_mat:
+                        job["application_materials"] = app_mat
         except Exception:
             self.logger.debug("Failed to enrich Pasteur detail: %s", url)
         return job
@@ -493,4 +536,193 @@ class InstitutionalPortalScraper(BaseScraper):
             if len(links) < 50:
                 break
 
+        # Enrich with detail pages
+        if jobs:
+            jobs = self._parallel_enrich(
+                jobs, self._enrich_detail_generic, max_workers=3, limit=20,
+            )
+        return jobs
+
+    # ── MPG detail enrichment ─────────────────────────────────────────
+
+    def _enrich_mpg_detail(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Fetch MPG detail page and extract full description + metadata."""
+        url = job.get("url")
+        if not url:
+            return job
+        try:
+            resp = self.fetch(url, timeout=20)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Extract full description from content area
+            desc_el = (
+                soup.select_one("div.job-detail__content")
+                or soup.select_one("div.content-block__text")
+                or soup.select_one("article.job-detail")
+                or soup.select_one("div.entry-content")
+                or soup.select_one("main")
+            )
+            if desc_el:
+                desc = desc_el.get_text(separator="\n", strip=True)
+                if len(desc) > len(job.get("description") or ""):
+                    job["description"] = desc[:15000]
+            elif not job.get("description"):
+                fallback = self._extract_description_fallback(resp.text)
+                if fallback:
+                    job["description"] = fallback
+
+            # Extract deadline from sidebar/metadata
+            for sel in ("div.job-detail__sidebar", "aside", "div.meta-data"):
+                sidebar = soup.select_one(sel)
+                if not sidebar:
+                    continue
+                sidebar_text = sidebar.get_text(separator="\n", strip=True)
+                dl_match = re.search(
+                    r"(?:Bewerbungsfrist|Deadline|Application\s+deadline|Closing\s+date)"
+                    r"\s*[:=]?\s*(.+)",
+                    sidebar_text, re.IGNORECASE,
+                )
+                if dl_match and not job.get("deadline"):
+                    parsed = _parse_date(dl_match.group(1).strip()[:30])
+                    if parsed:
+                        job["deadline"] = parsed
+                break
+
+            # Extract PI name from contact section
+            for sel in ("div.contact", "div.job-detail__contact", "div.ansprechpartner"):
+                contact = soup.select_one(sel)
+                if contact and not job.get("pi_name"):
+                    contact_text = contact.get_text(separator=" ", strip=True)
+                    from src.matching.job_parser import extract_pi_name
+                    pi = extract_pi_name(contact_text)
+                    if pi:
+                        job["pi_name"] = pi
+                    break
+
+            # Extract department from structured elements
+            if not job.get("department"):
+                for sel in ("div.department", "span.department", "div.organisational-unit"):
+                    dept_el = soup.select_one(sel)
+                    if dept_el:
+                        dept = dept_el.get_text(strip=True)
+                        if dept and len(dept) > 3:
+                            job["department"] = dept
+                        break
+
+            # Extract application materials from full description
+            enriched_desc = job.get("description") or ""
+            if enriched_desc and not job.get("application_materials"):
+                from src.matching.job_parser import extract_application_materials
+                app_mat = extract_application_materials(enriched_desc)
+                if app_mat:
+                    job["application_materials"] = app_mat
+
+        except Exception:
+            self.logger.debug("Failed to enrich MPG detail: %s", url)
+        return job
+
+    # ── Generic detail enrichment ─────────────────────────────────────
+
+    def _enrich_detail_generic(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Generic detail page enrichment for institutional scrapers."""
+        url = job.get("url")
+        if not url:
+            return job
+        try:
+            resp = self.fetch(url, timeout=20)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            desc_el = (
+                soup.select_one("div.entry-content")
+                or soup.select_one("article")
+                or soup.select_one("main")
+                or soup.select_one("div.content")
+            )
+            if desc_el:
+                desc = desc_el.get_text(separator="\n", strip=True)
+                if len(desc) > len(job.get("description") or ""):
+                    job["description"] = desc[:15000]
+            elif not job.get("description"):
+                fallback = self._extract_description_fallback(resp.text)
+                if fallback:
+                    job["description"] = fallback
+
+        except Exception:
+            self.logger.debug("Failed to enrich detail: %s", url)
+        return job
+
+    # ── Wyss Institute ────────────────────────────────────────────────
+
+    def _scrape_wyss(self) -> list[dict[str, Any]]:
+        """Scrape Wyss Institute for Biologically Inspired Engineering careers."""
+        url = "https://wyss.harvard.edu/careers/"
+        jobs: list[dict[str, Any]] = []
+        try:
+            resp = self.fetch(url, timeout=30)
+        except Exception:
+            self.logger.exception("Failed to fetch Wyss Institute careers")
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Try multiple selectors for job listings
+        items = (
+            soup.select("article.post, div.career-listing, li.career-item")
+            or soup.select("div.entry-content a[href]")
+        )
+        if not items:
+            # Fallback: find links containing research/postdoc keywords
+            for link in soup.select("a[href]"):
+                href = link.get("href", "")
+                text = link.get_text(strip=True)
+                if not text or len(text) < 10:
+                    continue
+                text_lower = text.lower()
+                if any(kw in text_lower for kw in (
+                    "research", "postdoc", "scientist", "fellow",
+                    "computational", "bioinformatics",
+                )) and "wyss" in href.lower() or "harvard" in href.lower():
+                    detail_url = urljoin(url, href)
+                    jobs.append({
+                        "title": text,
+                        "url": detail_url,
+                        "institute": "Wyss Institute at Harvard University",
+                        "country": "United States",
+                        "source": self.name,
+                    })
+        else:
+            for item in items:
+                if item.name == "a":
+                    link = item
+                else:
+                    link = item.select_one("a[href]")
+                if not link:
+                    continue
+
+                href = link.get("href", "")
+                title = link.get_text(strip=True)
+                if not title or len(title) < 5:
+                    continue
+
+                title_lower = title.lower()
+                if not any(kw in title_lower for kw in (
+                    "research", "postdoc", "scientist", "fellow",
+                    "computational", "bioinformatics", "engineer",
+                )):
+                    continue
+
+                detail_url = urljoin(url, href)
+                jobs.append({
+                    "title": title,
+                    "url": detail_url,
+                    "institute": "Wyss Institute at Harvard University",
+                    "country": "United States",
+                    "source": self.name,
+                })
+
+        # Enrich with detail pages
+        if jobs:
+            jobs = self._parallel_enrich(
+                jobs, self._enrich_detail_generic, max_workers=3, limit=20,
+            )
         return jobs

@@ -698,6 +698,13 @@ class BaseScraper(abc.ABC):
                 if parsed.get("keywords") and not job.get("keywords"):
                     job["keywords"] = parsed["keywords"]
 
+        # Extract application materials if not already set
+        if not job.get("application_materials") and desc:
+            from src.matching.job_parser import extract_application_materials
+            app_mat = extract_application_materials(desc)
+            if app_mat:
+                job["application_materials"] = app_mat
+
         # Extract department if not already set
         if not job.get("department") and desc:
             from src.matching.job_parser import extract_department

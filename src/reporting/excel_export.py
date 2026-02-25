@@ -312,6 +312,7 @@ JOB_COLUMNS = [
     # Dates
     "Posted Date",
     "Deadline",
+    "Application Materials",
     # Description
     "Description",
     # PI Papers — individual columns
@@ -406,6 +407,7 @@ def _job_to_row(job: dict) -> dict:
         # Dates
         "Posted Date": job.get("posted_date") or "",
         "Deadline": job.get("deadline") or "",
+        "Application Materials": _clean_list(job.get("application_materials"), 400),
         # Description
         "Description": _clean_text(desc, 15000),
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)

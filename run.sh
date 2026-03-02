@@ -15,6 +15,7 @@ LOG_FILE="${SCRIPT_DIR}/logs/run_$(date +%Y-%m-%d_%H%M).log"
 # Find the conda env Python (try multiple locations)
 PYTHON=""
 for candidate in \
+    "$HOME/Desktop/miniconda3/envs/${CONDA_ENV}/bin/python" \
     "$HOME/miniconda3/envs/${CONDA_ENV}/bin/python" \
     "$HOME/miniforge3/envs/${CONDA_ENV}/bin/python" \
     "$HOME/mambaforge/envs/${CONDA_ENV}/bin/python" \

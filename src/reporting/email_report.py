@@ -91,13 +91,56 @@ def _compute_weekly_trends() -> dict:
     }
 
 
+def _enrich_job_for_email(job: dict) -> dict:
+    """Fill missing institute/country/tier info for email display.
+
+    Tries to resolve missing fields using DB data and scorer heuristics
+    so the email shows as much info as possible.
+    """
+    enriched = dict(job)
+
+    # Fill country from institute if missing
+    if not enriched.get("country") and enriched.get("institute"):
+        try:
+            from src.matching.scorer import guess_country_from_institute
+            country = guess_country_from_institute(enriched["institute"])
+            if country:
+                enriched["country"] = country
+        except Exception:
+            pass
+
+    # Fill tier from institute if missing
+    if not enriched.get("tier") and enriched.get("institute"):
+        try:
+            from src.matching.scorer import get_institution_tier
+            tier = get_institution_tier(enriched["institute"])
+            if tier and tier < 5:
+                enriched["tier"] = tier
+        except Exception:
+            pass
+
+    # Fill region from country if missing
+    if not enriched.get("region") and enriched.get("country"):
+        try:
+            from src.matching.scorer import get_region
+            enriched["region"] = get_region(enriched["country"])
+        except Exception:
+            pass
+
+    return enriched
+
+
 def render_report(jobs: list[dict], recommendations: list[dict] = None) -> str:
     """Render HTML email report from jobs and PI recommendations.
 
     Includes weekly trend statistics and summary dashboard.
+    Enriches job data to fill missing institute/country/tier info.
     """
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
     template = env.get_template("report.html")
+
+    # Enrich jobs to fill missing info for display
+    jobs = [_enrich_job_for_email(j) for j in jobs]
 
     us_jobs = [j for j in jobs if j.get("region") == "US"]
     eu_jobs = [j for j in jobs if j.get("region") == "EU"]

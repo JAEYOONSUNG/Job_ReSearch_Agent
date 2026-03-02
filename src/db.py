@@ -108,6 +108,11 @@ CREATE TABLE IF NOT EXISTS scrape_log (
     finished_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS dismissed_urls (
+    url TEXT PRIMARY KEY,
+    dismissed_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_url ON jobs(url);
 CREATE INDEX IF NOT EXISTS idx_jobs_region ON jobs(region);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -127,6 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_citations_citing ON citations(citing_pi_id, cited
 CREATE INDEX IF NOT EXISTS idx_citations_cited ON citations(cited_pi_id, citing_pi_id);
 CREATE INDEX IF NOT EXISTS idx_watchlist_pi_name ON watchlist(pi_name);
 CREATE INDEX IF NOT EXISTS idx_scrape_log_source ON scrape_log(source);
+CREATE INDEX IF NOT EXISTS idx_dismissed_urls ON dismissed_urls(url);
 """
 
 # Columns added after initial schema — applied via ALTER TABLE if missing
@@ -207,6 +213,8 @@ _AGGREGATOR_INSTITUTES = {
     "academic positions", "academicpositions",
     "the university", "researchgate", "scholarshipdb",
     "linkedin", "indeed", "glassdoor",
+    "euraxess", "jobs.ac.uk", "academic transfer",
+    "sciencecareers", "academic keys", "wanted",
 }
 
 
@@ -214,13 +222,18 @@ def upsert_job(job: dict) -> tuple[int, bool]:
     """Insert or update a job. Returns (job_id, is_new).
 
     Thread-safe: acquires ``_DB_LOCK`` before writing.
+    Skips updates for jobs the user has dismissed (deleted from Excel).
     """
     with _DB_LOCK, get_connection() as conn:
         existing = conn.execute(
-            "SELECT id, institute FROM jobs WHERE url = ?", (job.get("url"),)
+            "SELECT id, institute, status FROM jobs WHERE url = ?", (job.get("url"),)
         ).fetchone()
 
         if existing:
+            # Never resurrect a job the user explicitly dismissed
+            if existing["status"] == "dismissed":
+                return existing["id"], False
+
             job_id = existing["id"]
             fields = {k: v for k, v in job.items()
                       if k != "url" and v is not None and v != ""}
@@ -230,6 +243,8 @@ def upsert_job(job: dict) -> tuple[int, bool]:
                 old_inst = (existing["institute"] or "").lower().strip()
                 if new_inst in _AGGREGATOR_INSTITUTES and old_inst not in _AGGREGATOR_INSTITUTES and old_inst:
                     del fields["institute"]
+            # Don't overwrite user-set status with scraper defaults
+            fields.pop("status", None)
             if fields:
                 set_clause = ", ".join(f"{k} = ?" for k in fields)
                 values = list(fields.values()) + [job_id]
@@ -238,6 +253,13 @@ def upsert_job(job: dict) -> tuple[int, bool]:
                     values,
                 )
             return job_id, False
+
+        # Check if this URL was previously dismissed (removed by user)
+        dismissed = conn.execute(
+            "SELECT url FROM dismissed_urls WHERE url = ?", (job.get("url"),)
+        ).fetchone()
+        if dismissed:
+            return -1, False
 
         cols = [k for k, v in job.items() if v is not None]
         placeholders = ", ".join("?" for _ in cols)
@@ -403,6 +425,37 @@ def get_watchlist() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM watchlist ORDER BY added_at DESC").fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Dismissed URLs ─────────────────────────────────────────────────────
+
+
+def dismiss_urls(urls: list[str]) -> int:
+    """Record URLs as dismissed so they never reappear.
+
+    Called when user removes jobs from Excel. Thread-safe.
+    Also marks matching jobs as status='dismissed' in the jobs table.
+    """
+    if not urls:
+        return 0
+    with _DB_LOCK, get_connection() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO dismissed_urls (url) VALUES (?)",
+            [(u,) for u in urls],
+        )
+        conn.executemany(
+            "UPDATE jobs SET status = 'dismissed' WHERE url = ?",
+            [(u,) for u in urls],
+        )
+    logger.info("Dismissed %d URLs", len(urls))
+    return len(urls)
+
+
+def get_dismissed_urls() -> set[str]:
+    """Get all dismissed URLs."""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT url FROM dismissed_urls").fetchall()
+        return {r["url"] for r in rows}
 
 
 # ── Scrape Log ─────────────────────────────────────────────────────────────

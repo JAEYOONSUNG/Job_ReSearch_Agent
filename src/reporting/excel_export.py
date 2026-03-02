@@ -955,45 +955,70 @@ def _find_previous_excel(output_dir: Path) -> Path | None:
     return Path(files[0]) if files else None
 
 
-def _sync_from_previous_excel(output_dir: Path, exportable_urls: set[str]) -> set[str]:
-    """Read previous Excel to detect user deletions and preserve status edits.
+def _read_previous_excel(output_dir: Path) -> dict[str, dict[str, pd.DataFrame]]:
+    """Read previous Excel into DataFrames keyed by sheet name.
 
-    Returns set of dismissed Job URLs that should be excluded from export.
+    Returns {sheet_name: DataFrame} for job sheets, preserving all user edits.
+    Returns empty dict if no previous file exists.
     """
     prev_path = _find_previous_excel(output_dir)
     if not prev_path:
-        return set()
+        return {}
 
-    # Read all Job URLs and Status from previous Excel
-    prev_urls: dict[str, str] = {}  # url -> status
+    sheets: dict[str, pd.DataFrame] = {}
     for sheet in ("US Positions", "EU Positions", "Other Positions"):
         try:
             df = pd.read_excel(str(prev_path), sheet_name=sheet, engine="openpyxl")
-            for _, row in df.iterrows():
-                url = str(row.get("Job URL", ""))
-                status = row.get("Status", "")
-                if url and url != "nan" and url.startswith("http"):
-                    prev_urls[url] = str(status) if pd.notna(status) else "new"
+            sheets[sheet] = df
         except Exception:
             continue
+    return sheets
+
+
+def _detect_dismissed_urls(
+    prev_sheets: dict[str, pd.DataFrame],
+    exportable_urls: set[str],
+) -> set[str]:
+    """Detect URLs that the user removed from the previous Excel.
+
+    Compares previously exported URLs (from DB exported_at) against
+    what's still in the Excel. Missing URLs = user-dismissed.
+    Records them in the dismissed_urls table.
+    """
+    from src.db import get_connection, dismiss_urls
+
+    # Collect all Job URLs currently in the Excel
+    prev_urls: set[str] = set()
+    for df in prev_sheets.values():
+        if "Job URL" not in df.columns:
+            continue
+        for url in df["Job URL"].dropna():
+            url = str(url).strip()
+            if url and url != "nan" and url.startswith("http"):
+                prev_urls.add(url)
 
     if not prev_urls:
         return set()
 
-    from src.db import get_connection
-
-    dismissed: set[str] = set()
-
+    # Sync user status changes from Excel → DB
     with get_connection() as conn:
-        # 1. Preserve user's status changes from Excel → DB
-        for url, status in prev_urls.items():
-            if status and status not in ("new", "", "nan"):
-                conn.execute(
-                    "UPDATE jobs SET status = ? WHERE url = ?",
-                    (status, url),
-                )
+        for df in prev_sheets.values():
+            if "Job URL" not in df.columns or "Status" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                url = str(row.get("Job URL", ""))
+                status = row.get("Status", "")
+                if url and url.startswith("http") and pd.notna(status):
+                    status = str(status).strip()
+                    if status and status not in ("new", "nan"):
+                        conn.execute(
+                            "UPDATE jobs SET status = ? WHERE url = ?",
+                            (status, url),
+                        )
 
-        # 2. Detect dismissed: previously exported but removed from Excel
+    # Detect dismissed: previously exported but removed from Excel
+    dismissed: set[str] = set()
+    with get_connection() as conn:
         exported_rows = conn.execute(
             "SELECT url FROM jobs WHERE exported_at IS NOT NULL "
             "AND (status IS NULL OR status NOT IN ('dismissed'))"
@@ -1002,17 +1027,118 @@ def _sync_from_previous_excel(output_dir: Path, exportable_urls: set[str]) -> se
         for row in exported_rows:
             url = row["url"]
             if url in exportable_urls and url not in prev_urls:
-                # Was exported before, should be in Excel, but user removed it
                 dismissed.add(url)
-                conn.execute(
-                    "UPDATE jobs SET status = 'dismissed' WHERE url = ?",
-                    (url,),
-                )
 
+    # Persist to dismissed_urls table (permanent blacklist)
     if dismissed:
+        dismiss_urls(list(dismissed))
         logger.info("Detected %d user-dismissed jobs from previous Excel", len(dismissed))
 
     return dismissed
+
+
+def _merge_with_previous(
+    prev_sheets: dict[str, pd.DataFrame],
+    new_jobs_by_region: dict[str, list[dict]],
+    dismissed_urls: set[str],
+) -> dict[str, tuple[pd.DataFrame, list[dict]]]:
+    """Merge previous Excel data with new jobs.
+
+    Preserves all existing rows from the previous Excel (user edits intact).
+    Only adds genuinely new jobs (URL not already present).
+    Returns {sheet_name: (merged_df, new_job_dicts)} for sorting.
+    """
+    sheet_region_map = {
+        "US Positions": "US",
+        "EU Positions": "EU",
+        "Other Positions": "Other",
+    }
+
+    result: dict[str, tuple[pd.DataFrame, list[dict]]] = {}
+
+    for sheet_name, region_key in sheet_region_map.items():
+        prev_df = prev_sheets.get(sheet_name)
+        new_jobs = new_jobs_by_region.get(region_key, [])
+
+        # Collect existing URLs from previous Excel
+        existing_urls: set[str] = set()
+        if prev_df is not None and "Job URL" in prev_df.columns:
+            for url in prev_df["Job URL"].dropna():
+                url_str = str(url).strip()
+                if url_str and url_str != "nan":
+                    existing_urls.add(url_str)
+
+        # Filter new jobs: only those not already in Excel and not dismissed
+        genuinely_new = [
+            j for j in new_jobs
+            if j.get("url")
+            and j["url"] not in existing_urls
+            and j["url"] not in dismissed_urls
+        ]
+
+        if prev_df is not None and len(prev_df) > 0:
+            # Remove dismissed URLs from previous data too
+            if dismissed_urls and "Job URL" in prev_df.columns:
+                prev_df = prev_df[~prev_df["Job URL"].isin(dismissed_urls)]
+
+            # Ensure columns match
+            if genuinely_new:
+                new_rows_df = pd.DataFrame(
+                    [_job_to_row(j) for j in genuinely_new], columns=JOB_COLUMNS
+                )
+                # Align columns: use the union of both, preserving prev columns
+                all_cols = list(prev_df.columns)
+                for col in new_rows_df.columns:
+                    if col not in all_cols:
+                        all_cols.append(col)
+
+                # Reindex both to same columns
+                prev_df = prev_df.reindex(columns=all_cols, fill_value="")
+                new_rows_df = new_rows_df.reindex(columns=all_cols, fill_value="")
+                merged_df = pd.concat([prev_df, new_rows_df], ignore_index=True)
+            else:
+                merged_df = prev_df
+        elif genuinely_new:
+            merged_df = pd.DataFrame(
+                [_job_to_row(j) for j in genuinely_new], columns=JOB_COLUMNS
+            )
+        else:
+            merged_df = pd.DataFrame(columns=JOB_COLUMNS)
+
+        result[sheet_name] = (merged_df, genuinely_new)
+
+    return result
+
+
+def _sort_merged_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort a merged DataFrame by Tier then Institute ranking."""
+    if df.empty:
+        return df
+
+    # Sort by: Company first → T1 → T2 → T3 → T4 → Unranked
+    # Within each tier: by institute ranking
+    def _tier_sort_key(tier_val):
+        tier_str = str(tier_val).strip() if pd.notna(tier_val) else ""
+        if tier_str == "Company":
+            return 0
+        if tier_str.startswith("T") and len(tier_str) == 2 and tier_str[1].isdigit():
+            return int(tier_str[1])
+        return 99
+
+    def _inst_sort_key(inst_val):
+        inst = str(inst_val).strip() if pd.notna(inst_val) else ""
+        return _get_institute_rank(inst)
+
+    if "Tier" in df.columns and "Institute" in df.columns:
+        df = df.assign(
+            _tier_sort=df["Tier"].apply(_tier_sort_key),
+            _inst_sort=df["Institute"].apply(_inst_sort_key),
+        )
+        df = df.sort_values(["_tier_sort", "_inst_sort"], ascending=True)
+        df = df.drop(columns=["_tier_sort", "_inst_sort"])
+        df = df.reset_index(drop=True)
+
+    return df
 
 
 def _mark_exported(urls: list[str]) -> None:
@@ -1028,40 +1154,74 @@ def _mark_exported(urls: list[str]) -> None:
 
 
 def export_to_excel(output_dir: Path = None) -> Path:
-    """Export all job data to a multi-sheet Excel file with charts and formatting.
+    """Export job data to a multi-sheet Excel file with incremental updates.
 
-    Preserves user edits: if the user deleted rows from a previous Excel,
-    those jobs are marked 'dismissed' and excluded from future exports.
-    Status changes made in Excel are synced back to the DB.
+    Incremental strategy:
+    1. Read the previous Excel to preserve all user edits (notes, reordering, etc.)
+    2. Detect user deletions → record in dismissed_urls (permanent blacklist)
+    3. Only add genuinely NEW jobs (not already in Excel, not dismissed)
+    4. Re-sort the combined data by tier and institute ranking
+    5. Write the merged result
+
+    This ensures the user's manual work is never destroyed.
     """
     output_dir = output_dir or EXCEL_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     filepath = output_dir / "JobSearch_Auto.xlsx"
 
-    # Phase 1: Sync from previous Excel BEFORE loading jobs
-    # (detects user deletions, preserves status edits → writes to DB)
+    # Phase 1: Read previous Excel (preserves user edits)
+    prev_sheets = _read_previous_excel(output_dir)
+
+    # Phase 2: Detect user deletions from previous Excel
     raw_pre = get_jobs(limit=10000)
     _skip_statuses = {"dismissed", "merged"}
     pre_urls = {j.get("url") for j in raw_pre
                 if j.get("url") and not _is_excluded(j) and j.get("status") not in _skip_statuses}
-    dismissed = _sync_from_previous_excel(output_dir, pre_urls)
+    dismissed = _detect_dismissed_urls(prev_sheets, pre_urls)
 
-    # Phase 2: Reload jobs from DB (now includes synced status changes)
+    # Also include all permanently dismissed URLs
+    from src.db import get_dismissed_urls
+    all_dismissed = get_dismissed_urls() | dismissed
+
+    # Phase 3: Load all non-excluded, non-dismissed jobs from DB
     raw_jobs = get_jobs(limit=10000)
     all_jobs = [j for j in raw_jobs
                 if not _is_excluded(j)
                 and j.get("status") not in _skip_statuses
-                and j.get("url") not in dismissed]
+                and j.get("url") not in all_dismissed]
 
     logger.info("Filtered %d → %d jobs (excluded %d by keywords, %d dismissed)",
                 len(raw_jobs), len(all_jobs),
-                len(raw_jobs) - len(all_jobs) - len(dismissed), len(dismissed))
+                len(raw_jobs) - len(all_jobs) - len(all_dismissed), len(all_dismissed))
 
-    # Sort by tier within each region group
+    # Phase 4: Split new jobs by region
     us_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "US"])
     eu_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "EU"])
     other_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") not in ("US", "EU")])
+
+    new_jobs_by_region = {
+        "US": us_jobs,
+        "EU": eu_jobs,
+        "Other": other_jobs,
+    }
+
+    # Phase 5: Merge with previous Excel data
+    if prev_sheets:
+        merged = _merge_with_previous(prev_sheets, new_jobs_by_region, all_dismissed)
+        # Sort the merged DataFrames
+        df_us = _sort_merged_df(merged.get("US Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
+        df_eu = _sort_merged_df(merged.get("EU Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
+        df_other = _sort_merged_df(merged.get("Other Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
+
+        new_count = sum(len(m[1]) for m in merged.values())
+        logger.info("Incremental merge: %d new jobs added, preserving existing rows", new_count)
+    else:
+        # First run: generate from scratch
+        df_us = pd.DataFrame([_job_to_row(j) for j in us_jobs], columns=JOB_COLUMNS)
+        df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
+        df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
+
     rec_pis = _sort_pis_by_tier(get_recommended_pis())
 
     with pd.ExcelWriter(str(filepath), engine="xlsxwriter") as writer:
@@ -1069,31 +1229,32 @@ def export_to_excel(output_dir: Path = None) -> Path:
         _write_summary_dashboard(writer, all_jobs, rec_pis)
 
         # Sheet 1: US Positions
-        df_us = pd.DataFrame([_job_to_row(j) for j in us_jobs], columns=JOB_COLUMNS)
         df_us.to_excel(writer, sheet_name="US Positions", index=False)
         if len(df_us) > 0:
             _style_worksheet(writer, "US Positions", df_us)
-            _write_paper_links(writer, "US Positions", df_us, us_jobs)
             _style_deadline_cells(writer, "US Positions", df_us)
-            _style_citizenship_cells(writer, "US Positions", df_us, us_jobs)
+            # Paper links and citizenship styling only for fresh rows
+            if not prev_sheets:
+                _write_paper_links(writer, "US Positions", df_us, us_jobs)
+                _style_citizenship_cells(writer, "US Positions", df_us, us_jobs)
 
         # Sheet 2: EU Positions
-        df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
         df_eu.to_excel(writer, sheet_name="EU Positions", index=False)
         if len(df_eu) > 0:
             _style_worksheet(writer, "EU Positions", df_eu)
-            _write_paper_links(writer, "EU Positions", df_eu, eu_jobs)
             _style_deadline_cells(writer, "EU Positions", df_eu)
-            _style_citizenship_cells(writer, "EU Positions", df_eu, eu_jobs)
+            if not prev_sheets:
+                _write_paper_links(writer, "EU Positions", df_eu, eu_jobs)
+                _style_citizenship_cells(writer, "EU Positions", df_eu, eu_jobs)
 
         # Sheet 3: Other Positions
-        df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
         df_other.to_excel(writer, sheet_name="Other Positions", index=False)
         if len(df_other) > 0:
             _style_worksheet(writer, "Other Positions", df_other)
-            _write_paper_links(writer, "Other Positions", df_other, other_jobs)
             _style_deadline_cells(writer, "Other Positions", df_other)
-            _style_citizenship_cells(writer, "Other Positions", df_other, other_jobs)
+            if not prev_sheets:
+                _write_paper_links(writer, "Other Positions", df_other, other_jobs)
+                _style_citizenship_cells(writer, "Other Positions", df_other, other_jobs)
 
         # Sheet 4: PI Recommendations
         df_rec = pd.DataFrame([_pi_to_row(p) for p in rec_pis], columns=PI_COLUMNS)
@@ -1105,5 +1266,6 @@ def export_to_excel(output_dir: Path = None) -> Path:
     exported_urls = [j.get("url") for j in all_jobs if j.get("url")]
     _mark_exported(exported_urls)
 
-    logger.info("Excel exported to %s (%d jobs)", filepath, len(all_jobs))
+    total_rows = len(df_us) + len(df_eu) + len(df_other)
+    logger.info("Excel exported to %s (%d total rows)", filepath, total_rows)
     return filepath

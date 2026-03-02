@@ -37,6 +37,19 @@ _AGGREGATOR_INSTITUTES = {
     "nature",
     "the",
     "times higher education",
+    "academic positions",
+    "academicpositions",
+    "scholarshipdb",
+    "researchgate",
+    "linkedin",
+    "indeed",
+    "glassdoor",
+    "euraxess",
+    "jobs.ac.uk",
+    "academic transfer",
+    "sciencecareers",
+    "academic keys",
+    "wanted",
 }
 
 
@@ -391,7 +404,7 @@ def _resolve_from_description(job: dict) -> Optional[str]:
         eu_patterns = re.findall(
             r'((?:[A-Z][a-z]+\s+){1,3}'
             r'(?:Research\s+)?(?:Center|Centre|Institut|Laboratory|Laboratorium)'
-            r'(?:\s+(?:of|for|de|di)\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,2})?)',
+            r'(?:\s+(?:of|for|de|di|für)\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,2})?)',
             desc,
         )
         for candidate in eu_patterns:
@@ -399,6 +412,53 @@ def _resolve_from_description(job: dict) -> Optional[str]:
             if cleaned:
                 institute = cleaned
                 break
+
+    # Strategy E: Well-known named institutes (Max Planck, CNRS, RIKEN, etc.)
+    if not institute:
+        named_patterns = [
+            r'(Max\s+Planck\s+Institu\w+(?:\s+(?:of|for|für)\s+[\w\s]+?)?(?=\s*[,.(]|\s+in\s))',
+            r'((?:Helmholtz|Leibniz|Fraunhofer)\s+(?:Center|Centre|Zentrum|Institut\w*)'
+            r'(?:\s+(?:of|for|für)\s+[\w\s]+?)?(?=\s*[,.(]|\s+in\s))',
+            r'(EMBL[\s-]+[\w\s]+(?=\s*[,.])|European\s+Molecular\s+Biology\s+Laboratory)',
+            r'(CNRS|Centre\s+National\s+de\s+la\s+Recherche\s+Scientifique)',
+            r'(INSERM|Institut\s+National\s+de\s+la\s+Sant[eé])',
+            r'(RIKEN(?:\s+[\w]+(?:\s+[\w]+){0,3})?(?:\s+Institute|\s+Center|\s+Centre)?)',
+            r'((?:Karolinska|Pasteur|Curie|Salk|Broad|Whitehead|Wellcome\s+Sanger)\s+Institu\w+)',
+            r'((?:Francis\s+)?Crick\s+Institute)',
+            r'((?:Cold\s+Spring\s+Harbor|Scripps\s+Research|Allen\s+Institute)(?:\s+\w+)?)',
+            r'(National\s+Institutes?\s+of\s+Health|NIH)',
+            r'((?:Korean?\s+)?(?:Advanced\s+)?Institute\s+of\s+Science\s+and\s+Technology|KAIST|KIST)',
+            r'(Seoul\s+National\s+University|Yonsei\s+University|Korea\s+University)',
+            r'((?:Chinese|Peking|Tsinghua|Fudan|Zhejiang)\s+(?:University|Academy)(?:\s+of\s+[\w\s]+)?)',
+            r'((?:National\s+University\s+of\s+Singapore|NUS|Nanyang\s+Technological\s+University|NTU))',
+            r'((?:ETH\s+Z[uü]rich|EPFL|KTH|TU\s+(?:Munich|Berlin|Delft|Wien|Dresden)|ETH|RWTH\s+Aachen))',
+            r'((?:University|Universit[àéè]|Universität|Universiteit|Universidad)\s+(?:of|de|di|von)\s+[\w\s]+?(?=\s*[,.(]|\s+is\s|\s+invites))',
+        ]
+        for pat in named_patterns:
+            m = re.search(pat, desc)
+            if m:
+                candidate = m.group(1).strip().rstrip(",. ")
+                if len(candidate) >= 3:
+                    institute = candidate
+                    break
+
+    # Strategy F: "at <Institute>" or "based at <Institute>" patterns
+    if not institute:
+        at_patterns = [
+            r'(?:based|located|position)\s+(?:at|in)\s+(?:the\s+)?'
+            r'((?:[A-Z][\w\'-]+\s+){1,5}'
+            r'(?:University|College|Institute|Hospital|Center|Centre|Laboratory))',
+            r'(?:join|work\s+(?:at|with))\s+(?:the\s+)?'
+            r'((?:[A-Z][\w\'-]+\s+){1,5}'
+            r'(?:University|College|Institute|Hospital|Center|Centre|Laboratory))',
+        ]
+        for pat in at_patterns:
+            m = re.search(pat, desc)
+            if m:
+                cleaned = _clean_candidate(m.group(1))
+                if cleaned:
+                    institute = cleaned
+                    break
 
     if institute:
         old_inst = job.get("institute", "")
@@ -586,13 +646,60 @@ def resolve_single_name_pis(jobs: list[dict]) -> list[dict]:
 # 3. Main enrichment entry point
 # ---------------------------------------------------------------------------
 
+def _fill_missing_institutes(jobs: list[dict]) -> list[dict]:
+    """Try to fill missing institute info from job descriptions.
+
+    Applies to ALL jobs with empty/missing institute, not just aggregators.
+    Many scrapers leave institute blank; the description usually has it.
+    """
+    candidates = [j for j in jobs if not (j.get("institute") or "").strip()]
+    if not candidates:
+        return jobs
+
+    logger.info("Filling missing institutes for %d jobs", len(candidates))
+    filled = 0
+
+    for job in candidates:
+        inst = _resolve_from_description(job)
+        if inst:
+            _persist_updates(job, {"institute": inst})
+            filled += 1
+
+            # Also infer country/region/tier from the resolved institute
+            try:
+                from src.matching.scorer import (
+                    guess_country_from_institute, get_region, get_institution_tier,
+                )
+                country = guess_country_from_institute(inst)
+                region = get_region(country) if country else None
+                tier = get_institution_tier(inst)
+                updates = {}
+                if country and not job.get("country"):
+                    job["country"] = country
+                    updates["country"] = country
+                if region and not job.get("region"):
+                    job["region"] = region
+                    updates["region"] = region
+                if tier and tier < 5 and not job.get("tier"):
+                    job["tier"] = tier
+                    updates["tier"] = tier
+                if updates:
+                    _persist_updates(job, updates)
+            except Exception:
+                pass
+
+    logger.info("Filled institute for %d/%d jobs", filled, len(candidates))
+    return jobs
+
+
 def enrich_jobs_deep(jobs: list[dict]) -> list[dict]:
     """Run all deep enrichment steps on a list of jobs.
 
     Steps:
     1. Resolve aggregator institutes (Inside Higher Ed → real institute)
-    2. Resolve single-name PIs (Badran → Ahmed Badran via S2 + institute)
-    3. Trigger PI URL lookup for newly resolved PIs
+    2. Fill missing institutes from description (for all jobs)
+    3. Resolve single-name PIs (Badran → Ahmed Badran via S2 + institute)
+    4. Trigger PI URL lookup for newly resolved PIs
 
     Called from pipeline.py after scoring but before reporting.
     """
@@ -600,6 +707,9 @@ def enrich_jobs_deep(jobs: list[dict]) -> list[dict]:
 
     # Step 1: Resolve aggregators
     jobs = resolve_aggregator_jobs(jobs)
+
+    # Step 1b: Fill missing institutes from description
+    jobs = _fill_missing_institutes(jobs)
 
     # Step 2: Resolve single-name PIs
     jobs = resolve_single_name_pis(jobs)

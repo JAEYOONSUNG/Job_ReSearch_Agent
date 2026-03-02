@@ -3,80 +3,125 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; color: #333; }
-  h1 { color: #1a1a2e; border-bottom: 2px solid #16213e; padding-bottom: 10px; }
-  h2 { color: #16213e; margin-top: 30px; }
-  .summary { background: #f0f4f8; padding: 15px; border-radius: 8px; margin: 15px 0; }
-  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12px; }
-  th { background: #16213e; color: white; padding: 6px 8px; text-align: left; white-space: nowrap; }
-  td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
-  tr:hover { background: #f5f5f5; }
-  .tier1 { color: #d4af37; font-weight: bold; }
-  .tier2 { color: #1e88e5; }
-  .tier3 { color: #43a047; }
-  .new { background: #e8f5e9; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; color: #333; background: #f7f8fa; }
+  .container { max-width: 1100px; margin: 0 auto; background: white; border-radius: 12px; padding: 30px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+  h1 { color: #1a1a2e; border-bottom: 3px solid #16213e; padding-bottom: 12px; margin-top: 0; font-size: 22px; }
+  h2 { color: #16213e; margin-top: 35px; font-size: 18px; padding-bottom: 8px; border-bottom: 1px solid #e0e0e0; }
+  .summary { background: linear-gradient(135deg, #f0f4f8, #e8eef5); padding: 18px 22px; border-radius: 10px; margin: 18px 0; font-size: 15px; }
+  .summary strong { color: #16213e; }
+
+  {# ── Table styles ── #}
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 12px; table-layout: fixed; }
+  th { background: #16213e; color: white; padding: 10px 8px; text-align: left; white-space: nowrap; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; }
+  td { padding: 8px; border-bottom: 1px solid #eee; vertical-align: top; word-wrap: break-word; }
+  tr:nth-child(even) { background: #fafbfc; }
+  tr:hover { background: #f0f4ff; }
+  .new td { border-left: 3px solid #28a745; }
+
+  {# ── Tier badges ── #}
+  .tier-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }
+  .tier1 { background: #FFF3CD; color: #856404; }
+  .tier2 { background: #CCE5FF; color: #004085; }
+  .tier3 { background: #D4EDDA; color: #155724; }
+  .tier4 { background: #E2E3E5; color: #383D41; }
+
+  {# ── Links ── #}
   a { color: #1565c0; text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .flag { font-size: 16px; }
-  .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #ddd; color: #888; font-size: 12px; }
-  .recommendation { background: #fff3e0; border-left: 4px solid #ff9800; padding: 10px; margin: 10px 0; }
-  .detail { font-size: 11px; color: #555; max-width: 400px; }
-  .kw { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 1px 5px; border-radius: 3px; margin: 1px; font-size: 10px; }
-  .req { color: #666; font-size: 11px; }
+  .link-btn { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; margin: 1px; }
+  .link-job { background: #e3f2fd; color: #1565c0; }
+  .link-lab { background: #f3e5f5; color: #7b1fa2; }
+  .link-scholar { background: #e8f5e9; color: #2e7d32; }
+  .link-dept { background: #fff3e0; color: #e65100; }
+
+  {# ── Info cells ── #}
+  .institute-cell { font-weight: 600; color: #1a1a2e; }
+  .dept-text { font-size: 11px; color: #555; font-weight: normal; display: block; margin-top: 2px; }
+  .country-text { font-size: 10px; color: #888; font-weight: normal; }
+  .pi-cell { font-weight: 600; color: #333; }
+  .hindex { font-size: 10px; color: #1565c0; background: #e3f2fd; padding: 1px 5px; border-radius: 3px; display: inline-block; }
+  .kw { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 1px 6px; border-radius: 3px; margin: 1px; font-size: 10px; }
+  .field-text { font-weight: 500; color: #444; }
+  .req { color: #555; font-size: 11px; line-height: 1.4; }
   .cond { color: #2e7d32; font-size: 11px; font-weight: 500; }
-  .research { color: #6a1b9a; font-size: 11px; font-style: italic; }
-  .expand { cursor: pointer; color: #1565c0; font-size: 11px; }
-  .dashboard { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin: 15px 0; }
-  .stats-grid { display: flex; gap: 15px; flex-wrap: wrap; margin: 10px 0; }
-  .stat-card { background: white; border-radius: 6px; padding: 12px 18px; min-width: 140px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; }
+  .research { color: #6a1b9a; font-size: 11px; font-style: italic; margin-top: 3px; }
+  .date-cell { white-space: nowrap; font-size: 11px; }
+  .deadline-urgent { color: #c62828; font-weight: bold; }
+  .deadline-soon { color: #e65100; }
+  .source-tag { font-size: 10px; color: #888; background: #f5f5f5; padding: 1px 5px; border-radius: 3px; }
+
+  {# ── Dashboard ── #}
+  .dashboard { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 10px; padding: 20px; margin: 18px 0; }
+  .stats-grid { display: flex; gap: 15px; flex-wrap: wrap; margin: 12px 0; }
+  .stat-card { background: white; border-radius: 8px; padding: 15px 20px; min-width: 140px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); text-align: center; }
   .stat-value { font-size: 28px; font-weight: bold; color: #16213e; }
-  .stat-label { font-size: 11px; color: #666; margin-top: 2px; }
+  .stat-label { font-size: 11px; color: #666; margin-top: 4px; }
   .stat-change { font-size: 11px; margin-top: 4px; }
   .stat-change.positive { color: #28a745; }
   .stat-change.negative { color: #dc3545; }
   .stat-change.neutral { color: #6c757d; }
-  .trend-section { margin: 8px 0; font-size: 12px; }
+  .trend-section { margin: 10px 0; font-size: 12px; }
+
+  {# ── Recommendations ── #}
+  .rec-card { background: #fff9f0; border: 1px solid #ffe0b2; border-radius: 8px; padding: 12px 16px; margin: 8px 0; }
+  .rec-name { font-weight: 700; color: #e65100; font-size: 14px; }
+  .rec-meta { font-size: 12px; color: #555; margin-top: 4px; }
+  .rec-score { display: inline-block; background: #ff9800; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+
+  {# ── Footer ── #}
+  .footer { margin-top: 30px; padding-top: 15px; border-top: 2px solid #eee; color: #999; font-size: 11px; text-align: center; }
+  .flag { font-size: 18px; vertical-align: middle; }
+
+  {# ── Responsive ── #}
+  @media (max-width: 768px) {
+    .container { padding: 15px; }
+    table { font-size: 11px; }
+    th, td { padding: 5px 4px; }
+    .stats-grid { gap: 8px; }
+    .stat-card { min-width: 100px; padding: 10px; }
+  }
 </style>
 </head>
 <body>
+<div class="container">
 
-<h1>Postdoc Job Search Report — {{ date }}</h1>
+<h1>Postdoc Job Search Report &mdash; {{ date }}</h1>
 
 <div class="summary">
   <strong>{{ total_new }} new postdoc positions</strong>
-  ({{ us_count }} US, {{ eu_count }} EU, {{ asia_count }} Asia, {{ other_count }} Other)
-  {% if rec_count %} + <strong>{{ rec_count }} new PI recommendations</strong>{% endif %}
+  &nbsp;&bull;&nbsp; {{ us_count }} US &nbsp;&bull;&nbsp; {{ eu_count }} EU &nbsp;&bull;&nbsp; {{ asia_count }} Asia &nbsp;&bull;&nbsp; {{ other_count }} Other
+  {% if rec_count %}<br><strong>{{ rec_count }} new PI recommendations</strong>{% endif %}
 </div>
 
 {# ── Weekly Trends Dashboard ── #}
 {% if trends %}
 <div class="dashboard">
-  <h2>Weekly Trends</h2>
+  <h2 style="margin-top: 0; border: none;">Weekly Trends</h2>
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-value">{{ trends.this_week }}</div>
-      <div class="stat-label">Jobs This Week</div>
+      <div class="stat-label">This Week</div>
       {% if trends.change_pct > 0 %}
-        <div class="stat-change positive">+{{ trends.change_pct }}% vs last week</div>
+        <div class="stat-change positive">&#9650; +{{ trends.change_pct }}%</div>
       {% elif trends.change_pct < 0 %}
-        <div class="stat-change negative">{{ trends.change_pct }}% vs last week</div>
+        <div class="stat-change negative">&#9660; {{ trends.change_pct }}%</div>
       {% else %}
-        <div class="stat-change neutral">No change vs last week</div>
+        <div class="stat-change neutral">&mdash; No change</div>
       {% endif %}
     </div>
     <div class="stat-card">
       <div class="stat-value">{{ trends.last_week }}</div>
-      <div class="stat-label">Jobs Last Week</div>
+      <div class="stat-label">Last Week</div>
     </div>
     <div class="stat-card">
       <div class="stat-value">{{ trends.new_pis_this_week }}</div>
-      <div class="stat-label">New PIs Discovered</div>
+      <div class="stat-label">New PIs</div>
     </div>
   </div>
 
   {% if trends.top_fields %}
   <div class="trend-section">
-    <strong>Popular Fields:</strong>
+    <strong>Top Fields:</strong>
     {% for field, count in trends.top_fields %}
       <span class="kw">{{ field }} ({{ count }})</span>
     {% endfor %}
@@ -94,67 +139,142 @@
 </div>
 {% endif %}
 
-{# ── Macro for a job details row ── #}
+{# ── Macro for a job table ── #}
 {% macro job_table(jobs, show_country=false) %}
 <table>
 <tr>
-  <th>#</th><th>PI</th><th>Institute (Tier)</th>
-  {% if show_country %}<th>Country</th>{% endif %}
-  <th>Field / Keywords</th><th>Requirements</th><th>Conditions</th>
-  <th>Posted</th><th>Deadline</th><th>Links</th>
+  <th style="width:3%">#</th>
+  <th style="width:12%">PI</th>
+  <th style="width:{% if show_country %}18{% else %}20{% endif %}%">Institute</th>
+  {% if show_country %}<th style="width:8%">Country</th>{% endif %}
+  <th style="width:18%">Field / Keywords</th>
+  <th style="width:15%">Requirements</th>
+  <th style="width:12%">Conditions</th>
+  <th style="width:6%">Deadline</th>
+  <th style="width:{% if show_country %}8{% else %}14{% endif %}%">Links</th>
 </tr>
 {% for job in jobs %}
 <tr class="{{ 'new' if job.status == 'new' else '' }}">
   <td>{{ loop.index }}</td>
-  <td>{{ job.pi_name or '-' }}</td>
-  <td>{{ job.institute or '-' }}{% if job.department %}<br><span class="detail">{{ job.department }}</span>{% endif %}
-    {% if job.tier %}<span class="tier{{ job.tier }}">(T{{ job.tier }})</span>{% endif %}
-    {% if job.h_index %}<br><span class="detail">h={{ job.h_index }}</span>{% endif %}
-  </td>
-  {% if show_country %}<td>{{ job.country or '-' }}</td>{% endif %}
+
+  {# PI column #}
   <td>
-    {{ job.field or '-' }}
-    {% if job.keywords %}<br>{% for kw in job.keywords.split(', ')[:6] %}<span class="kw">{{ kw }}</span>{% endfor %}{% endif %}
-    {% if job.pi_research_summary %}<br><span class="research">{{ job.pi_research_summary[:150] }}</span>{% endif %}
+    <span class="pi-cell">{{ job.pi_name or '-' }}</span>
+    {% if job.h_index %}
+      <br><span class="hindex">h={{ job.h_index }}{% if job.citations %}, {{ job.citations }} cites{% endif %}</span>
+    {% endif %}
+    {% if job.pi_research_summary %}
+      <br><span class="research">{{ job.pi_research_summary[:120] }}</span>
+    {% endif %}
   </td>
-  <td class="req">{{ (job.requirements or '-')[:200] }}{% if job.requirements and job.requirements|length > 200 %}...{% endif %}</td>
-  <td class="cond">{{ (job.conditions or '-')[:150] }}{% if job.conditions and job.conditions|length > 150 %}...{% endif %}</td>
-  <td>{{ job.posted_date or '-' }}</td>
-  <td>{{ job.deadline or '-' }}</td>
-  <td>{% if job.url %}<a href="{{ job.url }}">Job</a>{% endif %}{% if job.lab_url %} <a href="{{ job.lab_url }}">Lab</a>{% endif %}{% if job.scholar_url %} <a href="{{ job.scholar_url }}">Scholar</a>{% endif %}</td>
+
+  {# Institute column — enriched with department, tier, country #}
+  <td>
+    <span class="institute-cell">{{ job.institute or '(Unknown)' }}</span>
+    {% if job.tier %}
+      <span class="tier-badge tier{{ job.tier }}">T{{ job.tier }}</span>
+    {% endif %}
+    {% if job.department %}
+      <span class="dept-text">{{ job.department }}</span>
+    {% endif %}
+    {% if not show_country and job.country %}
+      <span class="country-text">{{ job.country }}</span>
+    {% endif %}
+    {% if job.source %}<br><span class="source-tag">{{ job.source }}</span>{% endif %}
+  </td>
+
+  {% if show_country %}<td>{{ job.country or '-' }}</td>{% endif %}
+
+  {# Field / Keywords #}
+  <td>
+    {% if job.field %}<span class="field-text">{{ job.field }}</span><br>{% endif %}
+    {% if job.keywords %}
+      {% for kw in job.keywords.split(', ')[:8] %}<span class="kw">{{ kw }}</span>{% endfor %}
+    {% endif %}
+    {% if not job.field and not job.keywords %}-{% endif %}
+  </td>
+
+  {# Requirements #}
+  <td class="req">
+    {{ (job.requirements or '-')[:250] }}
+    {% if job.requirements and job.requirements|length > 250 %}...{% endif %}
+  </td>
+
+  {# Conditions #}
+  <td class="cond">
+    {{ (job.conditions or '-')[:180] }}
+    {% if job.conditions and job.conditions|length > 180 %}...{% endif %}
+  </td>
+
+  {# Deadline #}
+  <td class="date-cell">
+    {% if job.deadline %}
+      {{ job.deadline }}
+    {% else %}
+      <span style="color:#ccc">-</span>
+    {% endif %}
+  </td>
+
+  {# Links #}
+  <td>
+    {% if job.url %}<a href="{{ job.url }}" class="link-btn link-job">Job</a>{% endif %}
+    {% if job.lab_url %}<a href="{{ job.lab_url }}" class="link-btn link-lab">Lab</a>{% endif %}
+    {% if job.scholar_url %}<a href="{{ job.scholar_url }}" class="link-btn link-scholar">Scholar</a>{% endif %}
+    {% if job.dept_url %}<a href="{{ job.dept_url }}" class="link-btn link-dept">Dept</a>{% endif %}
+  </td>
 </tr>
 {% endfor %}
 </table>
 {% endmacro %}
 
 {% if us_jobs %}
-<h2><span class="flag">🇺🇸</span> United States ({{ us_count }})</h2>
+<h2><span class="flag">&#127482;&#127480;</span> United States ({{ us_count }})</h2>
 {{ job_table(us_jobs) }}
 {% endif %}
 
 {% if eu_jobs %}
-<h2><span class="flag">🇪🇺</span> Europe ({{ eu_count }})</h2>
+<h2><span class="flag">&#127466;&#127482;</span> Europe ({{ eu_count }})</h2>
 {{ job_table(eu_jobs) }}
 {% endif %}
 
 {% if asia_jobs or other_jobs %}
-<h2><span class="flag">🌏</span> Asia / Other ({{ asia_count + other_count }})</h2>
+<h2><span class="flag">&#127758;</span> Asia / Other ({{ asia_count + other_count }})</h2>
 {{ job_table(asia_jobs + other_jobs, show_country=true) }}
 {% endif %}
 
+{# ── PI Recommendations ── #}
 {% if recommendations %}
 <h2>New PI Recommendations ({{ rec_count }})</h2>
 <table>
-<tr><th>PI</th><th>Institute</th><th>h-index</th><th>Connected Seeds</th><th>Research Fields</th><th>Score</th><th>Links</th></tr>
+<tr>
+  <th style="width:15%">PI</th>
+  <th style="width:20%">Institute</th>
+  <th style="width:6%">h-index</th>
+  <th style="width:20%">Connected Seeds</th>
+  <th style="width:20%">Research Fields</th>
+  <th style="width:6%">Score</th>
+  <th style="width:13%">Links</th>
+</tr>
 {% for pi in recommendations %}
 <tr>
-  <td><strong>{{ pi.name }}</strong></td>
-  <td>{{ pi.institute or '-' }}{% if pi.country %} ({{ pi.country }}){% endif %}{% if pi.tier %} <span class="tier{{ pi.tier }}">T{{ pi.tier }}</span>{% endif %}</td>
+  <td><span class="pi-cell">{{ pi.name }}</span></td>
+  <td>
+    <span class="institute-cell">{{ pi.institute or '-' }}</span>
+    {% if pi.tier %}<span class="tier-badge tier{{ pi.tier }}">T{{ pi.tier }}</span>{% endif %}
+    {% if pi.country %}<br><span class="country-text">{{ pi.country }}</span>{% endif %}
+  </td>
   <td>{{ pi.h_index or '-' }}</td>
-  <td class="detail">{{ pi.connected_seeds or '-' }}</td>
-  <td class="detail">{{ pi.fields or '-' }}</td>
-  <td>{{ "%.2f"|format(pi.recommendation_score) if pi.recommendation_score else '-' }}</td>
-  <td>{% if pi.lab_url %}<a href="{{ pi.lab_url }}">Lab</a> {% endif %}{% if pi.scholar_url %}<a href="{{ pi.scholar_url }}">Scholar</a>{% endif %}</td>
+  <td class="req">{{ pi.connected_seeds or '-' }}</td>
+  <td>
+    {% if pi.fields %}
+      {% for f in pi.fields.split(', ')[:5] %}<span class="kw">{{ f }}</span>{% endfor %}
+    {% else %}-{% endif %}
+  </td>
+  <td><span class="rec-score">{{ "%.2f"|format(pi.recommendation_score) if pi.recommendation_score else '-' }}</span></td>
+  <td>
+    {% if pi.lab_url %}<a href="{{ pi.lab_url }}" class="link-btn link-lab">Lab</a>{% endif %}
+    {% if pi.scholar_url %}<a href="{{ pi.scholar_url }}" class="link-btn link-scholar">Scholar</a>{% endif %}
+  </td>
 </tr>
 {% endfor %}
 </table>
@@ -164,5 +284,6 @@
   Generated by Job Search Pipeline &bull; {{ date }} &bull; {{ total_sources }} sources scraped
 </div>
 
+</div>
 </body>
 </html>

@@ -257,6 +257,7 @@ def _persist_alt_urls(jobs: list[dict]) -> None:
                 [(u[1], u[2], u[1]) for u in updates],
             )
         # Dismiss all loser rows so they don't appear in exports
+        # Never change dismissed status — user explicitly removed those
         if loser_urls:
             conn.executemany(
                 "UPDATE jobs SET status = 'merged' WHERE url = ? AND status = 'new'",

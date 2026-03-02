@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import EXCEL_OUTPUT_DIR, EXCLUDE_KEYWORDS
+from src.config import EXCEL_OUTPUT_DIR, EXCLUDE_KEYWORDS, EXCLUDE_TITLE_KEYWORDS
 from src.db import _AGGREGATOR_INSTITUTES, get_all_pis, get_jobs, get_recommended_pis
 from src.matching.job_parser import parse_structured_description
 from src.matching.scorer import is_company
@@ -1185,11 +1185,27 @@ def _write_summary_dashboard(
 
 
 def _is_excluded(job: dict) -> bool:
-    """Return True if the job matches any EXCLUDE_KEYWORDS (neuroscience etc)."""
+    """Return True if the job matches any EXCLUDE_KEYWORDS or EXCLUDE_TITLE_KEYWORDS."""
     blob = " ".join(
         (job.get(k) or "") for k in ("title", "field", "keywords", "description")
     ).lower()
-    return any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS)
+    if any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS):
+        return True
+
+    # Title-only exclusion (non-researcher positions, garbage scraped pages)
+    title = (job.get("title") or "").lower()
+    if any(kw.lower() in title for kw in EXCLUDE_TITLE_KEYWORDS):
+        # Exception: keep if title also says "postdoc" or "research fellow"
+        if any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
+                                     "post-doctoral", "research fellow")):
+            return False
+        return True
+
+    # Garbage detection: titles that are too short or clearly not job postings
+    if len(title.strip()) < 10:
+        return True
+
+    return False
 
 
 def _build_institute_rank() -> dict[str, int]:

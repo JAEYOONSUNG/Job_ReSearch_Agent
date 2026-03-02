@@ -261,9 +261,10 @@ def _is_relevant(job: dict) -> bool:
 
     Excludes jobs that:
     - Match any EXCLUDE_KEYWORDS in title/field/keywords/description
+    - Match EXCLUDE_TITLE_KEYWORDS in title (non-researcher positions)
     - Have match_score=0 AND no relevant field detected
     """
-    from src.config import EXCLUDE_KEYWORDS
+    from src.config import EXCLUDE_KEYWORDS, EXCLUDE_TITLE_KEYWORDS
 
     blob = " ".join(
         (job.get(k) or "") for k in ("title", "field", "keywords", "description")
@@ -271,6 +272,17 @@ def _is_relevant(job: dict) -> bool:
 
     # Hard exclude: irrelevant fields
     if any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS):
+        return False
+
+    # Title-only exclusion: non-researcher positions, garbage pages
+    title = (job.get("title") or "").lower()
+    if any(kw.lower() in title for kw in EXCLUDE_TITLE_KEYWORDS):
+        if not any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
+                                         "post-doctoral", "research fellow")):
+            return False
+
+    # Garbage: title too short to be a real posting
+    if len(title.strip()) < 10:
         return False
 
     # Soft filter: if no CV keywords matched at all, require at least a

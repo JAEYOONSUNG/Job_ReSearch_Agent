@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import EXCEL_OUTPUT_DIR, EXCLUDE_KEYWORDS
-from src.db import get_all_pis, get_jobs, get_recommended_pis
+from src.db import _AGGREGATOR_INSTITUTES, get_all_pis, get_jobs, get_recommended_pis
 from src.matching.job_parser import parse_structured_description
 from src.matching.scorer import is_company
 

@@ -726,123 +726,462 @@ def _write_summary_dashboard(
     all_jobs: list[dict],
     rec_pis: list[dict],
 ) -> None:
-    """Write a Summary Dashboard sheet with statistics and charts."""
-    workbook = writer.book
-    worksheet = workbook.add_worksheet("Summary Dashboard")
-    writer.sheets["Summary Dashboard"] = worksheet
-
-    # Formats
-    title_fmt = workbook.add_format({
-        "bold": True, "font_size": 16, "font_color": "#16213e",
-        "bottom": 2, "bottom_color": "#16213e",
-    })
-    section_fmt = workbook.add_format({
-        "bold": True, "font_size": 12, "font_color": "#16213e",
-        "bg_color": "#f0f4f8",
-    })
-    label_fmt = workbook.add_format({"bold": True, "valign": "vcenter"})
-    value_fmt = workbook.add_format({"valign": "vcenter", "num_format": "#,##0"})
-    pct_fmt = workbook.add_format({"valign": "vcenter", "num_format": "0.0%"})
-
-    # Title
-    worksheet.merge_range("A1:F1", "Job Search Pipeline - Summary Dashboard", title_fmt)
-    worksheet.write("A2", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-
-    # --- Region breakdown ---
-    row = 3
-    worksheet.write(row, 0, "Region Breakdown", section_fmt)
-    worksheet.write(row, 1, "", section_fmt)
-    worksheet.write(row, 2, "", section_fmt)
-    row += 1
-
+    """Write a premium Summary Dashboard sheet with KPI cards, charts, and tables."""
     from collections import Counter
-    region_counts = Counter(j.get("region", "Other") for j in all_jobs)
-    region_data = [
-        ("US", region_counts.get("US", 0)),
-        ("EU", region_counts.get("EU", 0)),
-        ("Asia", region_counts.get("Asia", 0)),
-        ("Other", region_counts.get("Other", 0)),
-    ]
-    worksheet.write(row, 0, "Region", label_fmt)
-    worksheet.write(row, 1, "Count", label_fmt)
-    row += 1
-    data_start = row
-    for region, count in region_data:
-        worksheet.write(row, 0, region)
-        worksheet.write(row, 1, count, value_fmt)
-        row += 1
-    data_end = row - 1
 
-    # Pie chart for regions
-    if any(c > 0 for _, c in region_data):
-        chart = workbook.add_chart({"type": "pie"})
-        chart.add_series({
-            "name": "Jobs by Region",
-            "categories": ["Summary Dashboard", data_start, 0, data_end, 0],
-            "values": ["Summary Dashboard", data_start, 1, data_end, 1],
-            "data_labels": {"percentage": True, "category": True},
+    workbook = writer.book
+    ws = workbook.add_worksheet("Summary Dashboard")
+    writer.sheets["Summary Dashboard"] = ws
+
+    # ── Color palette ─────────────────────────────────────────────────
+    NAVY = "#0F1B2D"
+    ACCENT = "#3B82F6"     # bright blue
+    ACCENT_DARK = "#1E40AF"
+    GOLD = "#F59E0B"
+    EMERALD = "#10B981"
+    ROSE = "#F43F5E"
+    SLATE = "#64748B"
+    LIGHT_BG = "#F8FAFC"
+    CARD_BG = "#FFFFFF"
+    SUBTLE_BORDER = "#E2E8F0"
+    TEXT_PRIMARY = "#1E293B"
+    TEXT_SECONDARY = "#475569"
+    TEXT_MUTED = "#94A3B8"
+
+    # ── Reusable formats ──────────────────────────────────────────────
+    bg_fmt = workbook.add_format({"bg_color": LIGHT_BG})
+
+    header_fmt = workbook.add_format({
+        "bold": True, "font_size": 22, "font_color": NAVY,
+        "font_name": "Calibri", "bg_color": LIGHT_BG,
+        "bottom": 0,
+    })
+    subtitle_fmt = workbook.add_format({
+        "font_size": 10, "font_color": TEXT_MUTED,
+        "font_name": "Calibri", "bg_color": LIGHT_BG,
+    })
+    section_title_fmt = workbook.add_format({
+        "bold": True, "font_size": 13, "font_color": NAVY,
+        "font_name": "Calibri", "bg_color": LIGHT_BG,
+        "bottom": 2, "bottom_color": ACCENT,
+    })
+
+    # KPI card formats
+    def _make_kpi_card(color: str):
+        """Return (top_border, big_number, label, bg) formats for a KPI card."""
+        top = workbook.add_format({
+            "top": 5, "top_color": color,
+            "bg_color": CARD_BG, "font_size": 1,
+            "left": 1, "right": 1, "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
         })
-        chart.set_title({"name": "Jobs by Region"})
-        chart.set_size({"width": 400, "height": 300})
-        worksheet.insert_chart("D4", chart)
+        big = workbook.add_format({
+            "bold": True, "font_size": 28, "font_color": color,
+            "font_name": "Calibri", "align": "center", "valign": "vcenter",
+            "bg_color": CARD_BG,
+            "left": 1, "right": 1, "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        })
+        lbl = workbook.add_format({
+            "font_size": 9, "font_color": TEXT_SECONDARY,
+            "font_name": "Calibri", "align": "center", "valign": "top",
+            "bg_color": CARD_BG,
+            "left": 1, "right": 1, "bottom": 1,
+            "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+            "bottom_color": SUBTLE_BORDER,
+        })
+        return top, big, lbl
 
-    # --- Top fields ---
-    row += 1
-    worksheet.write(row, 0, "Top Fields", section_fmt)
-    worksheet.write(row, 1, "", section_fmt)
-    worksheet.write(row, 2, "", section_fmt)
-    row += 1
+    kpi_blue = _make_kpi_card(ACCENT)
+    kpi_gold = _make_kpi_card(GOLD)
+    kpi_emerald = _make_kpi_card(EMERALD)
+    kpi_rose = _make_kpi_card(ROSE)
 
+    # Table formats
+    tbl_header_fmt = workbook.add_format({
+        "bold": True, "font_size": 10, "font_color": "#FFFFFF",
+        "bg_color": NAVY, "font_name": "Calibri",
+        "align": "center", "valign": "vcenter",
+        "top": 1, "bottom": 1, "left": 1, "right": 1,
+        "top_color": NAVY, "bottom_color": NAVY,
+        "left_color": NAVY, "right_color": NAVY,
+    })
+    tbl_row_fmt = workbook.add_format({
+        "font_size": 10, "font_color": TEXT_PRIMARY,
+        "font_name": "Calibri", "valign": "vcenter",
+        "left": 1, "right": 1, "bottom": 1,
+        "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        "bottom_color": SUBTLE_BORDER,
+    })
+    tbl_row_alt_fmt = workbook.add_format({
+        "font_size": 10, "font_color": TEXT_PRIMARY,
+        "font_name": "Calibri", "valign": "vcenter",
+        "bg_color": "#F1F5F9",
+        "left": 1, "right": 1, "bottom": 1,
+        "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        "bottom_color": SUBTLE_BORDER,
+    })
+    tbl_num_fmt = workbook.add_format({
+        "font_size": 10, "font_color": TEXT_PRIMARY,
+        "font_name": "Calibri", "valign": "vcenter",
+        "align": "center", "num_format": "#,##0",
+        "left": 1, "right": 1, "bottom": 1,
+        "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        "bottom_color": SUBTLE_BORDER,
+    })
+    tbl_num_alt_fmt = workbook.add_format({
+        "font_size": 10, "font_color": TEXT_PRIMARY,
+        "font_name": "Calibri", "valign": "vcenter",
+        "align": "center", "num_format": "#,##0",
+        "bg_color": "#F1F5F9",
+        "left": 1, "right": 1, "bottom": 1,
+        "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        "bottom_color": SUBTLE_BORDER,
+    })
+
+    # Tier badge formats
+    tier_fmts = {
+        1: workbook.add_format({
+            "bold": True, "font_size": 10, "font_color": "#92400E",
+            "bg_color": "#FEF3C7", "align": "center", "valign": "vcenter",
+            "left": 1, "right": 1, "bottom": 1,
+            "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+            "bottom_color": SUBTLE_BORDER,
+        }),
+        2: workbook.add_format({
+            "bold": True, "font_size": 10, "font_color": "#1E40AF",
+            "bg_color": "#DBEAFE", "align": "center", "valign": "vcenter",
+            "left": 1, "right": 1, "bottom": 1,
+            "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+            "bottom_color": SUBTLE_BORDER,
+        }),
+        3: workbook.add_format({
+            "bold": True, "font_size": 10, "font_color": "#065F46",
+            "bg_color": "#D1FAE5", "align": "center", "valign": "vcenter",
+            "left": 1, "right": 1, "bottom": 1,
+            "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+            "bottom_color": SUBTLE_BORDER,
+        }),
+        4: workbook.add_format({
+            "bold": True, "font_size": 10, "font_color": "#374151",
+            "bg_color": "#F3F4F6", "align": "center", "valign": "vcenter",
+            "left": 1, "right": 1, "bottom": 1,
+            "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+            "bottom_color": SUBTLE_BORDER,
+        }),
+    }
+
+    # ── Column widths ─────────────────────────────────────────────────
+    ws.set_column("A:A", 3, bg_fmt)   # left gutter
+    ws.set_column("B:B", 22, bg_fmt)
+    ws.set_column("C:C", 12, bg_fmt)
+    ws.set_column("D:D", 3, bg_fmt)   # gap
+    ws.set_column("E:E", 22, bg_fmt)
+    ws.set_column("F:F", 12, bg_fmt)
+    ws.set_column("G:G", 3, bg_fmt)   # gap
+    ws.set_column("H:H", 22, bg_fmt)
+    ws.set_column("I:I", 12, bg_fmt)
+    ws.set_column("J:J", 3, bg_fmt)   # gap
+    ws.set_column("K:K", 22, bg_fmt)
+    ws.set_column("L:L", 12, bg_fmt)
+    ws.set_column("M:M", 3, bg_fmt)   # right gutter
+
+    ws.hide_gridlines(2)
+    ws.set_tab_color(ACCENT)
+
+    # ── Compute data ──────────────────────────────────────────────────
+    region_counts = Counter(j.get("region", "Other") for j in all_jobs)
+    tier_counts = Counter(j.get("tier") for j in all_jobs if j.get("tier"))
     field_counts = Counter(
         j.get("field", "Unknown") for j in all_jobs if j.get("field")
     )
     top_fields = field_counts.most_common(10)
 
-    worksheet.write(row, 0, "Field", label_fmt)
-    worksheet.write(row, 1, "Count", label_fmt)
-    row += 1
-    field_start = row
-    for field, count in top_fields:
-        worksheet.write(row, 0, field[:40])
-        worksheet.write(row, 1, count, value_fmt)
-        row += 1
-    field_end = row - 1
+    # Top institutions by job count
+    inst_counts = Counter(
+        j.get("institute", "Unknown") for j in all_jobs
+        if j.get("institute") and j["institute"].lower() not in _AGGREGATOR_INSTITUTES
+    )
+    top_institutions = inst_counts.most_common(10)
 
-    # Bar chart for top fields
+    # Deadline urgency buckets
+    urgent_count = 0    # ≤7 days
+    soon_count = 0      # 8-30 days
+    later_count = 0     # >30 days
+    no_deadline = 0
+    for j in all_jobs:
+        dl = j.get("deadline") or ""
+        try:
+            days_left = (date.fromisoformat(dl) - date.today()).days
+            if days_left < 0:
+                continue
+            elif days_left <= 7:
+                urgent_count += 1
+            elif days_left <= 30:
+                soon_count += 1
+            else:
+                later_count += 1
+        except (ValueError, TypeError):
+            no_deadline += 1
+
+    us_count = region_counts.get("US", 0)
+    eu_count = region_counts.get("EU", 0)
+    asia_count = region_counts.get("Asia", 0)
+    other_count = region_counts.get("Other", 0)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ROW 0-1: HEADER
+    # ══════════════════════════════════════════════════════════════════
+    row = 1
+    ws.merge_range(row, 1, row, 11,
+                   "Job Search Pipeline", header_fmt)
+    row += 1
+    ws.merge_range(row, 1, row, 11,
+                   f"Dashboard generated {datetime.now().strftime('%B %d, %Y at %H:%M')}   |   "
+                   f"{len(all_jobs)} total positions tracked   |   "
+                   f"{len(rec_pis)} PI recommendations",
+                   subtitle_fmt)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ROW 3-5: KPI CARDS
+    # ══════════════════════════════════════════════════════════════════
+    row = 4
+    kpi_data = [
+        (1,  kpi_blue,    len(all_jobs), "Total Positions"),
+        (4,  kpi_gold,    us_count,      "US Positions"),
+        (7,  kpi_emerald, eu_count,      "EU Positions"),
+        (10, kpi_rose,    asia_count + other_count, "Asia & Other"),
+    ]
+
+    for col_start, (top_f, big_f, lbl_f), value, label in kpi_data:
+        ws.merge_range(row, col_start, row, col_start + 1, "", top_f)
+        ws.merge_range(row + 1, col_start, row + 1, col_start + 1, value, big_f)
+        ws.merge_range(row + 2, col_start, row + 2, col_start + 1, label, lbl_f)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ROW 8-9: SECONDARY KPI CARDS
+    # ══════════════════════════════════════════════════════════════════
+    row = 8
+
+    kpi_navy = _make_kpi_card(NAVY)
+    kpi_accent = _make_kpi_card(ACCENT_DARK)
+
+    t1_count = tier_counts.get(1, 0) + tier_counts.get(2, 0)
+    t3_count = tier_counts.get(3, 0) + tier_counts.get(4, 0)
+
+    secondary_kpis = [
+        (1,  kpi_navy,    len(rec_pis),   "PI Recommendations"),
+        (4,  kpi_accent,  t1_count,       "Tier 1-2 Positions"),
+        (7,  kpi_emerald, t3_count,       "Tier 3-4 Positions"),
+        (10, kpi_rose,    urgent_count,   "Urgent (≤7 days)"),
+    ]
+
+    for col_start, (top_f, big_f, lbl_f), value, label in secondary_kpis:
+        ws.merge_range(row, col_start, row, col_start + 1, "", top_f)
+        ws.merge_range(row + 1, col_start, row + 1, col_start + 1, value, big_f)
+        ws.merge_range(row + 2, col_start, row + 2, col_start + 1, label, lbl_f)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ROW 12: REGION DATA (hidden, for chart) + REGION PIE CHART
+    # ══════════════════════════════════════════════════════════════════
+    chart_data_row = 12
+    ws.merge_range(chart_data_row, 1, chart_data_row, 2,
+                   "Region Breakdown", section_title_fmt)
+    chart_data_row += 1
+
+    region_data = [
+        ("US", us_count),
+        ("EU", eu_count),
+        ("Asia", asia_count),
+        ("Other", other_count),
+    ]
+    region_colors = [ACCENT, EMERALD, GOLD, SLATE]
+
+    ws.write(chart_data_row, 1, "Region", tbl_header_fmt)
+    ws.write(chart_data_row, 2, "Count", tbl_header_fmt)
+    chart_data_row += 1
+    region_start = chart_data_row
+    for i, (region, count) in enumerate(region_data):
+        row_f = tbl_row_alt_fmt if i % 2 else tbl_row_fmt
+        num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
+        ws.write(chart_data_row, 1, region, row_f)
+        ws.write(chart_data_row, 2, count, num_f)
+        chart_data_row += 1
+    region_end = chart_data_row - 1
+
+    if any(c > 0 for _, c in region_data):
+        chart = workbook.add_chart({"type": "doughnut"})
+        chart.add_series({
+            "name": "Jobs by Region",
+            "categories": ["Summary Dashboard", region_start, 1, region_end, 1],
+            "values": ["Summary Dashboard", region_start, 2, region_end, 2],
+            "data_labels": {"percentage": True, "category": True,
+                            "font": {"name": "Calibri", "size": 10, "color": TEXT_PRIMARY}},
+            "points": [{"fill": {"color": c}} for c in region_colors],
+        })
+        chart.set_title({"name": "Jobs by Region",
+                         "name_font": {"name": "Calibri", "size": 12,
+                                       "color": NAVY, "bold": True}})
+        chart.set_size({"width": 380, "height": 280})
+        chart.set_legend({"position": "bottom",
+                          "font": {"name": "Calibri", "size": 9}})
+        chart.set_chartarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
+        chart.set_plotarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
+        ws.insert_chart("E13", chart)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ROW 12: TIER BREAKDOWN TABLE (right side)
+    # ══════════════════════════════════════════════════════════════════
+    tier_row = 12
+    ws.merge_range(tier_row, 8, tier_row, 9,
+                   "Tier Distribution", section_title_fmt)
+    tier_row += 1
+    ws.write(tier_row, 8, "Tier", tbl_header_fmt)
+    ws.write(tier_row, 9, "Count", tbl_header_fmt)
+    tier_row += 1
+
+    tier_labels = [
+        (1, "Tier 1 (Top 50)"),
+        (2, "Tier 2 (51-200)"),
+        (3, "Tier 3 (201-500)"),
+        (4, "Tier 4 (501+)"),
+    ]
+    tier_data_start = tier_row
+    for i, (t, label) in enumerate(tier_labels):
+        count = tier_counts.get(t, 0)
+        t_fmt = tier_fmts.get(t, tbl_row_fmt)
+        num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
+        ws.write(tier_row, 8, label, t_fmt)
+        ws.write(tier_row, 9, count, num_f)
+        tier_row += 1
+
+    # Unranked row
+    ranked_total = sum(tier_counts.get(t, 0) for t in (1, 2, 3, 4))
+    unranked = len(all_jobs) - ranked_total
+    ws.write(tier_row, 8, "Unranked", tbl_row_alt_fmt)
+    ws.write(tier_row, 9, unranked, tbl_num_alt_fmt)
+    tier_row += 1
+
+    # Deadline urgency mini-table
+    tier_row += 1
+    ws.merge_range(tier_row, 8, tier_row, 9,
+                   "Deadline Urgency", section_title_fmt)
+    tier_row += 1
+    ws.write(tier_row, 8, "Window", tbl_header_fmt)
+    ws.write(tier_row, 9, "Count", tbl_header_fmt)
+    tier_row += 1
+
+    urgency_data = [
+        ("≤ 7 days (Urgent)", urgent_count),
+        ("8-30 days (Soon)", soon_count),
+        ("> 30 days", later_count),
+        ("No deadline", no_deadline),
+    ]
+
+    urgent_fmt = workbook.add_format({
+        "bold": True, "font_size": 10, "font_color": "#991B1B",
+        "bg_color": "#FEE2E2", "valign": "vcenter",
+        "left": 1, "right": 1, "bottom": 1,
+        "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        "bottom_color": SUBTLE_BORDER,
+    })
+    soon_fmt = workbook.add_format({
+        "bold": True, "font_size": 10, "font_color": "#92400E",
+        "bg_color": "#FEF3C7", "valign": "vcenter",
+        "left": 1, "right": 1, "bottom": 1,
+        "left_color": SUBTLE_BORDER, "right_color": SUBTLE_BORDER,
+        "bottom_color": SUBTLE_BORDER,
+    })
+    urgency_fmts = [urgent_fmt, soon_fmt, tbl_row_fmt, tbl_row_alt_fmt]
+    for i, ((label, count), uf) in enumerate(zip(urgency_data, urgency_fmts)):
+        num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
+        ws.write(tier_row, 8, label, uf)
+        ws.write(tier_row, 9, count, num_f)
+        tier_row += 1
+
+    # ══════════════════════════════════════════════════════════════════
+    # ROW ~20: TOP FIELDS BAR CHART + TABLE
+    # ══════════════════════════════════════════════════════════════════
+    fields_row = max(chart_data_row, tier_row) + 2
+    ws.merge_range(fields_row, 1, fields_row, 2,
+                   "Top Research Fields", section_title_fmt)
+    fields_row += 1
+
+    ws.write(fields_row, 1, "Field", tbl_header_fmt)
+    ws.write(fields_row, 2, "Count", tbl_header_fmt)
+    fields_row += 1
+    field_start = fields_row
+    for i, (field, count) in enumerate(top_fields):
+        row_f = tbl_row_alt_fmt if i % 2 else tbl_row_fmt
+        num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
+        ws.write(fields_row, 1, field[:40], row_f)
+        ws.write(fields_row, 2, count, num_f)
+        fields_row += 1
+    field_end = fields_row - 1
+
     if top_fields:
         chart2 = workbook.add_chart({"type": "bar"})
+        gradient_colors = [
+            "#1E3A5F", "#1E40AF", "#2563EB", "#3B82F6", "#60A5FA",
+            "#93C5FD", "#BFDBFE", "#DBEAFE", "#EFF6FF", "#F0F9FF",
+        ]
         chart2.add_series({
             "name": "Jobs by Field",
-            "categories": ["Summary Dashboard", field_start, 0, field_end, 0],
-            "values": ["Summary Dashboard", field_start, 1, field_end, 1],
-            "fill": {"color": "#16213e"},
+            "categories": ["Summary Dashboard", field_start, 1, field_end, 1],
+            "values": ["Summary Dashboard", field_start, 2, field_end, 2],
+            "points": [{"fill": {"color": gradient_colors[i % len(gradient_colors)]}}
+                       for i in range(len(top_fields))],
+            "gap": 80,
         })
-        chart2.set_title({"name": "Top Research Fields"})
-        chart2.set_size({"width": 500, "height": 350})
+        chart2.set_title({"name": "Top Research Fields",
+                          "name_font": {"name": "Calibri", "size": 12,
+                                        "color": NAVY, "bold": True}})
+        chart2.set_size({"width": 520, "height": 320})
         chart2.set_legend({"none": True})
-        worksheet.insert_chart("D16", chart2)
+        chart2.set_chartarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
+        chart2.set_plotarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
+        chart2.set_y_axis({"num_font": {"name": "Calibri", "size": 9, "color": TEXT_SECONDARY}})
+        chart2.set_x_axis({"num_font": {"name": "Calibri", "size": 9, "color": TEXT_SECONDARY},
+                           "major_gridlines": {"visible": True, "line": {"color": SUBTLE_BORDER}}})
+        ws.insert_chart(field_start, 4, chart2)
 
-    # --- Key metrics ---
-    row += 1
-    worksheet.write(row, 0, "Key Metrics", section_fmt)
-    worksheet.write(row, 1, "", section_fmt)
-    row += 1
-    worksheet.write(row, 0, "Total Jobs", label_fmt)
-    worksheet.write(row, 1, len(all_jobs), value_fmt)
-    row += 1
-    worksheet.write(row, 0, "Total PI Recommendations", label_fmt)
-    worksheet.write(row, 1, len(rec_pis), value_fmt)
-    row += 1
-    tier_counts = Counter(j.get("tier") for j in all_jobs if j.get("tier"))
-    for tier in sorted(tier_counts.keys()):
-        worksheet.write(row, 0, f"Tier {tier} Jobs", label_fmt)
-        worksheet.write(row, 1, tier_counts[tier], value_fmt)
-        row += 1
+    # ══════════════════════════════════════════════════════════════════
+    # TOP INSTITUTIONS TABLE (right of fields chart)
+    # ══════════════════════════════════════════════════════════════════
+    inst_row = fields_row - len(top_fields) - 2  # align with fields section
+    ws.merge_range(inst_row, 8, inst_row, 9,
+                   "Top Institutions", section_title_fmt)
+    inst_row += 1
 
-    # Set column widths
-    worksheet.set_column(0, 0, 25)
-    worksheet.set_column(1, 1, 12)
-    worksheet.set_column(2, 2, 5)
+    ws.write(inst_row, 8, "Institution", tbl_header_fmt)
+    ws.write(inst_row, 9, "Jobs", tbl_header_fmt)
+    inst_row += 1
+    for i, (inst, count) in enumerate(top_institutions):
+        row_f = tbl_row_alt_fmt if i % 2 else tbl_row_fmt
+        num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
+        ws.write(inst_row, 8, inst[:35], row_f)
+        ws.write(inst_row, 9, count, num_f)
+        inst_row += 1
+
+    # ══════════════════════════════════════════════════════════════════
+    # FOOTER
+    # ══════════════════════════════════════════════════════════════════
+    footer_row = max(fields_row, inst_row) + 2
+    footer_fmt = workbook.add_format({
+        "font_size": 9, "font_color": TEXT_MUTED,
+        "font_name": "Calibri", "bg_color": LIGHT_BG,
+        "top": 1, "top_color": SUBTLE_BORDER,
+    })
+    ws.merge_range(footer_row, 1, footer_row, 11,
+                   f"Generated by Job Search Pipeline   |   "
+                   f"Data covers {len(all_jobs)} positions across "
+                   f"{len(set(j.get('country') for j in all_jobs if j.get('country')))} countries   |   "
+                   f"{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                   footer_fmt)
+
+    # Fill background for empty areas
+    for r in range(footer_row + 1):
+        for empty_col in (0, 3, 6, 9, 12):
+            if empty_col < 13:
+                ws.write_blank(r, empty_col, "", bg_fmt)
 
 
 def _is_excluded(job: dict) -> bool:

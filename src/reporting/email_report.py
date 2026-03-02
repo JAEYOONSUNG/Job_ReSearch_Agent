@@ -256,12 +256,56 @@ def send_email(
         return False
 
 
+def _is_relevant(job: dict) -> bool:
+    """Return True if the job passes field relevance filters.
+
+    Excludes jobs that:
+    - Match any EXCLUDE_KEYWORDS in title/field/keywords/description
+    - Have match_score=0 AND no relevant field detected
+    """
+    from src.config import EXCLUDE_KEYWORDS
+
+    blob = " ".join(
+        (job.get(k) or "") for k in ("title", "field", "keywords", "description")
+    ).lower()
+
+    # Hard exclude: irrelevant fields
+    if any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS):
+        return False
+
+    # Soft filter: if no CV keywords matched at all, require at least a
+    # plausible field before including in email
+    score = job.get("match_score") or 0
+    if score == 0:
+        # Allow jobs from known relevant institutions regardless of score
+        inst = (job.get("institute") or "").lower()
+        tier = job.get("tier")
+        if tier and tier <= 2:
+            return True
+        # Otherwise require at least some field relevance signal
+        relevant_signals = [
+            "biology", "biolog", "biotech", "crispr", "genomic", "genetic",
+            "protein", "enzyme", "microbio", "synthetic", "metabol",
+            "molecular", "bioengineer", "cell-free", "ferment",
+            "bioinformat", "biochem", "genome", "gene edit",
+            "high-throughput", "directed evolution", "extremophile",
+        ]
+        if not any(sig in blob for sig in relevant_signals):
+            return False
+
+    return True
+
+
 def send_report(
     since: str,
     include_recommendations: bool = True,
     attach_excel: bool = True,
 ) -> bool:
     """Generate and send the full report with optional Excel attachment.
+
+    Applies field relevance filtering so only jobs related to the user's
+    research area (synthetic biology, CRISPR, protein engineering, etc.)
+    are included in the email.
 
     Parameters
     ----------
@@ -272,9 +316,18 @@ def send_report(
     attach_excel : bool
         Whether to generate and attach an Excel export file.
     """
-    jobs = get_new_jobs_since(since)
-    if not jobs:
+    raw_jobs = get_new_jobs_since(since)
+    if not raw_jobs:
         logger.info("No new jobs since %s, skipping email", since)
+        return False
+
+    # Filter out irrelevant fields (physics, engineering, clinical, etc.)
+    jobs = [j for j in raw_jobs if _is_relevant(j)]
+    logger.info("Email relevance filter: %d → %d jobs (excluded %d irrelevant)",
+                len(raw_jobs), len(jobs), len(raw_jobs) - len(jobs))
+
+    if not jobs:
+        logger.info("No relevant jobs after filtering, skipping email")
         return False
 
     recommendations = get_recommended_pis(min_score=0.5) if include_recommendations else []

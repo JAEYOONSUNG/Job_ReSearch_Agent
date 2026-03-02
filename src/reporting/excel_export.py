@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import EXCEL_OUTPUT_DIR, EXCLUDE_KEYWORDS, EXCLUDE_TITLE_KEYWORDS
+from src.config import (
+    EXCEL_OUTPUT_DIR, EXCLUDE_KEYWORDS, EXCLUDE_TITLE_KEYWORDS,
+    FACULTY_TITLE_KEYWORDS, GARBAGE_TITLE_PATTERNS,
+)
 from src.db import _AGGREGATOR_INSTITUTES, get_all_pis, get_jobs, get_recommended_pis
 from src.matching.job_parser import parse_structured_description
 from src.matching.scorer import is_company
@@ -924,6 +927,7 @@ def _write_summary_dashboard(
 
     us_count = region_counts.get("US", 0)
     eu_count = region_counts.get("EU", 0)
+    korea_count = region_counts.get("Korea", 0)
     asia_count = region_counts.get("Asia", 0)
     other_count = region_counts.get("Other", 0)
 
@@ -944,11 +948,12 @@ def _write_summary_dashboard(
     # ROW 3-5: KPI CARDS
     # ══════════════════════════════════════════════════════════════════
     row = 4
+    kpi_slate = _make_kpi_card(SLATE)
     kpi_data = [
         (1,  kpi_blue,    len(all_jobs), "Total Positions"),
         (4,  kpi_gold,    us_count,      "US Positions"),
         (7,  kpi_emerald, eu_count,      "EU Positions"),
-        (10, kpi_rose,    asia_count + other_count, "Asia & Other"),
+        (10, kpi_slate,   korea_count,   "Korea Positions"),
     ]
 
     for col_start, (top_f, big_f, lbl_f), value, label in kpi_data:
@@ -990,10 +995,11 @@ def _write_summary_dashboard(
     region_data = [
         ("US", us_count),
         ("EU", eu_count),
+        ("Korea", korea_count),
         ("Asia", asia_count),
         ("Other", other_count),
     ]
-    region_colors = [ACCENT, EMERALD, GOLD, SLATE]
+    region_colors = [ACCENT, EMERALD, "#7C3AED", GOLD, SLATE]
 
     ws.write(chart_data_row, 1, "Region", tbl_header_fmt)
     ws.write(chart_data_row, 2, "Count", tbl_header_fmt)
@@ -1192,7 +1198,7 @@ def _is_excluded(job: dict) -> bool:
     if any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS):
         return True
 
-    # Title-only exclusion (non-researcher positions, garbage scraped pages)
+    # Title-only exclusion (non-researcher positions)
     title = (job.get("title") or "").lower()
     if any(kw.lower() in title for kw in EXCLUDE_TITLE_KEYWORDS):
         # Exception: keep if title also says "postdoc" or "research fellow"
@@ -1201,11 +1207,26 @@ def _is_excluded(job: dict) -> bool:
             return False
         return True
 
+    # Faculty exclusion: remove from US/EU/Other, keep for Korea
+    if any(kw.lower() in title for kw in FACULTY_TITLE_KEYWORDS):
+        if job.get("region") != "Korea":
+            if not any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
+                                             "post-doctoral", "research fellow")):
+                return True
+
     # Garbage detection: titles that are too short or clearly not job postings
     if len(title.strip()) < 10:
         return True
+    if any(pat.lower() in title for pat in GARBAGE_TITLE_PATTERNS):
+        return True
 
     return False
+
+
+def _is_faculty_position(job: dict) -> bool:
+    """Return True if the job title matches a faculty/professor keyword."""
+    title = (job.get("title") or "").lower()
+    return any(kw.lower() in title for kw in FACULTY_TITLE_KEYWORDS)
 
 
 def _build_institute_rank() -> dict[str, int]:
@@ -1321,7 +1342,7 @@ def _read_previous_excel(output_dir: Path) -> dict[str, dict[str, pd.DataFrame]]
         return {}
 
     sheets: dict[str, pd.DataFrame] = {}
-    for sheet in ("US Positions", "EU Positions", "Other Positions"):
+    for sheet in ("US Positions", "EU Positions", "Korea Positions", "Other Positions"):
         try:
             df = pd.read_excel(str(prev_path), sheet_name=sheet, engine="openpyxl")
             sheets[sheet] = df
@@ -1406,6 +1427,7 @@ def _merge_with_previous(
     sheet_region_map = {
         "US Positions": "US",
         "EU Positions": "EU",
+        "Korea Positions": "Korea",
         "Other Positions": "Other",
     }
 
@@ -1553,11 +1575,13 @@ def export_to_excel(output_dir: Path = None) -> Path:
     # Phase 4: Split new jobs by region
     us_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "US"])
     eu_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "EU"])
-    other_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") not in ("US", "EU")])
+    korea_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "Korea"])
+    other_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") not in ("US", "EU", "Korea")])
 
     new_jobs_by_region = {
         "US": us_jobs,
         "EU": eu_jobs,
+        "Korea": korea_jobs,
         "Other": other_jobs,
     }
 
@@ -1567,6 +1591,7 @@ def export_to_excel(output_dir: Path = None) -> Path:
         # Sort the merged DataFrames
         df_us = _sort_merged_df(merged.get("US Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
         df_eu = _sort_merged_df(merged.get("EU Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
+        df_korea = _sort_merged_df(merged.get("Korea Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
         df_other = _sort_merged_df(merged.get("Other Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
 
         new_count = sum(len(m[1]) for m in merged.values())
@@ -1575,6 +1600,7 @@ def export_to_excel(output_dir: Path = None) -> Path:
         # First run: generate from scratch
         df_us = pd.DataFrame([_job_to_row(j) for j in us_jobs], columns=JOB_COLUMNS)
         df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
+        df_korea = pd.DataFrame([_job_to_row(j) for j in korea_jobs], columns=JOB_COLUMNS)
         df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
 
     rec_pis = _sort_pis_by_tier(get_recommended_pis())
@@ -1602,7 +1628,16 @@ def export_to_excel(output_dir: Path = None) -> Path:
                 _write_paper_links(writer, "EU Positions", df_eu, eu_jobs)
                 _style_citizenship_cells(writer, "EU Positions", df_eu, eu_jobs)
 
-        # Sheet 3: Other Positions
+        # Sheet 3: Korea Positions (includes faculty)
+        df_korea.to_excel(writer, sheet_name="Korea Positions", index=False)
+        if len(df_korea) > 0:
+            _style_worksheet(writer, "Korea Positions", df_korea)
+            _style_deadline_cells(writer, "Korea Positions", df_korea)
+            if not prev_sheets:
+                _write_paper_links(writer, "Korea Positions", df_korea, korea_jobs)
+                _style_citizenship_cells(writer, "Korea Positions", df_korea, korea_jobs)
+
+        # Sheet 4: Other Positions
         df_other.to_excel(writer, sheet_name="Other Positions", index=False)
         if len(df_other) > 0:
             _style_worksheet(writer, "Other Positions", df_other)
@@ -1621,6 +1656,6 @@ def export_to_excel(output_dir: Path = None) -> Path:
     exported_urls = [j.get("url") for j in all_jobs if j.get("url")]
     _mark_exported(exported_urls)
 
-    total_rows = len(df_us) + len(df_eu) + len(df_other)
+    total_rows = len(df_us) + len(df_eu) + len(df_korea) + len(df_other)
     logger.info("Excel exported to %s (%d total rows)", filepath, total_rows)
     return filepath

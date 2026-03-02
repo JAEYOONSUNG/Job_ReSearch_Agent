@@ -259,18 +259,6 @@ EXCLUDE_TITLE_KEYWORDS = [
     "accountant",
     "nurse",
     "recruiter",
-    # Faculty / Professor (not postdoc)
-    "assistant professor",
-    "associate professor",
-    "full professor",
-    "tenure track",
-    "tenure-track",
-    "tenured",
-    "lecturer",
-    "instructor",
-    "group leader",
-    "faculty position",
-    "open-rank faculty",
     # PhD again (catch remaining)
     "doctoral researcher",
     "doctoral fellow",
@@ -289,7 +277,30 @@ EXCLUDE_TITLE_KEYWORDS = [
     "collection scientist",
     "senior scientist xrd",
     "curator",
-    # Garbage from web scraping
+]
+
+# Faculty / Professor keywords — excluded from US/EU/Other, included in Korea
+FACULTY_TITLE_KEYWORDS = [
+    "assistant professor",
+    "associate professor",
+    "full professor",
+    "tenure track",
+    "tenure-track",
+    "tenured",
+    "lecturer",
+    "instructor",
+    "group leader",
+    "faculty position",
+    "open-rank faculty",
+    # Korean faculty terms
+    "교수",
+    "조교수",
+    "부교수",
+    "정교수",
+]
+
+# Garbage patterns — absolutely NOT job postings (scraped navigation, policies, etc.)
+GARBAGE_TITLE_PATTERNS = [
     "privacy policy",
     "terms of use",
     "press resources",
@@ -313,6 +324,17 @@ EXCLUDE_TITLE_KEYWORDS = [
     "publications",
     "ai datahub",
     "scientific instrumentation",
+    "cookie policy",
+    "terms and conditions",
+    "about us",
+    "contact us",
+    "subscribe",
+    "newsletter",
+    "sign in",
+    "log in",
+    "create account",
+    "site map",
+    "accessibility statement",
 ]
 
 # Keywords to detect job openings on lab websites
@@ -332,7 +354,7 @@ LAB_HIRING_KEYWORDS = [
 ]
 
 # ── Region Priority ────────────────────────────────────────────────────────
-REGION_PRIORITY = {"US": 1, "EU": 2, "Asia": 3, "Other": 4}
+REGION_PRIORITY = {"US": 1, "EU": 2, "Korea": 3, "Asia": 4, "Other": 5}
 
 COUNTRY_TO_REGION = {
     # North America
@@ -382,9 +404,10 @@ COUNTRY_TO_REGION = {
     "Serbia": "EU",
     # Direct region values (for guess_country fallback)
     "EU": "EU",
+    # Korea (separate region)
+    "South Korea": "Korea",
+    "Korea": "Korea",
     # Asia
-    "South Korea": "Asia",
-    "Korea": "Asia",
     "Japan": "Asia",
     "China": "Asia",
     "Singapore": "Asia",

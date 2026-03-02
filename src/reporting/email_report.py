@@ -144,8 +144,9 @@ def render_report(jobs: list[dict], recommendations: list[dict] = None) -> str:
 
     us_jobs = [j for j in jobs if j.get("region") == "US"]
     eu_jobs = [j for j in jobs if j.get("region") == "EU"]
+    korea_jobs = [j for j in jobs if j.get("region") == "Korea"]
     asia_jobs = [j for j in jobs if j.get("region") == "Asia"]
-    other_jobs = [j for j in jobs if j.get("region") not in ("US", "EU", "Asia")]
+    other_jobs = [j for j in jobs if j.get("region") not in ("US", "EU", "Korea", "Asia")]
 
     trends = _compute_weekly_trends()
 
@@ -154,15 +155,17 @@ def render_report(jobs: list[dict], recommendations: list[dict] = None) -> str:
         total_new=len(jobs),
         us_count=len(us_jobs),
         eu_count=len(eu_jobs),
+        korea_count=len(korea_jobs),
         asia_count=len(asia_jobs),
         other_count=len(other_jobs),
         us_jobs=us_jobs,
         eu_jobs=eu_jobs,
+        korea_jobs=korea_jobs,
         asia_jobs=asia_jobs,
         other_jobs=other_jobs,
         recommendations=recommendations or [],
         rec_count=len(recommendations or []),
-        total_sources=12,
+        total_sources=13,
         trends=trends,
     )
 
@@ -172,6 +175,7 @@ def build_subject(jobs: list[dict], recommendations: list[dict] = None) -> str:
     date_str = datetime.now().strftime("%b %d")
     us = sum(1 for j in jobs if j.get("region") == "US")
     eu = sum(1 for j in jobs if j.get("region") == "EU")
+    korea = sum(1 for j in jobs if j.get("region") == "Korea")
     asia = sum(1 for j in jobs if j.get("region") in ("Asia", "Other"))
 
     parts = []
@@ -179,6 +183,8 @@ def build_subject(jobs: list[dict], recommendations: list[dict] = None) -> str:
         parts.append(f"{us} US")
     if eu:
         parts.append(f"{eu} EU")
+    if korea:
+        parts.append(f"{korea} Korea")
     if asia:
         parts.append(f"{asia} Asia")
 
@@ -264,7 +270,7 @@ def _is_relevant(job: dict) -> bool:
     - Match EXCLUDE_TITLE_KEYWORDS in title (non-researcher positions)
     - Have match_score=0 AND no relevant field detected
     """
-    from src.config import EXCLUDE_KEYWORDS, EXCLUDE_TITLE_KEYWORDS
+    from src.config import EXCLUDE_KEYWORDS, EXCLUDE_TITLE_KEYWORDS, FACULTY_TITLE_KEYWORDS, GARBAGE_TITLE_PATTERNS
 
     blob = " ".join(
         (job.get(k) or "") for k in ("title", "field", "keywords", "description")
@@ -274,15 +280,24 @@ def _is_relevant(job: dict) -> bool:
     if any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS):
         return False
 
-    # Title-only exclusion: non-researcher positions, garbage pages
+    # Title-only exclusion: non-researcher positions
     title = (job.get("title") or "").lower()
     if any(kw.lower() in title for kw in EXCLUDE_TITLE_KEYWORDS):
         if not any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
                                          "post-doctoral", "research fellow")):
             return False
 
-    # Garbage: title too short to be a real posting
+    # Faculty: exclude from non-Korea regions
+    if any(kw.lower() in title for kw in FACULTY_TITLE_KEYWORDS):
+        if job.get("region") != "Korea":
+            if not any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
+                                             "post-doctoral", "research fellow")):
+                return False
+
+    # Garbage: title too short or clearly not a job posting
     if len(title.strip()) < 10:
+        return False
+    if any(pat in title for pat in GARBAGE_TITLE_PATTERNS):
         return False
 
     # Soft filter: if no CV keywords matched at all, require at least a

@@ -59,6 +59,7 @@ def _build_scrapers() -> list:
         ("src.scrapers.jobs_ac_uk", "JobsAcUkScraper"),
         ("src.scrapers.jobs_ac_kr", "JobsAcKrScraper"),
         ("src.scrapers.wanted", "WantedScraper"),
+        ("src.scrapers.korean_jobs", "KoreanJobsScraper"),
     ]:
         try:
             import importlib
@@ -86,7 +87,7 @@ def _run_single_scraper(scraper) -> list[dict]:
 
 SCRAPER_TIMEOUT = 300  # 5 minutes per scraper
 # Scrapers that need more time (many detail-page fetches with rate limiting)
-_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 900, "euraxess": 900, "researchgate": 900, "institutional": 600}
+_SLOW_SCRAPERS = {"scholarshipdb": 900, "jobs_ac_uk": 900, "euraxess": 900, "researchgate": 900, "institutional": 600, "korean_jobs": 600}
 
 
 async def _async_run_single_scraper(scraper) -> list[dict]:
@@ -560,18 +561,19 @@ def print_summary(jobs: list[dict]) -> None:
 
     us = [j for j in new_jobs if j.get("region") == "US"]
     eu = [j for j in new_jobs if j.get("region") == "EU"]
+    korea = [j for j in new_jobs if j.get("region") == "Korea"]
     asia = [j for j in new_jobs if j.get("region") == "Asia"]
-    other = [j for j in new_jobs if j.get("region") not in ("US", "EU", "Asia")]
+    other = [j for j in new_jobs if j.get("region") not in ("US", "EU", "Korea", "Asia")]
 
     print(f"\n{'='*70}")
     print(f" Job Search Pipeline Results — {datetime.now().strftime('%b %d, %Y')}")
     print(f"{'='*70}")
     print(f" Total scraped: {len(jobs)}")
     print(f" New jobs (24h): {len(new_jobs)}")
-    print(f"   US: {len(us)}  |  EU: {len(eu)}  |  Asia: {len(asia)}  |  Other: {len(other)}")
+    print(f"   US: {len(us)}  |  EU: {len(eu)}  |  Korea: {len(korea)}  |  Asia: {len(asia)}  |  Other: {len(other)}")
     print(f"{'='*70}")
 
-    for region_name, region_jobs in [("US", us), ("EU", eu), ("Asia/Other", asia + other)]:
+    for region_name, region_jobs in [("US", us), ("EU", eu), ("Korea", korea), ("Asia/Other", asia + other)]:
         if region_jobs:
             print(f"\n── {region_name} ({len(region_jobs)}) ──")
             for i, j in enumerate(region_jobs[:10], 1):

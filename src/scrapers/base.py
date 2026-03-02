@@ -24,7 +24,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from src.config import COUNTRY_TO_REGION, RANKINGS_PATH, load_rankings
+from src.config import COUNTRY_TO_REGION, GARBAGE_TITLE_PATTERNS, RANKINGS_PATH, load_rankings
 
 # Extended country detection: maps common substrings to COUNTRY_TO_REGION keys
 _COUNTRY_ALIASES = {
@@ -813,6 +813,21 @@ class BaseScraper(abc.ABC):
 
         return enriched + already_done + passthrough
 
+    # ── Garbage detection ─────────────────────────────────────────────────
+
+    @staticmethod
+    def is_garbage_title(title: str | None) -> bool:
+        """Return True if a title is garbage (not a real job posting)."""
+        if not title:
+            return True
+        title_lower = title.strip().lower()
+        # Korean/CJK characters are wide — check character count more leniently
+        _has_cjk = any("\u3000" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af" for ch in title_lower)
+        min_len = 4 if _has_cjk else 10
+        if len(title_lower) < min_len:
+            return True
+        return any(pat in title_lower for pat in GARBAGE_TITLE_PATTERNS)
+
     # ── Dedup ─────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -845,6 +860,7 @@ class BaseScraper(abc.ABC):
             self.logger.info("Raw results: %d", len(raw_jobs))
 
             enriched = [self.enrich(j) for j in raw_jobs]
+            enriched = [j for j in enriched if not self.is_garbage_title(j.get("title"))]
             unique = self._deduplicate(enriched)
             self.logger.info("After dedup: %d", len(unique))
 
@@ -895,6 +911,7 @@ class BaseScraper(abc.ABC):
             self.logger.info("Raw results: %d", len(raw_jobs))
 
             enriched = [self.enrich(j) for j in raw_jobs]
+            enriched = [j for j in enriched if not self.is_garbage_title(j.get("title"))]
             unique = self._deduplicate(enriched)
             self.logger.info("After dedup: %d", len(unique))
 

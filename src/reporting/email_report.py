@@ -188,8 +188,11 @@ def build_subject(jobs: list[dict], recommendations: list[dict] = None) -> str:
     if asia:
         parts.append(f"{asia} Asia")
 
-    region_str = ", ".join(parts) if parts else "0"
-    subject = f"[JobSearch] {date_str} - {len(jobs)} new postdocs ({region_str})"
+    region_str = ", ".join(parts) if parts else "no new"
+    if jobs:
+        subject = f"[JobSearch] {date_str} - {len(jobs)} new postdocs ({region_str})"
+    else:
+        subject = f"[JobSearch] {date_str} - Status update (no new postings)"
     if recommendations:
         subject += f" + {len(recommendations)} PI recommendations"
     return subject
@@ -345,17 +348,13 @@ def send_report(
     """
     raw_jobs = get_new_jobs_since(since)
     if not raw_jobs:
-        logger.info("No new jobs since %s, skipping email", since)
-        return False
-
-    # Filter out irrelevant fields (physics, engineering, clinical, etc.)
-    jobs = [j for j in raw_jobs if _is_relevant(j)]
-    logger.info("Email relevance filter: %d → %d jobs (excluded %d irrelevant)",
-                len(raw_jobs), len(jobs), len(raw_jobs) - len(jobs))
-
-    if not jobs:
-        logger.info("No relevant jobs after filtering, skipping email")
-        return False
+        logger.info("No new jobs since %s, sending status-only email", since)
+        jobs = []
+    else:
+        # Filter out irrelevant fields (physics, engineering, clinical, etc.)
+        jobs = [j for j in raw_jobs if _is_relevant(j)]
+        logger.info("Email relevance filter: %d → %d jobs (excluded %d irrelevant)",
+                    len(raw_jobs), len(jobs), len(raw_jobs) - len(jobs))
 
     recommendations = get_recommended_pis(min_score=0.5) if include_recommendations else []
 

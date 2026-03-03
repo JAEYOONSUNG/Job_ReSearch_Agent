@@ -155,7 +155,7 @@ class JobsAcKrScraper(BaseScraper):
                 "div.board-view, div.detail-content, article"
             )
             if desc_el:
-                job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+                job["description"] = desc_el.get_text(separator="\n", strip=True)[:5000]
 
             # Institute if missing
             if not job.get("institute"):
@@ -183,6 +183,10 @@ class JobsAcKrScraper(BaseScraper):
                             el.get_text(strip=True)
                         )
                         break
+
+            # Extract structured Korean fields (department, PI, requirements, etc.)
+            from src.scrapers.korean_jobs import _extract_korean_fields
+            _extract_korean_fields(soup, job)
 
         except Exception:
             self.logger.debug("Could not enrich detail page: %s", url)

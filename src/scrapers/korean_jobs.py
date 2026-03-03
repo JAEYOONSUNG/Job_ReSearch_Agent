@@ -388,22 +388,7 @@ class KoreanJobsScraper(BaseScraper):
         """KAIST recruitment — faculty & researcher positions."""
         jobs: list[dict[str, Any]] = []
 
-        # Faculty recruitment page
-        try:
-            resp = self.fetch("https://www.kaist.ac.kr/kr/html/footer/0811.html")
-            soup = BeautifulSoup(resp.text, "html.parser")
-            rows = soup.select("table tbody tr, div.list-item, ul li")
-            if not rows:
-                rows = self._find_job_links(soup, "https://www.kaist.ac.kr", r"footer|view|detail|recruit")
-            for row in rows:
-                job = self._parse_generic_row(row, "https://www.kaist.ac.kr", "kaist")
-                if job:
-                    job["institute"] = job.get("institute") or "KAIST"
-                    jobs.append(job)
-        except Exception:
-            self.logger.debug("KAIST faculty page failed")
-
-        # Staff/researcher recruitment portal
+        # Staff/researcher recruitment portal (primary — structured job listings)
         jobs.extend(self._scrape_recruitment_kr_portal(
             "https://kaist.recruitment.kr/app/jobnotice/list",
             "kaist",
@@ -606,37 +591,63 @@ class KoreanJobsScraper(BaseScraper):
         if not title or len(title) < 3:
             return None
 
+        # Strip "종료" (closed) prefix
+        title = re.sub(r"^종료\s*", "", title).strip()
+        # Strip trailing "새글" / "첨부파일 있음" noise
+        title = re.sub(r"새글$|첨부파일\s*있음$|new$", "", title, flags=re.IGNORECASE).strip()
+
+        # Reject invalid titles (navigation, results, non-job)
+        if not _is_valid_korean_job_title(title):
+            return None
+
         href = link.get("href", "")
         url = urljoin(base_url, href) if href else None
         if not url:
             return None
 
-        # Institute
+        # Reject non-content URLs (javascript, anchors, login, etc.)
+        if any(x in url.lower() for x in ("javascript:", "mailto:", "login", "signin", "#")):
+            return None
+
+        # Institute — use class-specific selectors only (not positional td:nth-child)
         inst_el = row.select_one(
             "td.company, td.institute, span.company, span.institute, "
-            "div.company, .org-name, td:nth-child(2), td:nth-child(3)"
+            "div.company, .org-name"
         )
         institute = None
         if inst_el and inst_el != link:
             inst_text = inst_el.get_text(strip=True)
-            if inst_text and inst_text != title:
+            # Reject if it looks like a date (e.g., "2026. 2. 27.")
+            if inst_text and inst_text != title and not _looks_like_date(inst_text):
                 institute = inst_text
 
         # Department
         dept_el = row.select_one(
-            "td.department, span.department, div.dept, td.field"
+            "td.department, span.department, div.dept"
         )
         department = dept_el.get_text(strip=True) if dept_el else None
 
-        # Deadline
+        # Deadline — try class-specific selectors first
         date_el = row.select_one(
-            "td.date, td.deadline, span.date, span.deadline, "
-            ".period, td:last-child"
+            "td.date, td.deadline, span.date, span.deadline, .period"
         )
         deadline = None
         if date_el:
             date_text = date_el.get_text(strip=True)
             deadline = _parse_korean_date(date_text)
+
+        # Fallback: scan all <td> elements for date-like text (last date = deadline)
+        if not deadline:
+            for td in reversed(row.select("td")):
+                if td == link or td == inst_el:
+                    continue
+                td_text = td.get_text(strip=True)
+                if len(td_text) > 30:
+                    continue  # Too long to be a date cell
+                parsed = _parse_korean_date(td_text)
+                if parsed:
+                    deadline = parsed
+                    break
 
         # Field
         field_el = row.select_one("td.field, td.category, span.category")
@@ -656,7 +667,8 @@ class KoreanJobsScraper(BaseScraper):
     def _enrich_korean_detail(
         self, jobs: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Fetch detail pages for the top N jobs to get full descriptions."""
+        """Fetch detail pages for the top N jobs to get full descriptions
+        and structured Korean fields (department, PI, requirements, etc.)."""
         enriched: list[dict[str, Any]] = []
 
         for job in jobs[:DETAIL_LIMIT]:
@@ -668,7 +680,7 @@ class KoreanJobsScraper(BaseScraper):
                 resp = self.fetch(url)
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Description: try common detail selectors
+                # ── Description ──
                 desc_el = soup.select_one(
                     "div.content, div.view-content, div.board-view, "
                     "div.detail-content, div.recruit-view, "
@@ -676,37 +688,11 @@ class KoreanJobsScraper(BaseScraper):
                 )
                 if desc_el:
                     job["description"] = desc_el.get_text(
-                        separator=" ", strip=True
-                    )[:3000]
+                        separator="\n", strip=True
+                    )[:5000]
 
-                # Institute if missing
-                if not job.get("institute"):
-                    for sel in (
-                        "th:contains('기관') + td",
-                        "th:contains('대학') + td",
-                        "th:contains('연구소') + td",
-                        "span.company",
-                        "div.company-name",
-                    ):
-                        el = soup.select_one(sel)
-                        if el:
-                            job["institute"] = el.get_text(strip=True)
-                            break
-
-                # Deadline if missing
-                if not job.get("deadline"):
-                    for sel in (
-                        "th:contains('마감') + td",
-                        "th:contains('접수기간') + td",
-                        "th:contains('Deadline') + td",
-                        "span.deadline",
-                    ):
-                        el = soup.select_one(sel)
-                        if el:
-                            parsed = _parse_korean_date(el.get_text(strip=True))
-                            if parsed:
-                                job["deadline"] = parsed
-                                break
+                # ── Extract structured fields from Korean table/detail layout ──
+                _extract_korean_fields(soup, job)
 
             except Exception:
                 self.logger.debug("Detail fetch failed: %s", url)
@@ -721,26 +707,415 @@ class KoreanJobsScraper(BaseScraper):
 # ── Module-level helpers ──────────────────────────────────────────────────
 
 
+# ── Korean title / content validation ─────────────────────────────────────
+
+# Navigation/menu items, page elements, and non-job content
+_KOREAN_GARBAGE_TITLES = {
+    # Navigation / site elements
+    "상품소개", "채용정보", "채용안내", "오늘마감", "유형별채용정보",
+    "설립이념", "학교현황", "조직안내", "비전2031", "비전",
+    "정보공개", "연구개발", "안전정보", "소통마당", "공지사항",
+    "인재채용", "오시는길", "사이트맵", "이용약관", "개인정보",
+    "주요사업", "기관소개", "연혁", "인사말", "미션", "윤리경영",
+    "찾아오시는길", "관련사이트", "고객센터", "자주묻는질문",
+    "이메일무단수집거부", "뉴스레터", "공개채용", "채용절차",
+    "분류별채용정보", "연구원의길", "교수의길", "임용상담실",
+    "임용후기", "등록/수정일순", "연구비정보", "평가심사",
+    "장학금·공모전", "전문교육", "학술행사", "병역특례",
+    "글로벌 가치창출 선도대학", "과학기술 혁신의 현장",
+    "뷰페이지로 이동",
+    # English navigation
+    "support systems for international researchers",
+    "annual r&d report", "research and entrepreneurship",
+    "educational opportunities",
+}
+
+# Patterns in titles that indicate non-job content
+_KOREAN_GARBAGE_PATTERNS = [
+    r"^전체\d+건$",           # "전체709건" — count label
+    r"^\d+$",                 # bare numbers
+    r"전형\s*결과",           # "전형 결과" — selection results
+    r"합격자\s*안내",         # "합격자 안내" — acceptance notice
+    r"필기전형\s*결과",       # exam results
+    r"서류전형\s*결과",       # document screening results
+    r"최종\s*결과\s*안내",    # final results
+    r"전형\s*일정\s*안내",    # schedule notice
+    r"친인척\s*채용",         # nepotism disclosure
+    r"인터뷰$",              # interview articles ("브만사 인터뷰")
+    r"^분류별",              # category nav items
+    r"의\s*길$",             # "연구원의길", "교수의길"
+    r"시설관리직",           # facility management
+    r"시간제상담사",         # part-time counselor
+    r"^@|@kaist|@snu",      # email addresses as titles
+]
+
+# Positive indicators — titles that ARE job postings
+_KOREAN_JOB_INDICATORS = [
+    "채용", "공고", "모집", "연구원", "박사", "포스닥", "postdoc",
+    "researcher", "fellow", "scientist", "professor", "교수",
+    "recruit", "position", "opening", "vacancy",
+]
+
+
+def _is_valid_korean_job_title(title: str) -> bool:
+    """Return True if the title looks like an actual job posting."""
+    t = title.strip()
+    if not t:
+        return False
+
+    t_lower = t.lower()
+
+    # Reject exact garbage matches
+    if t_lower in _KOREAN_GARBAGE_TITLES:
+        return False
+
+    # Reject garbage patterns
+    for pat in _KOREAN_GARBAGE_PATTERNS:
+        if re.search(pat, t):
+            return False
+
+    # Very short titles (< 5 chars for Korean, < 8 for English-only)
+    has_korean = bool(re.search(r"[\uac00-\ud7a3]", t))
+    if has_korean and len(t) < 5:
+        return False
+    if not has_korean and len(t) < 8:
+        return False
+
+    # If title has a positive indicator, accept it
+    if any(kw in t_lower for kw in _KOREAN_JOB_INDICATORS):
+        return True
+
+    # Reject very short Korean-only titles without job indicators (likely nav items)
+    if has_korean and len(t) <= 10:
+        return False
+
+    return True
+
+
+def _looks_like_date(text: str) -> bool:
+    """Return True if text looks like a date string, not an institute name."""
+    text = text.strip().rstrip(".")
+    # "2026. 2. 27" or "2026.02.27" or "2026-02-27"
+    if re.match(r"^\d{4}\s*[.\-/]\s*\d{1,2}\s*[.\-/]\s*\d{1,2}\.?$", text):
+        return True
+    # "2026년 3월 15일"
+    if re.search(r"\d{4}\s*년", text):
+        return True
+    return False
+
+
+def _extract_korean_fields(soup: BeautifulSoup, job: dict[str, Any]) -> None:
+    """Extract structured fields from Korean detail pages.
+
+    Korean job boards typically use <table> layouts with <th>/<td> pairs
+    or <dt>/<dd> pairs.  This function scans for Korean header labels
+    and fills in missing job dict fields.
+    """
+    # Build a header→value map from all <th>+<td> and <dt>+<dd> pairs
+    kv: list[tuple[str, str]] = []
+    for th in soup.select("th"):
+        td = th.find_next_sibling("td")
+        if td:
+            kv.append((th.get_text(strip=True), td.get_text(separator=" ", strip=True)))
+    for dt in soup.select("dt"):
+        dd = dt.find_next_sibling("dd")
+        if dd:
+            kv.append((dt.get_text(strip=True), dd.get_text(separator=" ", strip=True)))
+
+    for header, value in kv:
+        if not value or len(value) < 2:
+            continue
+        h = header.strip()
+
+        # ── Institute / 기관 ──
+        if not job.get("institute") and re.search(
+            r"기관|소속|대학|연구소|회사|institution|organization", h, re.IGNORECASE
+        ):
+            job["institute"] = value[:200]
+
+        # ── Department / 부서 ──
+        elif not job.get("department") and re.search(
+            r"부서|학과|학부|전공|분야|센터|연구단|소속\s*부서|department|division|center",
+            h, re.IGNORECASE,
+        ):
+            job["department"] = value[:200]
+
+        # ── Field / 연구분야 ──
+        elif not job.get("field") and re.search(
+            r"연구\s*분야|전문\s*분야|연구\s*영역|research\s*field|research\s*area",
+            h, re.IGNORECASE,
+        ):
+            job["field"] = value[:300]
+
+        # ── PI name / 연구책임자 ──
+        elif not job.get("pi_name") and re.search(
+            r"책임자|지도\s*교수|연구\s*책임|PI|supervisor|principal\s*investigator"
+            r"|담당\s*교수|지도\s*위원",
+            h, re.IGNORECASE,
+        ):
+            # Clean: strip phone/email from PI value
+            pi = re.split(r"[,;/]|\s*\(", value)[0].strip()
+            if 2 <= len(pi) <= 40:
+                job["pi_name"] = pi
+
+        # ── Deadline / 마감일 ──
+        elif not job.get("deadline") and re.search(
+            r"마감|접수\s*기간|모집\s*기간|지원\s*기한|deadline|closing|접수\s*마감",
+            h, re.IGNORECASE,
+        ):
+            parsed = _parse_korean_date(value)
+            if parsed:
+                job["deadline"] = parsed
+
+        # ── Salary / 급여 ──
+        elif not job.get("conditions") and re.search(
+            r"급여|보수|연봉|처우|salary|compensation|pay|대우",
+            h, re.IGNORECASE,
+        ):
+            job.setdefault("_salary", value[:300])
+
+        # ── Duration / 기간 ──
+        elif re.search(
+            r"계약\s*기간|임용\s*기간|근무\s*기간|기간|duration|term|period",
+            h, re.IGNORECASE,
+        ):
+            job.setdefault("_duration", value[:200])
+
+        # ── Contract type / 근무형태 ──
+        elif re.search(
+            r"근무\s*형태|고용\s*형태|계약\s*형태|직종|employment\s*type|contract\s*type",
+            h, re.IGNORECASE,
+        ):
+            job.setdefault("_contract_type", value[:200])
+
+        # ── Requirements / 자격요건 ──
+        elif not job.get("requirements") and re.search(
+            r"자격|요건|조건|우대|필요\s*역량|지원\s*자격|requirement|qualification",
+            h, re.IGNORECASE,
+        ):
+            job["requirements"] = value[:2000]
+
+        # ── Application materials / 제출서류 ──
+        elif not job.get("application_materials") and re.search(
+            r"제출\s*서류|지원\s*서류|접수\s*방법|지원\s*방법|구비\s*서류"
+            r"|application|how\s*to\s*apply|documents",
+            h, re.IGNORECASE,
+        ):
+            job["application_materials"] = value[:500]
+
+        # ── Contact / 문의 ──
+        elif not job.get("contact_email") and re.search(
+            r"문의|연락처|담당자|contact|email|이메일", h, re.IGNORECASE
+        ):
+            # Try to extract email from value
+            email_m = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", value)
+            if email_m:
+                job["contact_email"] = email_m.group(0)
+
+    # ── Build conditions from salary/duration/contract_type ──
+    if not job.get("conditions"):
+        parts = []
+        if job.get("_salary"):
+            parts.append(f"급여: {job.pop('_salary')}")
+        if job.get("_duration"):
+            parts.append(f"기간: {job.pop('_duration')}")
+        if job.get("_contract_type"):
+            parts.append(f"근무형태: {job.pop('_contract_type')}")
+        if parts:
+            job["conditions"] = " | ".join(parts)
+    else:
+        # Clean up temp keys
+        job.pop("_salary", None)
+        job.pop("_duration", None)
+        job.pop("_contract_type", None)
+
+    # ── Fallback: extract keywords from description ──
+    desc = job.get("description", "")
+    if not job.get("keywords") and desc:
+        kws = _extract_korean_keywords(desc)
+        if kws:
+            job["keywords"] = ", ".join(kws)
+
+    # ── Fallback: extract PI from description patterns ──
+    if not job.get("pi_name") and desc:
+        pi = _extract_korean_pi(desc)
+        if pi:
+            job["pi_name"] = pi
+
+    # ── Fallback: extract field from title ──
+    if not job.get("field") and job.get("title"):
+        field = _infer_korean_field(job["title"], desc)
+        if field:
+            job["field"] = field
+
+    # ── Fallback: parse institute/department from Korean title ──
+    title = job.get("title") or ""
+    if not job.get("institute") and title:
+        inst, dept = _parse_institute_from_title(title)
+        if inst:
+            job["institute"] = inst
+        if dept and not job.get("department"):
+            job["department"] = dept
+
+    # ── Fallback: extract deadline from description text ──
+    if not job.get("deadline") and desc:
+        for pat in [
+            r"(?:접수\s*기간|모집\s*기간)\s*[:\s]*\d{4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2}"
+            r"[^~]*~\s*(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})",
+            r"(?:마감|지원\s*기한|접수\s*마감)\s*[:\s]*(\d{4})[.\s\-/]*(\d{1,2})[.\s\-/]*(\d{1,2})",
+            r"(?:deadline|closing\s*date)\s*[:\s]*(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})",
+        ]:
+            m = re.search(pat, desc, re.IGNORECASE)
+            if m:
+                try:
+                    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    job["deadline"] = f"{y:04d}-{mo:02d}-{d:02d}"
+                    break
+                except (ValueError, IndexError):
+                    pass
+
+
+# Patterns to extract institute name from beginning of Korean job titles
+_TITLE_INSTITUTE_PATTERNS = [
+    # "한국○○연구원" or "○○연구원/연구소/연구센터"
+    r"^((?:한국)?[\w가-힣]+(?:연구원|연구소|연구센터))\s",
+    # "○○대학교" or "○○대학"
+    r"^([\w가-힣]+(?:대학교|대학))\s",
+    # Known English acronyms at start
+    r"^(KAIST|POSTECH|SNU|GIST|DGIST|UNIST|IBS)\s",
+    # "국립○○원" / "○○진흥원" / "○○재단" etc.
+    r"^((?:국립)?[\w가-힣]+(?:원|재단|공단|기구))\s",
+]
+
+_TITLE_DEPT_PATTERNS = [
+    r"([\w가-힣]+(?:학과|공학과|과학과|학부|대학원|센터|연구단|사업단))\s",
+]
+
+
+def _parse_institute_from_title(title: str) -> tuple[str | None, str | None]:
+    """Extract institute and optionally department from Korean title."""
+    for pat in _TITLE_INSTITUTE_PATTERNS:
+        m = re.search(pat, title)
+        if m:
+            inst = m.group(1).strip()
+            # Try to find department in remaining text
+            rest = title[m.end():]
+            dept = None
+            for dpat in _TITLE_DEPT_PATTERNS:
+                dm = re.search(dpat, rest)
+                if dm:
+                    dept = dm.group(1).strip()
+                    break
+            return inst, dept
+    return None, None
+
+
+def _extract_korean_keywords(text: str) -> list[str]:
+    """Extract research keywords from Korean text."""
+    found = []
+    keywords_kr = [
+        "합성생물학", "유전체", "단백질공학", "CRISPR", "유전자편집",
+        "대사공학", "미생물", "효소공학", "바이오", "분자생물학",
+        "시스템생물학", "생물정보학", "마이크로바이옴", "세포공학",
+        "극한미생물", "고세균", "발효", "나노바이오", "세포치료",
+        "유전공학", "NGS", "오믹스", "생화학", "약학", "생명과학",
+        "생명공학", "화학생물학", "구조생물학",
+    ]
+    text_lower = text.lower()
+    for kw in keywords_kr:
+        if kw.lower() in text_lower:
+            found.append(kw)
+    # Also detect English keywords commonly appearing in Korean postings
+    en_keywords = [
+        "synthetic biology", "CRISPR", "Cas9", "protein engineering",
+        "directed evolution", "metabolic engineering", "genome engineering",
+        "bioinformatics", "systems biology", "molecular biology",
+        "microbiology", "enzyme engineering", "microbiome",
+        "high-throughput screening", "cell-free", "NGS",
+    ]
+    for kw in en_keywords:
+        if kw.lower() in text_lower and kw not in found:
+            found.append(kw)
+    return found
+
+
+def _extract_korean_pi(text: str) -> str | None:
+    """Extract PI name from Korean text patterns."""
+    patterns = [
+        # "연구책임자: 홍길동" or "지도교수 : 김철수"
+        r"(?:연구\s*책임자|지도\s*교수|담당\s*교수|PI)\s*[:\s]\s*([가-힣]{2,4})",
+        # "홍길동 교수" (name + title) in context
+        r"([가-힣]{2,4})\s*(?:교수|박사|연구원|선생)(?:님)?(?:의?\s*(?:연구실|랩|Lab))",
+        # English PI patterns in Korean text
+        r"(?:PI|Supervisor|Prof\.?|Dr\.?)\s*[:\s]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            name = m.group(1).strip()
+            if len(name) >= 2:
+                return name
+    return None
+
+
+def _infer_korean_field(title: str, desc: str) -> str | None:
+    """Infer research field from Korean title/description."""
+    blob = f"{title} {desc[:500]}".lower()
+    field_map = [
+        (r"합성\s*생물|synthetic\s*bio", "Synthetic Biology"),
+        (r"단백질\s*공학|protein\s*eng", "Protein Engineering"),
+        (r"유전체|genome|genomics", "Genomics"),
+        (r"CRISPR|유전자\s*편집|gene\s*edit", "Gene Editing"),
+        (r"대사\s*공학|metabolic\s*eng", "Metabolic Engineering"),
+        (r"미생물|microbio", "Microbiology"),
+        (r"효소\s*공학|enzyme\s*eng", "Enzyme Engineering"),
+        (r"생물\s*정보|bioinformatics", "Bioinformatics"),
+        (r"시스템\s*생물|systems\s*bio", "Systems Biology"),
+        (r"분자\s*생물|molecular\s*bio", "Molecular Biology"),
+        (r"세포\s*생물|cell\s*bio", "Cell Biology"),
+        (r"구조\s*생물|structural\s*bio", "Structural Biology"),
+        (r"화학\s*생물|chemical\s*bio", "Chemical Biology"),
+        (r"생명\s*공학|biotechnology", "Biotechnology"),
+        (r"생명\s*과학|life\s*science", "Life Sciences"),
+        (r"약학|pharm", "Pharmacology"),
+        (r"면역|immun", "Immunology"),
+        (r"신경|neuro", "Neuroscience"),
+        (r"발효|ferment", "Fermentation"),
+        (r"바이오|bio", "Biology"),
+    ]
+    for pat, field in field_map:
+        if re.search(pat, blob, re.IGNORECASE):
+            return field
+    return None
+
+
 def _parse_korean_date(text: str | None) -> str | None:
-    """Parse Korean-style dates: '2026.03.15', '2026-03-15', '2026년 3월 15일'."""
+    """Parse Korean-style dates: '2026.03.15', '2026-03-15', '2026년 3월 15일'.
+
+    For date ranges like '2026.02.26 ~ 2026.03.08', returns the END date
+    (the deadline), not the start date.
+    """
     if not text:
         return None
     text = text.strip()
 
-    # 2026.03.15 or 2026-03-15 or 2026/03/15
-    m = re.search(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", text)
-    if m:
+    # Date range: "2026.02.26 ~ 2026.03.08" → use the LAST date (deadline)
+    all_matches = re.findall(r"(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})", text)
+    if all_matches:
+        # Use the last date in the string (= deadline / end date)
+        y, m, d = all_matches[-1]
         try:
-            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            dt = datetime(int(y), int(m), int(d))
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             pass
 
     # 2026년 3월 15일
-    m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
-    if m:
+    all_kr = re.findall(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
+    if all_kr:
+        y, m, d = all_kr[-1]
         try:
-            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            dt = datetime(int(y), int(m), int(d))
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             pass

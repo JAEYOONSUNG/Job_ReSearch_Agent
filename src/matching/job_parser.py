@@ -137,6 +137,11 @@ _REQUIREMENTS_HEADERS = [
     r"you (?:should|must|will) have\s*[:.]",
     r"candidates? should\s*[:.]",
     r"(?:your )?profile\s*[:.]",
+    # Korean
+    r"자격\s*(?:요건|조건|사항)\s*[:.]?",
+    r"지원\s*자격\s*[:.]?",
+    r"우대\s*(?:사항|조건)\s*[:.]?",
+    r"필요\s*역량\s*[:.]?",
 ]
 
 _CONDITIONS_HEADERS = [
@@ -150,6 +155,11 @@ _CONDITIONS_HEADERS = [
     r"(?:employment )?conditions?\s*[:.]",
     r"(?:working )?hours?\s*[:.]",
     r"(?:the position|this (?:is a|role))\s*[:.]",
+    # Korean
+    r"(?:급여|보수|연봉|처우|대우)\s*[:.]?",
+    r"근무\s*조건\s*[:.]?",
+    r"계약\s*(?:기간|조건)\s*[:.]?",
+    r"복리\s*후생\s*[:.]?",
 ]
 
 _DESCRIPTION_HEADERS = [
@@ -158,6 +168,10 @@ _DESCRIPTION_HEADERS = [
     r"(?:project|research)\s+(?:description|summary|overview)\s*[:.]",
     r"(?:the )?(?:research|project|work)\s*[:.]",
     r"background\s*[:.]",
+    # Korean
+    r"(?:직무|업무)\s*(?:내용|설명)\s*[:.]?",
+    r"연구\s*(?:내용|분야|개요)\s*[:.]?",
+    r"모집\s*(?:내용|분야)\s*[:.]?",
 ]
 
 
@@ -705,7 +719,7 @@ def extract_pi_from_title(title: str) -> Optional[str]:
     return None
 
 
-def extract_section(text: str, header_patterns: list[str], max_chars: int = 1500) -> Optional[str]:
+def extract_section(text: str, header_patterns: list[str], max_chars: int = 5000) -> Optional[str]:
     """Extract the text following a section header.
 
     Looks for a header matching one of *header_patterns* and returns everything
@@ -729,6 +743,10 @@ def extract_section(text: str, header_patterns: list[str], max_chars: int = 1500
             r"Application|About|Contact|Deadline|Duration|Benefits?|"
             r"Responsibilities?|Key tasks?|Your (?:profile|tasks?)|"
             r"What we offer|The position|Starting date)\s*[:.]",
+            # Korean section boundaries
+            r"\n\s*(?:자격\s*(?:요건|조건)|지원\s*자격|우대\s*사항|제출\s*서류|"
+            r"급여|보수|처우|근무\s*조건|접수\s*방법|지원\s*방법|문의|연락처|"
+            r"기타\s*사항|연구\s*내용|모집\s*분야|근무\s*기간)\s*[:.]?",
         ]
         end_pos = len(remaining)
         for ep in end_patterns:
@@ -888,7 +906,7 @@ def extract_keywords(text: str) -> list[str]:
 
 def extract_job_description(text: str) -> Optional[str]:
     """Extract the main job/research description section."""
-    return extract_section(text, _DESCRIPTION_HEADERS, max_chars=2000)
+    return extract_section(text, _DESCRIPTION_HEADERS, max_chars=5000)
 
 
 # ---------------------------------------------------------------------------
@@ -1052,7 +1070,7 @@ def parse_structured_description(text: str) -> dict[str, str]:
         next_start = positions[i + 1][0] if i + 1 < len(positions) else len(text)
         section_text = text[end:next_start].strip()
         if section_text and len(section_text) > 10:
-            result[name] = section_text[:2000]
+            result[name] = section_text[:5000]
 
     return result
 

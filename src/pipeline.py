@@ -4,6 +4,8 @@ Uses asyncio for concurrent scraper execution when running in parallel mode.
 Each scraper runs as an independent coroutine with per-scraper timeouts.
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import logging
@@ -608,6 +610,8 @@ def main() -> None:
     parser.add_argument("--summary", action="store_true", help="Print text summary")
     parser.add_argument("--export-only", action="store_true", help="Only export Excel")
     parser.add_argument("--backfill-pi", action="store_true", help="Backfill PI URLs for existing jobs")
+    parser.add_argument("--full-refresh", action="store_true",
+                        help="Full refresh: reset all statuses, export complete list")
     parser.add_argument("--sequential", action="store_true", help="Run scrapers sequentially (debug mode)")
     parser.add_argument("--skip-pi-lookup", action="store_true", help="Skip PI URL enrichment (faster)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
@@ -623,7 +627,9 @@ def main() -> None:
         logger.info("Backfill result: %s", result)
 
     if args.export_only:
-        run_report(send_email=False)
+        from src.reporting.excel_export import export_to_excel
+        excel_path = export_to_excel(full_refresh=args.full_refresh)
+        logger.info("Excel exported to %s", excel_path)
         return
 
     if args.weekly:
@@ -650,7 +656,7 @@ def main() -> None:
     # Export Excel (always)
     try:
         from src.reporting.excel_export import export_to_excel
-        excel_path = export_to_excel()
+        excel_path = export_to_excel(full_refresh=args.full_refresh)
         logger.info("Excel exported to %s", excel_path)
     except Exception as e:
         logger.error("Excel export failed: %s", e, exc_info=True)

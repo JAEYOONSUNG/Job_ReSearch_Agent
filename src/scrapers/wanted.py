@@ -204,7 +204,7 @@ class WantedScraper(BaseScraper):
                 "div[class*='JobDescription']"
             )
             if desc_el:
-                job["description"] = desc_el.get_text(separator=" ", strip=True)[:2000]
+                job["description"] = desc_el.get_text(separator="\n", strip=True)[:5000]
 
             # Deadline (Wanted jobs usually don't have deadlines, but check)
             deadline_el = soup.select_one("span.deadline, p.deadline")
@@ -213,6 +213,10 @@ class WantedScraper(BaseScraper):
                 m = re.search(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}", raw)
                 if m:
                     job["deadline"] = m.group(0).replace(".", "-").replace("/", "-")
+
+            # Extract structured Korean fields (department, PI, requirements, etc.)
+            from src.scrapers.korean_jobs import _extract_korean_fields
+            _extract_korean_fields(soup, job)
 
         except Exception:
             self.logger.debug("Could not enrich Wanted detail: %s", url)

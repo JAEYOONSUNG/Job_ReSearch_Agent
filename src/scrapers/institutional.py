@@ -471,15 +471,24 @@ class InstitutionalPortalScraper(BaseScraper):
     # ── Broad Institute ────────────────────────────────────────────────
 
     def _scrape_broad(self) -> list[dict[str, Any]]:
-        """Scrape Broad Institute careers page for research/postdoc positions."""
+        """Scrape Broad Institute careers page for research/postdoc positions.
+
+        Uses Avature ATS at broadinstitute.avature.net. Fetches listing pages
+        with pagination, then enriches each detail page with Broad-specific
+        selectors.
+        """
         base_url = "https://broadinstitute.avature.net/careers/SearchJobs"
         jobs: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
 
-        for offset in range(0, 100, 50):
+        # Avature caps at 6 results per page regardless of jobRecordsPerPage
+        page_size = 6
+        for offset in range(0, 300, page_size):
             try:
                 resp = self.fetch(
                     base_url,
-                    params={"jobRecordsPerPage": "50", "jobOffset": str(offset)},
+                    params={"jobRecordsPerPage": str(page_size),
+                            "jobOffset": str(offset)},
                     timeout=30,
                 )
             except Exception:
@@ -487,61 +496,140 @@ class InstitutionalPortalScraper(BaseScraper):
                 break
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.select('h3 > a[href*="JobDetail"]')
-            if not links:
-                # Also try other selectors
-                links = soup.select('a[href*="JobDetail"]')
+            # Filter to actual job title links (not share/social links)
+            links = [
+                a for a in soup.select('a[href*="JobDetail"]')
+                if a.get("href", "").startswith("http")
+                and "broadinstitute.avature.net" in a.get("href", "")
+                and len(a.get_text(strip=True)) > 10
+            ]
             if not links:
                 break
 
+            page_new = 0
             for link in links:
                 title = link.get_text(strip=True)
                 href = link.get("href", "")
                 if not title or not href:
                     continue
                 detail_url = urljoin(base_url, href)
+                if detail_url in seen_urls:
+                    continue
 
                 # Filter: only research/postdoc positions
                 title_lower = title.lower()
                 if not any(kw in title_lower for kw in (
                     "research", "postdoc", "scientist", "fellow",
                     "computational", "bioinformatics", "data science",
+                    "associate",
                 )):
                     continue
 
-                # Try to get date/location from sibling elements
-                posted_date = None
-                parent = link.parent
-                if parent:
-                    following_p = parent.find_next_sibling("p")
-                    if following_p:
-                        text = following_p.get_text(strip=True)
-                        # Try to extract date
-                        date_match = re.search(
-                            r"(\d{1,2}/\d{1,2}/\d{4}|\w+ \d{1,2},\s*\d{4})", text
-                        )
-                        if date_match:
-                            posted_date = _parse_date(date_match.group(1))
-
+                seen_urls.add(detail_url)
+                page_new += 1
                 jobs.append({
                     "title": title,
                     "url": detail_url,
                     "institute": "Broad Institute of MIT and Harvard",
                     "country": "United States",
-                    "posted_date": posted_date,
                     "source": self.name,
                 })
 
-            # If fewer than 50 results, no more pages
-            if len(links) < 50:
+            # If no new links found on this page, we're done
+            if page_new == 0 and len(links) < page_size:
                 break
 
-        # Enrich with detail pages
+        self.logger.info("Broad: found %d job links", len(jobs))
+
+        # Enrich with detail pages using Broad-specific enrichment
         if jobs:
             jobs = self._parallel_enrich(
-                jobs, self._enrich_detail_generic, max_workers=3, limit=20,
+                jobs, self._enrich_detail_broad, max_workers=3, limit=30,
             )
         return jobs
+
+    def _enrich_detail_broad(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Enrich a Broad Institute job from its Avature detail page.
+
+        Page structure (article elements):
+        1. article.article--details.regular-fields--cols-2Z → sidebar metadata
+           (Location, Ref#, Job Family, Date published, Pay Range)
+        2. article.article--details → "Description & Requirements" (main content)
+        3. article.article--actions → Apply/Share buttons
+        """
+        url = job.get("url")
+        if not url:
+            return job
+        try:
+            resp = self.fetch(url, timeout=25)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # ── Extract main description ──
+            # Best selector: div.job__detail__fix has the richest description text
+            desc_el = soup.select_one("div.job__detail__fix")
+            if not desc_el:
+                # Fallback: the second article.article--details (without regular-fields)
+                articles = soup.select("article.article--details")
+                for art in articles:
+                    if "regular-fields" not in " ".join(art.get("class", [])):
+                        desc_el = art
+                        break
+            if not desc_el:
+                # Final fallback: main
+                desc_el = soup.select_one("main")
+
+            if desc_el:
+                desc = desc_el.get_text(separator="\n", strip=True)
+                if len(desc) > len(job.get("description") or ""):
+                    job["description"] = desc[:15000]
+
+            # ── Extract structured metadata from sidebar ──
+            metadata_art = soup.select_one(
+                "article.regular-fields--cols-2Z"
+            )
+            if metadata_art:
+                for field_div in metadata_art.select(
+                    "div.article__content__view__field"
+                ):
+                    label_el = field_div.select_one(
+                        "div.article__content__view__field__label"
+                    )
+                    value_el = field_div.select_one(
+                        "div.article__content__view__field__value"
+                    )
+                    if not label_el or not value_el:
+                        continue
+                    label = label_el.get_text(strip=True).lower()
+                    value = value_el.get_text(strip=True)
+
+                    if "date published" in label and value:
+                        # Broad uses US date format MM/DD/YYYY
+                        parsed = None
+                        for fmt in ("%m/%d/%Y", "%B %d, %Y", "%b %d, %Y",
+                                    "%d-%b-%Y"):
+                            try:
+                                parsed = datetime.strptime(
+                                    value.strip(), fmt
+                                ).strftime("%Y-%m-%d")
+                                break
+                            except ValueError:
+                                continue
+                        if not parsed:
+                            parsed = _parse_date(value)
+                        if parsed and not job.get("posted_date"):
+                            job["posted_date"] = parsed
+
+                    elif "job family" in label and value:
+                        if not job.get("department"):
+                            job["department"] = value
+
+                    elif "pay range" in label and value:
+                        if not job.get("conditions"):
+                            job["conditions"] = value
+
+        except Exception:
+            self.logger.debug("Failed to enrich Broad detail: %s", url)
+        return job
 
     # ── MPG detail enrichment ─────────────────────────────────────────
 
@@ -654,75 +742,113 @@ class InstitutionalPortalScraper(BaseScraper):
     # ── Wyss Institute ────────────────────────────────────────────────
 
     def _scrape_wyss(self) -> list[dict[str, Any]]:
-        """Scrape Wyss Institute for Biologically Inspired Engineering careers."""
-        url = "https://wyss.harvard.edu/careers/"
+        """Scrape Wyss Institute for Biologically Inspired Engineering careers.
+
+        The main /careers/ page is a landing page with links to sub-pages.
+        Actual job listings are on /careers/academic/ and /careers/staff/.
+        """
         jobs: list[dict[str, Any]] = []
-        try:
-            resp = self.fetch(url, timeout=30)
-        except Exception:
-            self.logger.exception("Failed to fetch Wyss Institute careers")
-            return []
+        seen_urls: set[str] = set()
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        for page_url in (
+            "https://wyss.harvard.edu/careers/academic/",
+            "https://wyss.harvard.edu/careers/staff/",
+        ):
+            try:
+                resp = self.fetch(page_url, timeout=30)
+            except Exception:
+                self.logger.debug("Wyss: failed to fetch %s", page_url)
+                continue
 
-        # Try multiple selectors for job listings
-        items = (
-            soup.select("article.post, div.career-listing, li.career-item")
-            or soup.select("div.entry-content a[href]")
-        )
-        if not items:
-            # Fallback: find links containing research/postdoc keywords
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Job links are in <li> > <a> elements pointing to:
+            # - academicpositions.harvard.edu/postings/XXXXX
+            # - wyss.harvard.edu/job/...
             for link in soup.select("a[href]"):
-                href = link.get("href", "")
+                href = link.get("href", "").strip()
                 text = link.get_text(strip=True)
-                if not text or len(text) < 10:
-                    continue
-                text_lower = text.lower()
-                if any(kw in text_lower for kw in (
-                    "research", "postdoc", "scientist", "fellow",
-                    "computational", "bioinformatics",
-                )) and "wyss" in href.lower() or "harvard" in href.lower():
-                    detail_url = urljoin(url, href)
-                    jobs.append({
-                        "title": text,
-                        "url": detail_url,
-                        "institute": "Wyss Institute at Harvard University",
-                        "country": "United States",
-                        "source": self.name,
-                    })
-        else:
-            for item in items:
-                if item.name == "a":
-                    link = item
-                else:
-                    link = item.select_one("a[href]")
-                if not link:
+                if not href or not text or len(text) < 10:
                     continue
 
-                href = link.get("href", "")
-                title = link.get_text(strip=True)
-                if not title or len(title) < 5:
+                # Only accept actual job posting URLs
+                is_harvard_posting = "academicpositions.harvard.edu/postings/" in href
+                is_wyss_job = "/job/" in href and "wyss.harvard.edu" in href
+                if not (is_harvard_posting or is_wyss_job):
                     continue
 
-                title_lower = title.lower()
-                if not any(kw in title_lower for kw in (
-                    "research", "postdoc", "scientist", "fellow",
-                    "computational", "bioinformatics", "engineer",
-                )):
+                detail_url = urljoin(page_url, href)
+                if detail_url in seen_urls:
                     continue
+                seen_urls.add(detail_url)
 
-                detail_url = urljoin(url, href)
                 jobs.append({
-                    "title": title,
+                    "title": text,
                     "url": detail_url,
                     "institute": "Wyss Institute at Harvard University",
                     "country": "United States",
                     "source": self.name,
                 })
 
+        self.logger.info("Wyss: found %d job links", len(jobs))
+
         # Enrich with detail pages
         if jobs:
             jobs = self._parallel_enrich(
-                jobs, self._enrich_detail_generic, max_workers=3, limit=20,
+                jobs, self._enrich_detail_wyss, max_workers=3, limit=30,
             )
         return jobs
+
+    def _enrich_detail_wyss(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Enrich a Wyss job posting from Harvard Academic Positions or Wyss internal pages."""
+        url = job.get("url")
+        if not url:
+            return job
+        try:
+            resp = self.fetch(url, timeout=25)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            if "academicpositions.harvard.edu" in url:
+                # Harvard Academic Positions portal
+                # Description in main content area
+                content = (
+                    soup.select_one("#content_inner")
+                    or soup.select_one("div.posting-details")
+                    or soup.select_one("main")
+                )
+                if content:
+                    desc = content.get_text(separator="\n", strip=True)
+                    if len(desc) > len(job.get("description") or ""):
+                        job["description"] = desc[:15000]
+
+                # Extract from structured fields (dl/dt/dd pairs)
+                for dt in soup.select("dt"):
+                    label = dt.get_text(strip=True).lower()
+                    dd = dt.find_next_sibling("dd")
+                    if not dd:
+                        continue
+                    val = dd.get_text(strip=True)
+                    if "department" in label and not job.get("department"):
+                        job["department"] = val
+                    elif "contact" in label and not job.get("pi_name"):
+                        from src.matching.job_parser import extract_pi_name
+                        pi = extract_pi_name(val)
+                        if pi:
+                            job["pi_name"] = pi
+
+            else:
+                # Wyss internal job pages (wyss.harvard.edu/job/...)
+                # WordPress post content
+                content = (
+                    soup.select_one("div.entry-content")
+                    or soup.select_one("article")
+                    or soup.select_one("main")
+                )
+                if content:
+                    desc = content.get_text(separator="\n", strip=True)
+                    if len(desc) > len(job.get("description") or ""):
+                        job["description"] = desc[:15000]
+
+        except Exception:
+            self.logger.debug("Failed to enrich Wyss detail: %s", url)
+        return job

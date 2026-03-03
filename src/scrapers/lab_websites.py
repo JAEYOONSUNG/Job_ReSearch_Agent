@@ -150,7 +150,7 @@ class LabWebsiteScraper(BaseScraper):
             "country": country,
             "url": lab_url,
             "lab_url": lab_url,
-            "description": description[:2000],
+            "description": description[:15000],
             "source": self.name,
             "posted_date": datetime.utcnow().strftime("%Y-%m-%d"),
         }

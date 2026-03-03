@@ -330,7 +330,7 @@ class EuraxessScraper(BaseScraper):
                     if req_fields and req_fields.get("Education Level"):
                         req_parts.insert(0, f"Education: {req_fields['Education Level']}")
                 if req_parts:
-                    job["requirements"] = "\n".join(req_parts)[:2000]
+                    job["requirements"] = "\n".join(req_parts)[:5000]
 
             # === Work locations — get institute if still missing ===
             work_loc = self._extract_dl_fields(soup, "work-locations")
@@ -356,7 +356,7 @@ class EuraxessScraper(BaseScraper):
                                 content = content_div.get_text(separator=" ", strip=True)
                                 if content and len(content) > 10:
                                     existing = job.get("conditions") or ""
-                                    job["conditions"] = f"{existing} | {label}: {content[:300]}".strip(" |")
+                                    job["conditions"] = f"{existing} | {label}: {content[:2000]}".strip(" |")
 
             # === Parse PI from description ===
             desc = job.get("description") or ""

@@ -1,5 +1,7 @@
 """Export job data to Excel files with parsed, structured columns."""
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -383,7 +385,7 @@ def _job_to_row(job: dict) -> dict:
         cond = sections["conditions"]
 
     return {
-        "Title": _clean_text(job.get("title"), 100),
+        "Title": (job.get("title") or "").strip(),
         "PI Name": job.get("pi_name") or "",
         "Institute": institute,
         "Department": job.get("department") or "",
@@ -394,23 +396,23 @@ def _job_to_row(job: dict) -> dict:
         "Field": job.get("field") or "",
         "Keywords": job.get("keywords") or "",
         # Structured sections
-        "Position Summary": _clean_text(sections.get("summary"), 800),
-        "Responsibilities": _clean_list(sections.get("responsibilities"), 800),
-        "Preferred Qualifications": _clean_list(sections.get("preferred"), 600),
+        "Position Summary": _clean_text(sections.get("summary"), 2000),
+        "Responsibilities": _clean_list(sections.get("responsibilities"), 2000),
+        "Preferred Qualifications": _clean_list(sections.get("preferred"), 2000),
         # Requirements parsed
         "Degree Required": _parse_degree(req, desc),
         "Skills/Techniques": _parse_skills(req, desc),
-        "Requirements (Full)": _clean_list(req, 600),
+        "Requirements (Full)": _clean_list(req, 3000),
         # Conditions parsed
         "Salary": _parse_salary(cond, desc),
         "Duration": _parse_duration(cond, desc),
         "Contract Type": _parse_contract_type(cond, desc),
         "Start Date": _parse_start_date(cond, desc),
-        "Conditions (Full)": _format_salary_number(_clean_list(cond, 400)),
+        "Conditions (Full)": _format_salary_number(_clean_list(cond, 3000)),
         # Dates
         "Posted Date": job.get("posted_date") or "",
         "Deadline": job.get("deadline") or "",
-        "Application Materials": _clean_list(job.get("application_materials"), 400),
+        "Application Materials": _clean_list(job.get("application_materials"), 1000),
         # Description
         "Description": _clean_text(desc, 15000),
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
@@ -532,7 +534,7 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
 
     # Column widths (tuned per column type)
     width_map = {
-        "Title": 40, "PI Name": 18, "Institute": 25, "Department": 20,
+        "Title": 65, "PI Name": 18, "Institute": 25, "Department": 20,
         "Tier": 5, "Country": 12, "Region": 6,
         "Field": 20, "Keywords": 35,
         "Position Summary": 45, "Responsibilities": 45, "Preferred Qualifications": 40,
@@ -999,7 +1001,7 @@ def _write_summary_dashboard(
         ("Asia", asia_count),
         ("Other", other_count),
     ]
-    region_colors = [ACCENT, EMERALD, "#7C3AED", GOLD, SLATE]
+    region_colors = ["#2563EB", "#16A34A", "#9333EA", "#EA580C", "#9CA3AF"]
 
     ws.write(chart_data_row, 1, "Region", tbl_header_fmt)
     ws.write(chart_data_row, 2, "Count", tbl_header_fmt)
@@ -1026,22 +1028,23 @@ def _write_summary_dashboard(
         chart.set_title({"name": "Jobs by Region",
                          "name_font": {"name": "Calibri", "size": 12,
                                        "color": NAVY, "bold": True}})
-        chart.set_size({"width": 380, "height": 280})
+        chart.set_size({"width": 530, "height": 280})
         chart.set_legend({"position": "bottom",
                           "font": {"name": "Calibri", "size": 9}})
         chart.set_chartarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
         chart.set_plotarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
-        ws.insert_chart("E13", chart)
+        # Position one row below section title (row 13, 0-based), col E (4)
+        ws.insert_chart(13, 4, chart, {"x_offset": 0, "y_offset": 0})
 
     # ══════════════════════════════════════════════════════════════════
     # ROW 12: TIER BREAKDOWN TABLE (right side)
     # ══════════════════════════════════════════════════════════════════
     tier_row = 12
-    ws.merge_range(tier_row, 8, tier_row, 9,
+    ws.merge_range(tier_row, 10, tier_row, 11,
                    "Tier Distribution", section_title_fmt)
     tier_row += 1
-    ws.write(tier_row, 8, "Tier", tbl_header_fmt)
-    ws.write(tier_row, 9, "Count", tbl_header_fmt)
+    ws.write(tier_row, 10, "Tier", tbl_header_fmt)
+    ws.write(tier_row, 11, "Count", tbl_header_fmt)
     tier_row += 1
 
     tier_labels = [
@@ -1055,24 +1058,24 @@ def _write_summary_dashboard(
         count = tier_counts.get(t, 0)
         t_fmt = tier_fmts.get(t, tbl_row_fmt)
         num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
-        ws.write(tier_row, 8, label, t_fmt)
-        ws.write(tier_row, 9, count, num_f)
+        ws.write(tier_row, 10, label, t_fmt)
+        ws.write(tier_row, 11, count, num_f)
         tier_row += 1
 
     # Unranked row
     ranked_total = sum(tier_counts.get(t, 0) for t in (1, 2, 3, 4))
     unranked = len(all_jobs) - ranked_total
-    ws.write(tier_row, 8, "Unranked", tbl_row_alt_fmt)
-    ws.write(tier_row, 9, unranked, tbl_num_alt_fmt)
+    ws.write(tier_row, 10, "Unranked", tbl_row_alt_fmt)
+    ws.write(tier_row, 11, unranked, tbl_num_alt_fmt)
     tier_row += 1
 
     # Deadline urgency mini-table
     tier_row += 1
-    ws.merge_range(tier_row, 8, tier_row, 9,
+    ws.merge_range(tier_row, 10, tier_row, 11,
                    "Deadline Urgency", section_title_fmt)
     tier_row += 1
-    ws.write(tier_row, 8, "Window", tbl_header_fmt)
-    ws.write(tier_row, 9, "Count", tbl_header_fmt)
+    ws.write(tier_row, 10, "Window", tbl_header_fmt)
+    ws.write(tier_row, 11, "Count", tbl_header_fmt)
     tier_row += 1
 
     urgency_data = [
@@ -1099,8 +1102,8 @@ def _write_summary_dashboard(
     urgency_fmts = [urgent_fmt, soon_fmt, tbl_row_fmt, tbl_row_alt_fmt]
     for i, ((label, count), uf) in enumerate(zip(urgency_data, urgency_fmts)):
         num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
-        ws.write(tier_row, 8, label, uf)
-        ws.write(tier_row, 9, count, num_f)
+        ws.write(tier_row, 10, label, uf)
+        ws.write(tier_row, 11, count, num_f)
         tier_row += 1
 
     # ══════════════════════════════════════════════════════════════════
@@ -1123,48 +1126,52 @@ def _write_summary_dashboard(
         fields_row += 1
     field_end = fields_row - 1
 
+    # Save the section title row for chart positioning
+    fields_section_row = fields_row - len(top_fields) - 2
+
     if top_fields:
         chart2 = workbook.add_chart({"type": "bar"})
-        gradient_colors = [
-            "#1E3A5F", "#1E40AF", "#2563EB", "#3B82F6", "#60A5FA",
-            "#93C5FD", "#BFDBFE", "#DBEAFE", "#EFF6FF", "#F0F9FF",
+        vivid_blues = [
+            "#0037B3", "#0044CC", "#0055E6", "#0066FF", "#1A75FF",
+            "#3385FF", "#4D94FF", "#66A3FF", "#80B3FF", "#99C2FF",
         ]
         chart2.add_series({
             "name": "Jobs by Field",
             "categories": ["Summary Dashboard", field_start, 1, field_end, 1],
             "values": ["Summary Dashboard", field_start, 2, field_end, 2],
-            "points": [{"fill": {"color": gradient_colors[i % len(gradient_colors)]}}
+            "points": [{"fill": {"color": vivid_blues[i % len(vivid_blues)]}}
                        for i in range(len(top_fields))],
             "gap": 80,
         })
         chart2.set_title({"name": "Top Research Fields",
                           "name_font": {"name": "Calibri", "size": 12,
                                         "color": NAVY, "bold": True}})
-        chart2.set_size({"width": 520, "height": 320})
+        chart2.set_size({"width": 530, "height": 320})
         chart2.set_legend({"none": True})
         chart2.set_chartarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
         chart2.set_plotarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
         chart2.set_y_axis({"num_font": {"name": "Calibri", "size": 9, "color": TEXT_SECONDARY}})
         chart2.set_x_axis({"num_font": {"name": "Calibri", "size": 9, "color": TEXT_SECONDARY},
                            "major_gridlines": {"visible": True, "line": {"color": SUBTLE_BORDER}}})
-        ws.insert_chart(field_start, 4, chart2)
+        # Position one row below section title, col E
+        ws.insert_chart(fields_section_row + 1, 4, chart2, {"x_offset": 0, "y_offset": 0})
 
     # ══════════════════════════════════════════════════════════════════
     # TOP INSTITUTIONS TABLE (right of fields chart)
     # ══════════════════════════════════════════════════════════════════
     inst_row = fields_row - len(top_fields) - 2  # align with fields section
-    ws.merge_range(inst_row, 8, inst_row, 9,
+    ws.merge_range(inst_row, 10, inst_row, 11,
                    "Top Institutions", section_title_fmt)
     inst_row += 1
 
-    ws.write(inst_row, 8, "Institution", tbl_header_fmt)
-    ws.write(inst_row, 9, "Jobs", tbl_header_fmt)
+    ws.write(inst_row, 10, "Institution", tbl_header_fmt)
+    ws.write(inst_row, 11, "Jobs", tbl_header_fmt)
     inst_row += 1
     for i, (inst, count) in enumerate(top_institutions):
         row_f = tbl_row_alt_fmt if i % 2 else tbl_row_fmt
         num_f = tbl_num_alt_fmt if i % 2 else tbl_num_fmt
-        ws.write(inst_row, 8, inst[:35], row_f)
-        ws.write(inst_row, 9, count, num_f)
+        ws.write(inst_row, 10, inst[:35], row_f)
+        ws.write(inst_row, 11, count, num_f)
         inst_row += 1
 
     # ══════════════════════════════════════════════════════════════════
@@ -1191,15 +1198,56 @@ def _write_summary_dashboard(
 
 
 def _is_excluded(job: dict) -> bool:
-    """Return True if the job matches any EXCLUDE_KEYWORDS or EXCLUDE_TITLE_KEYWORDS."""
-    blob = " ".join(
-        (job.get(k) or "") for k in ("title", "field", "keywords", "description")
+    """Return True if the job matches any EXCLUDE_KEYWORDS or EXCLUDE_TITLE_KEYWORDS.
+
+    Keyword exclusion uses title + field + keywords only (NOT description),
+    because broad keywords like 'education' or 'history' cause massive
+    false positives when matched against free-text descriptions.
+    """
+    # Expired deadline: remove jobs whose deadline has passed
+    dl = job.get("deadline") or ""
+    if dl:
+        try:
+            if date.fromisoformat(dl) < date.today():
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # Past-year titles: "2025년", "2024년" etc. are clearly old postings
+    title_raw = job.get("title") or ""
+    current_year = date.today().year
+    for past_yr in range(current_year - 2, current_year):
+        if str(past_yr) in title_raw:
+            return True
+
+    # Stale postings: posted in a previous year with no future deadline
+    posted = job.get("posted_date") or ""
+    if posted and not dl:
+        try:
+            if date.fromisoformat(posted).year < current_year:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # Field-level exclusion: match against title + field + keywords only
+    # (NOT description — too many false positives from phrases like
+    #  "PhD in biology required", "publication history", "by law")
+    field_blob = " ".join(
+        (job.get(k) or "") for k in ("title", "field", "keywords")
     ).lower()
-    if any(kw.lower() in blob for kw in EXCLUDE_KEYWORDS):
+    if any(kw.lower() in field_blob for kw in EXCLUDE_KEYWORDS):
+        return True
+
+    # PhD/doctoral exclusion: check title only (not description)
+    title = (job.get("title") or "").lower()
+    if any(kw.lower() in title for kw in _PHD_TITLE_KEYWORDS):
+        # Exception: keep if title also says "postdoc" or "research fellow"
+        if any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
+                                     "post-doctoral", "research fellow")):
+            return False
         return True
 
     # Title-only exclusion (non-researcher positions)
-    title = (job.get("title") or "").lower()
     if any(kw.lower() in title for kw in EXCLUDE_TITLE_KEYWORDS):
         # Exception: keep if title also says "postdoc" or "research fellow"
         if any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
@@ -1215,12 +1263,35 @@ def _is_excluded(job: dict) -> bool:
                 return True
 
     # Garbage detection: titles that are too short or clearly not job postings
-    if len(title.strip()) < 10:
+    # For Korean titles, allow shorter (Korean chars are dense)
+    min_len = 4 if _has_korean(title) else 10
+    if len(title.strip()) < min_len:
         return True
     if any(pat.lower() in title for pat in GARBAGE_TITLE_PATTERNS):
         return True
 
     return False
+
+
+def _has_korean(text: str) -> bool:
+    """Return True if text contains Korean characters."""
+    return bool(re.search(r"[\uac00-\ud7a3]", text))
+
+
+# PhD/Doctoral keywords — matched against TITLE only (not description)
+_PHD_TITLE_KEYWORDS = [
+    "PhD position",
+    "PhD student",
+    "PhD fellow",
+    "doctoral position",
+    "doctoral student",
+    "doctoral researcher",
+    "doctoral fellow",
+    "doctoral grant",
+    "PhD candidate",
+    "doctoral candidate",
+    "PhD fellowship",
+]
 
 
 def _is_faculty_position(job: dict) -> bool:
@@ -1530,132 +1601,835 @@ def _mark_exported(urls: list[str]) -> None:
         )
 
 
-def export_to_excel(output_dir: Path = None) -> Path:
-    """Export job data to a multi-sheet Excel file with incremental updates.
+# ---------------------------------------------------------------------------
+# openpyxl incremental update helpers
+# ---------------------------------------------------------------------------
 
-    Incremental strategy:
-    1. Read the previous Excel to preserve all user edits (notes, reordering, etc.)
-    2. Detect user deletions → record in dismissed_urls (permanent blacklist)
-    3. Only add genuinely NEW jobs (not already in Excel, not dismissed)
-    4. Re-sort the combined data by tier and institute ranking
-    5. Write the merged result
+_HEADER_WIDTH_MAP = {
+    "Title": 65, "PI Name": 18, "Institute": 25, "Department": 20,
+    "Tier": 5, "Country": 12, "Region": 6,
+    "Field": 20, "Keywords": 35,
+    "Position Summary": 45, "Responsibilities": 45, "Preferred Qualifications": 40,
+    "Degree Required": 30, "Skills/Techniques": 30, "Requirements (Full)": 40,
+    "Salary": 18, "Duration": 18, "Contract Type": 12, "Start Date": 14,
+    "Conditions (Full)": 30,
+    "Posted Date": 11, "Deadline": 11,
+    "Application Materials": 30,
+    "Description": 50,
+    **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
+    **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
+    "Contact Email": 25,
+    **{f"Info URL {i+1}": 20 for i in range(_MAX_INFO_URLS)},
+    "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
+    "Match Score": 8, "Source": 12, "Status": 7,
+}
 
-    This ensures the user's manual work is never destroyed.
+_TIER_COLORS = {
+    "T1": {"bg": "FFF3CD", "fg": "856404", "bold": True},
+    "T2": {"bg": "CCE5FF", "fg": "004085", "bold": False},
+    "T3": {"bg": "D4EDDA", "fg": "155724", "bold": False},
+    "T4": {"bg": "E2E3E5", "fg": "383D41", "bold": False},
+    "Company": {"bg": "E8DAEF", "fg": "6C3483", "bold": True},
+}
+
+
+def _find_column_index(ws, col_name: str) -> int | None:
+    """Find 1-based column index by header name in row 1."""
+    for col in range(1, (ws.max_column or 0) + 1):
+        if ws.cell(row=1, column=col).value == col_name:
+            return col
+    return None
+
+
+def _write_openpyxl_headers(ws) -> None:
+    """Write JOB_COLUMNS as header row with formatting to a new openpyxl sheet."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill("solid", fgColor="16213e")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_align = Alignment(vertical="center")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    for col_idx, col_name in enumerate(JOB_COLUMNS, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    for col_idx, col_name in enumerate(JOB_COLUMNS, 1):
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = _HEADER_WIDTH_MAP.get(col_name, 15)
+
+    ws.freeze_panes = "A2"
+
+
+def _apply_tier_format_openpyxl(cell, tier_val: str) -> None:
+    """Apply tier-based color to an openpyxl cell."""
+    from openpyxl.styles import Font, PatternFill
+
+    fmt = _TIER_COLORS.get(str(tier_val).strip())
+    if fmt:
+        cell.fill = PatternFill("solid", fgColor=fmt["bg"])
+        cell.font = Font(color=fmt["fg"], bold=fmt["bold"])
+
+
+def _write_paper_links_openpyxl(ws, row_idx: int, job: dict) -> None:
+    """Write paper hyperlinks for a single row in an openpyxl sheet."""
+    from openpyxl.styles import Font
+
+    link_font = Font(color="0563C1", underline="single", size=9)
+
+    for prefix, key in [("Recent Paper", "recent_papers"),
+                        ("Top Cited Paper", "top_cited_papers")]:
+        papers = _parse_papers(job.get(key))
+        for i in range(min(_MAX_PAPER_COLS, len(papers))):
+            col_name = f"{prefix} {i + 1}"
+            col_idx = _find_column_index(ws, col_name)
+            if not col_idx:
+                continue
+            p = papers[i]
+            url = p.get("url", "")
+            year = p.get("year") or "?"
+            title = (p.get("title") or "Untitled")[:80]
+            cites = p.get("citation_count", 0)
+            display = f"({year}) {title} [{cites} cites]"
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.value = display
+            if url:
+                cell.hyperlink = url
+                cell.font = link_font
+
+
+def _style_new_row_openpyxl(ws, row_idx: int, job: dict) -> None:
+    """Apply formatting to a newly appended row in an openpyxl sheet."""
+    from openpyxl.styles import Font, PatternFill
+
+    # Tier formatting
+    tier_col = _find_column_index(ws, "Tier")
+    if tier_col:
+        tier_val = ws.cell(row=row_idx, column=tier_col).value
+        if tier_val:
+            _apply_tier_format_openpyxl(
+                ws.cell(row=row_idx, column=tier_col), tier_val)
+
+    # Deadline gradient
+    dl_col = _find_column_index(ws, "Deadline")
+    if dl_col:
+        dl_val = ws.cell(row=row_idx, column=dl_col).value
+        if dl_val:
+            color, days = _deadline_bg_color(str(dl_val))
+            if color:
+                ws.cell(row=row_idx, column=dl_col).fill = PatternFill(
+                    "solid", fgColor=color[1:])
+                if days < 0:
+                    ws.cell(row=row_idx, column=dl_col).font = Font(
+                        color="666666", size=9)
+                elif days <= 7:
+                    ws.cell(row=row_idx, column=dl_col).font = Font(
+                        bold=True, color="FFFFFF", size=9)
+                elif days <= 30:
+                    ws.cell(row=row_idx, column=dl_col).font = Font(
+                        color="FFFFFF", size=9)
+
+    # URL hyperlinks
+    link_font = Font(color="0563C1", underline="single")
+    for url_col_name in ("Job URL", "Job URL 2", "Lab URL", "Scholar URL",
+                         "Dept URL", "Info URL 1", "Info URL 2", "Info URL 3"):
+        col_idx = _find_column_index(ws, url_col_name)
+        if col_idx:
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val and str(val).startswith("http"):
+                ws.cell(row=row_idx, column=col_idx).hyperlink = str(val)
+                ws.cell(row=row_idx, column=col_idx).font = link_font
+
+    # Paper hyperlinks
+    _write_paper_links_openpyxl(ws, row_idx, job)
+
+    # Citizenship restriction → red Institute
+    if _has_citizenship_restriction(job):
+        inst_col = _find_column_index(ws, "Institute")
+        if inst_col:
+            ws.cell(row=row_idx, column=inst_col).font = Font(
+                color="CC0000", bold=True)
+
+
+def _update_sheet(
+    wb, sheet_name: str, region_key: str,
+    new_jobs_by_region: dict, dismissed_urls: set,
+) -> list[dict]:
+    """Incrementally update a data sheet: delete dismissed rows, append new jobs.
+
+    Returns the list of genuinely new jobs that were appended.
+    """
+    from openpyxl.utils import get_column_letter
+
+    if sheet_name not in wb.sheetnames:
+        ws = wb.create_sheet(sheet_name)
+        _write_openpyxl_headers(ws)
+    else:
+        ws = wb[sheet_name]
+
+    # 1. Collect existing URLs and identify dismissed rows
+    url_col_idx = _find_column_index(ws, "Job URL")
+    rows_to_delete = []
+    existing_urls: set[str] = set()
+
+    if url_col_idx:
+        for row_idx in range(2, (ws.max_row or 1) + 1):
+            url_val = ws.cell(row=row_idx, column=url_col_idx).value
+            if url_val:
+                url_str = str(url_val).strip()
+                if url_str in dismissed_urls:
+                    rows_to_delete.append(row_idx)
+                elif url_str.startswith("http"):
+                    existing_urls.add(url_str)
+
+    # Delete bottom→top to avoid index shifting
+    for row_idx in reversed(rows_to_delete):
+        ws.delete_rows(row_idx)
+
+    # 2. Filter genuinely new jobs
+    region_jobs = new_jobs_by_region.get(region_key, [])
+    new_jobs = [j for j in region_jobs
+                if j.get("url") and j["url"] not in existing_urls
+                and j["url"] not in dismissed_urls]
+    new_jobs = _sort_by_tier(new_jobs)
+
+    # 3. Append new rows with formatting
+    for job in new_jobs:
+        row_data = _job_to_row(job)
+        row_idx = (ws.max_row or 1) + 1
+        for col_idx, col_name in enumerate(JOB_COLUMNS, 1):
+            ws.cell(row=row_idx, column=col_idx,
+                    value=row_data.get(col_name, ""))
+        _style_new_row_openpyxl(ws, row_idx, job)
+
+    # 4. Update auto-filter range
+    if ws.max_row and ws.max_row > 1:
+        last_col = get_column_letter(len(JOB_COLUMNS))
+        ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
+
+    return new_jobs
+
+
+# ---------------------------------------------------------------------------
+# openpyxl Summary Dashboard & PI sheet rebuilders
+# ---------------------------------------------------------------------------
+
+def _rebuild_summary_dashboard_openpyxl(
+    wb, all_jobs: list[dict], rec_pis: list[dict],
+) -> None:
+    """Delete and recreate the Summary Dashboard using openpyxl."""
+    from collections import Counter
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.chart import DoughnutChart, BarChart, Reference
+    from openpyxl.utils import get_column_letter
+
+    if "Summary Dashboard" in wb.sheetnames:
+        wb.remove(wb["Summary Dashboard"])
+
+    ws = wb.create_sheet("Summary Dashboard", 0)
+    ws.sheet_view.showGridLines = False
+
+    # ── Color palette ─────────────────────────────────────────────────
+    NAVY = "0F1B2D"
+    ACCENT = "3B82F6"
+    ACCENT_DARK = "1E40AF"
+    GOLD = "F59E0B"
+    EMERALD = "10B981"
+    ROSE = "F43F5E"
+    SLATE = "64748B"
+    LIGHT_BG = "F8FAFC"
+    CARD_BG = "FFFFFF"
+    SUBTLE_BORDER = "E2E8F0"
+    TEXT_PRIMARY = "1E293B"
+    TEXT_SECONDARY = "475569"
+    TEXT_MUTED = "94A3B8"
+
+    bg_fill = PatternFill("solid", fgColor=LIGHT_BG)
+    card_fill = PatternFill("solid", fgColor=CARD_BG)
+    border_side = Side(style="thin", color=SUBTLE_BORDER)
+
+    # ── Column widths ─────────────────────────────────────────────────
+    col_widths = [3, 22, 12, 3, 22, 12, 3, 22, 12, 3, 22, 12, 3]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.sheet_properties.tabColor = ACCENT
+
+    # ── Helpers ───────────────────────────────────────────────────────
+    def _write_merged(r1, c1, r2, c2, value, font=None, fill=None,
+                      alignment=None, border=None):
+        if r1 != r2 or c1 != c2:
+            ws.merge_cells(start_row=r1, start_column=c1,
+                           end_row=r2, end_column=c2)
+        cell = ws.cell(row=r1, column=c1, value=value)
+        if font:
+            cell.font = font
+        if fill:
+            cell.fill = fill
+        if alignment:
+            cell.alignment = alignment
+        if border:
+            cell.border = border
+
+    def _kpi_card(row, col_start, value, label, accent_color):
+        accent_side = Side(style="medium", color=accent_color)
+        # Top accent bar
+        _write_merged(row, col_start, row, col_start + 1, "",
+                      font=Font(size=1), fill=card_fill,
+                      border=Border(top=accent_side, left=border_side,
+                                    right=border_side))
+        # Big number
+        _write_merged(row + 1, col_start, row + 1, col_start + 1, value,
+                      font=Font(bold=True, size=28, color=accent_color,
+                                name="Calibri"),
+                      fill=card_fill,
+                      alignment=Alignment(horizontal="center",
+                                          vertical="center"),
+                      border=Border(left=border_side, right=border_side))
+        # Label
+        _write_merged(row + 2, col_start, row + 2, col_start + 1, label,
+                      font=Font(size=9, color=TEXT_SECONDARY,
+                                name="Calibri"),
+                      fill=card_fill,
+                      alignment=Alignment(horizontal="center",
+                                          vertical="top"),
+                      border=Border(left=border_side, right=border_side,
+                                    bottom=border_side))
+
+    def _write_tbl_header(row, col, value):
+        cell = ws.cell(row=row, column=col, value=value)
+        cell.font = Font(bold=True, size=10, color="FFFFFF", name="Calibri")
+        cell.fill = PatternFill("solid", fgColor=NAVY)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    def _write_tbl_row(row, col_label, col_val, label, value, alt=False):
+        alt_fill = PatternFill("solid", fgColor="F1F5F9") if alt else None
+        cl = ws.cell(row=row, column=col_label, value=label)
+        cl.font = Font(size=10, color=TEXT_PRIMARY, name="Calibri")
+        cv = ws.cell(row=row, column=col_val, value=value)
+        cv.font = Font(size=10, color=TEXT_PRIMARY, name="Calibri")
+        cv.alignment = Alignment(horizontal="center")
+        if alt_fill:
+            cl.fill = alt_fill
+            cv.fill = alt_fill
+
+    # ── Compute data ──────────────────────────────────────────────────
+    region_counts = Counter(j.get("region", "Other") for j in all_jobs)
+    tier_counts = Counter(j.get("tier") for j in all_jobs if j.get("tier"))
+    field_counts = Counter(
+        j.get("field", "Unknown") for j in all_jobs if j.get("field"))
+    top_fields = field_counts.most_common(10)
+    inst_counts = Counter(
+        j.get("institute", "Unknown") for j in all_jobs
+        if j.get("institute")
+        and j["institute"].lower() not in _AGGREGATOR_INSTITUTES)
+    top_institutions = inst_counts.most_common(10)
+
+    urgent_count = soon_count = later_count = no_deadline = 0
+    for j in all_jobs:
+        dl = j.get("deadline") or ""
+        try:
+            days_left = (date.fromisoformat(dl) - date.today()).days
+            if days_left < 0:
+                continue
+            elif days_left <= 7:
+                urgent_count += 1
+            elif days_left <= 30:
+                soon_count += 1
+            else:
+                later_count += 1
+        except (ValueError, TypeError):
+            no_deadline += 1
+
+    us_count = region_counts.get("US", 0)
+    eu_count = region_counts.get("EU", 0)
+    korea_count = region_counts.get("Korea", 0)
+    asia_count = region_counts.get("Asia", 0)
+    other_count = region_counts.get("Other", 0)
+
+    # ── Row heights ────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 6       # top gutter
+    ws.row_dimensions[2].height = 36      # title
+    ws.row_dimensions[3].height = 18      # subtitle
+    ws.row_dimensions[4].height = 10      # gap
+    ws.row_dimensions[5].height = 6       # KPI accent bar
+    ws.row_dimensions[6].height = 42      # KPI big number
+    ws.row_dimensions[7].height = 18      # KPI label
+    ws.row_dimensions[8].height = 10      # gap
+    ws.row_dimensions[9].height = 6       # KPI accent bar
+    ws.row_dimensions[10].height = 42     # KPI big number
+    ws.row_dimensions[11].height = 18     # KPI label
+    ws.row_dimensions[12].height = 10     # gap
+
+    # ═══════════════════════════════════════════════════════════════════
+    # HEADER (rows 2-3)
+    # ═══════════════════════════════════════════════════════════════════
+    _write_merged(2, 2, 2, 12, "Job Search Pipeline",
+                  font=Font(bold=True, size=22, color=NAVY, name="Calibri"),
+                  fill=bg_fill)
+    _write_merged(
+        3, 2, 3, 12,
+        f"Dashboard generated {datetime.now().strftime('%B %d, %Y at %H:%M')}   |   "
+        f"{len(all_jobs)} total positions tracked   |   "
+        f"{len(rec_pis)} PI recommendations",
+        font=Font(size=10, color=TEXT_MUTED, name="Calibri"),
+        fill=bg_fill)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # PRIMARY KPI CARDS (rows 5-7)
+    # ═══════════════════════════════════════════════════════════════════
+    _kpi_card(5, 2, len(all_jobs), "Total Positions", ACCENT)
+    _kpi_card(5, 5, us_count, "US Positions", GOLD)
+    _kpi_card(5, 8, eu_count, "EU Positions", EMERALD)
+    _kpi_card(5, 11, korea_count, "Korea Positions", SLATE)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # SECONDARY KPI CARDS (rows 9-11)
+    # ═══════════════════════════════════════════════════════════════════
+    t1_count = tier_counts.get(1, 0) + tier_counts.get(2, 0)
+    t3_count = tier_counts.get(3, 0) + tier_counts.get(4, 0)
+    _kpi_card(9, 2, len(rec_pis), "PI Recommendations", NAVY)
+    _kpi_card(9, 5, t1_count, "Tier 1-2 Positions", ACCENT_DARK)
+    _kpi_card(9, 8, t3_count, "Tier 3-4 Positions", EMERALD)
+    _kpi_card(9, 11, urgent_count, "Urgent (≤7 days)", ROSE)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # REGION TABLE + DOUGHNUT CHART (row 13+)
+    # ═══════════════════════════════════════════════════════════════════
+    section_font = Font(bold=True, size=13, color=NAVY, name="Calibri")
+    section_border = Border(bottom=Side(style="medium", color=ACCENT))
+
+    ws.row_dimensions[13].height = 22     # section title
+    ws.row_dimensions[14].height = 20     # table header
+    for r in range(15, 20):
+        ws.row_dimensions[r].height = 18  # table rows
+
+    _write_merged(13, 2, 13, 3, "Region Breakdown",
+                  font=section_font, fill=bg_fill, border=section_border)
+    _write_tbl_header(14, 2, "Region")
+    _write_tbl_header(14, 3, "Count")
+
+    region_data = [
+        ("US", us_count), ("EU", eu_count), ("Korea", korea_count),
+        ("Asia", asia_count), ("Other", other_count),
+    ]
+    for i, (region, count) in enumerate(region_data):
+        _write_tbl_row(15 + i, 2, 3, region, count, alt=bool(i % 2))
+
+    # Doughnut chart — spans cols E-I (2nd+3rd box)
+    if any(c > 0 for _, c in region_data):
+        from openpyxl.chart.series import DataPoint
+
+        chart = DoughnutChart()
+        chart.title = "Jobs by Region"
+        chart.style = 10
+        data_ref = Reference(ws, min_col=3, min_row=14, max_row=19)
+        cats_ref = Reference(ws, min_col=2, min_row=15, max_row=19)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+
+        region_colors = ["2563EB", "16A34A", "9333EA", "EA580C", "9CA3AF"]
+        series = chart.series[0]
+        for i, color in enumerate(region_colors):
+            pt = DataPoint(idx=i)
+            pt.graphicalProperties.solidFill = color
+            series.data_points.append(pt)
+
+        chart.width = 14
+        chart.height = 7
+        ws.add_chart(chart, "E14")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # TIER DISTRIBUTION TABLE (right side, cols K-L, row 13+)
+    # ═══════════════════════════════════════════════════════════════════
+    _write_merged(13, 11, 13, 12, "Tier Distribution",
+                  font=section_font, fill=bg_fill, border=section_border)
+    _write_tbl_header(14, 11, "Tier")
+    _write_tbl_header(14, 12, "Count")
+
+    tier_labels = [
+        (1, "Tier 1 (Top 50)", "FEF3C7", "92400E"),
+        (2, "Tier 2 (51-200)", "DBEAFE", "1E40AF"),
+        (3, "Tier 3 (201-500)", "D1FAE5", "065F46"),
+        (4, "Tier 4 (501+)", "F3F4F6", "374151"),
+    ]
+    for i, (t, label, bg, fg) in enumerate(tier_labels):
+        row = 15 + i
+        count = tier_counts.get(t, 0)
+        cl = ws.cell(row=row, column=11, value=label)
+        cl.font = Font(bold=True, size=10, color=fg, name="Calibri")
+        cl.fill = PatternFill("solid", fgColor=bg)
+        cl.alignment = Alignment(horizontal="center", vertical="center")
+        cv = ws.cell(row=row, column=12, value=count)
+        cv.font = Font(size=10, color=TEXT_PRIMARY, name="Calibri")
+        cv.alignment = Alignment(horizontal="center")
+
+    ranked_total = sum(tier_counts.get(t, 0) for t in (1, 2, 3, 4))
+    unranked = len(all_jobs) - ranked_total
+    cl = ws.cell(row=19, column=11, value="Unranked")
+    cl.font = Font(size=10, color=TEXT_PRIMARY)
+    cl.fill = PatternFill("solid", fgColor="F1F5F9")
+    cv = ws.cell(row=19, column=12, value=unranked)
+    cv.font = Font(size=10, color=TEXT_PRIMARY)
+    cv.alignment = Alignment(horizontal="center")
+    cv.fill = PatternFill("solid", fgColor="F1F5F9")
+
+    # ── Deadline urgency mini-table (cols K-L) ────────────────────────
+    ws.row_dimensions[20].height = 8      # gap
+    ws.row_dimensions[21].height = 22     # section title
+    ws.row_dimensions[22].height = 20     # table header
+    for r in range(23, 27):
+        ws.row_dimensions[r].height = 18  # table rows
+    ws.row_dimensions[27].height = 10     # gap
+
+    _write_merged(21, 11, 21, 12, "Deadline Urgency",
+                  font=section_font, fill=bg_fill, border=section_border)
+    _write_tbl_header(22, 11, "Window")
+    _write_tbl_header(22, 12, "Count")
+
+    urgency_data = [
+        ("≤ 7 days (Urgent)", urgent_count, "FEE2E2", "991B1B", True),
+        ("8-30 days (Soon)", soon_count, "FEF3C7", "92400E", True),
+        ("> 30 days", later_count, None, TEXT_PRIMARY, False),
+        ("No deadline", no_deadline, "F1F5F9", TEXT_PRIMARY, False),
+    ]
+    for i, (label, count, bg, fg, bold) in enumerate(urgency_data):
+        row = 23 + i
+        cl = ws.cell(row=row, column=11, value=label)
+        cl.font = Font(bold=bold, size=10, color=fg)
+        if bg:
+            cl.fill = PatternFill("solid", fgColor=bg)
+        cv = ws.cell(row=row, column=12, value=count)
+        cv.font = Font(size=10, color=TEXT_PRIMARY)
+        cv.alignment = Alignment(horizontal="center")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # TOP FIELDS TABLE + BAR CHART (row 28+)
+    # ═══════════════════════════════════════════════════════════════════
+    fields_start = 28
+    ws.row_dimensions[fields_start].height = 22      # section title
+    ws.row_dimensions[fields_start + 1].height = 20  # table header
+    for r in range(fields_start + 2, fields_start + 2 + max(len(top_fields), 1)):
+        ws.row_dimensions[r].height = 18
+
+    _write_merged(fields_start, 2, fields_start, 3, "Top Research Fields",
+                  font=section_font, fill=bg_fill, border=section_border)
+    _write_tbl_header(fields_start + 1, 2, "Field")
+    _write_tbl_header(fields_start + 1, 3, "Count")
+
+    for i, (field, count) in enumerate(top_fields):
+        _write_tbl_row(fields_start + 2 + i, 2, 3,
+                       field[:40], count, alt=bool(i % 2))
+
+    # Bar chart — spans cols E-I (2nd+3rd box), vivid blue gradient
+    if top_fields:
+        from openpyxl.chart.series import DataPoint
+        from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+        from copy import deepcopy
+
+        chart2 = BarChart()
+        chart2.type = "bar"
+        chart2.title = "Top Research Fields"
+        chart2.style = 10
+        data_ref = Reference(ws, min_col=3, min_row=fields_start + 1,
+                             max_row=fields_start + 1 + len(top_fields))
+        cats_ref = Reference(ws, min_col=2, min_row=fields_start + 2,
+                             max_row=fields_start + 1 + len(top_fields))
+        chart2.add_data(data_ref, titles_from_data=True)
+        chart2.set_categories(cats_ref)
+
+        vivid_blues = [
+            "0037B3", "0044CC", "0055E6", "0066FF", "1A75FF",
+            "3385FF", "4D94FF", "66A3FF", "80B3FF", "99C2FF",
+        ]
+        series = chart2.series[0]
+        for i in range(len(top_fields)):
+            pt = DataPoint(idx=i)
+            pt.graphicalProperties.solidFill = vivid_blues[i % len(vivid_blues)]
+            series.data_points.append(pt)
+
+        chart2.width = 14
+        chart2.height = 8
+        chart2.legend = None
+        ws.add_chart(chart2, f"E{fields_start + 1}")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # TOP INSTITUTIONS TABLE (right side, cols K-L, row 28+)
+    # ═══════════════════════════════════════════════════════════════════
+    _write_merged(fields_start, 11, fields_start, 12, "Top Institutions",
+                  font=section_font, fill=bg_fill, border=section_border)
+    _write_tbl_header(fields_start + 1, 11, "Institution")
+    _write_tbl_header(fields_start + 1, 12, "Jobs")
+
+    for i, (inst, count) in enumerate(top_institutions):
+        _write_tbl_row(fields_start + 2 + i, 11, 12,
+                       inst[:35], count, alt=bool(i % 2))
+
+    # ═══════════════════════════════════════════════════════════════════
+    # FOOTER
+    # ═══════════════════════════════════════════════════════════════════
+    footer_row = (fields_start + 2
+                  + max(len(top_fields), len(top_institutions), 1) + 2)
+    ws.row_dimensions[footer_row].height = 18
+    _write_merged(
+        footer_row, 2, footer_row, 12,
+        f"Generated by Job Search Pipeline   |   "
+        f"Data covers {len(all_jobs)} positions across "
+        f"{len(set(j.get('country') for j in all_jobs if j.get('country')))} "
+        f"countries   |   {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        font=Font(size=9, color=TEXT_MUTED, name="Calibri"),
+        fill=bg_fill,
+        border=Border(top=Side(style="thin", color=SUBTLE_BORDER)))
+
+    # Fill background for gutter columns
+    for r in range(1, footer_row + 1):
+        for c in (1, 4, 7, 10, 13):
+            cell = ws.cell(row=r, column=c)
+            if cell.value is None:
+                cell.fill = bg_fill
+
+
+def _write_pi_headers_openpyxl(ws) -> None:
+    """Write PI_COLUMNS as header row with formatting."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill("solid", fgColor="16213e")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_align = Alignment(vertical="center")
+
+    pi_widths = {
+        "PI Name": 20, "Institute": 25, "Country": 12, "Tier": 6,
+        "h-index": 8, "Citations": 10, "Fields": 30, "Connected Seeds": 20,
+        "Recommendation Score": 15, "Lab URL": 15, "Scholar URL": 15,
+    }
+
+    for col_idx, col_name in enumerate(PI_COLUMNS, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = pi_widths.get(col_name, 15)
+
+    ws.freeze_panes = "A2"
+
+
+def _rebuild_pi_sheet_openpyxl(wb, rec_pis: list[dict]) -> None:
+    """Delete and recreate the PI Recommendations sheet using openpyxl."""
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    if "PI Recommendations" in wb.sheetnames:
+        wb.remove(wb["PI Recommendations"])
+
+    ws = wb.create_sheet("PI Recommendations")
+    _write_pi_headers_openpyxl(ws)
+
+    link_font = Font(color="0563C1", underline="single")
+
+    for row_idx, pi in enumerate(rec_pis, 2):
+        row_data = _pi_to_row(pi)
+        for col_idx, col_name in enumerate(PI_COLUMNS, 1):
+            val = row_data.get(col_name, "")
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            if col_name in ("Lab URL", "Scholar URL"):
+                if val and str(val).startswith("http"):
+                    cell.hyperlink = str(val)
+                    cell.font = link_font
+            if col_name == "Tier" and val:
+                _apply_tier_format_openpyxl(cell, val)
+
+    # Auto-filter
+    if ws.max_row and ws.max_row > 1:
+        last_col = get_column_letter(len(PI_COLUMNS))
+        ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
+
+
+# ---------------------------------------------------------------------------
+# Export paths: _fresh_export (xlsxwriter) and _incremental_update (openpyxl)
+# ---------------------------------------------------------------------------
+
+def _fresh_export(
+    filepath: Path,
+    us_jobs: list[dict], eu_jobs: list[dict],
+    korea_jobs: list[dict], other_jobs: list[dict],
+    all_jobs: list[dict], rec_pis: list[dict],
+) -> Path:
+    """Fresh export using xlsxwriter (full rewrite, no previous file)."""
+    df_us = pd.DataFrame([_job_to_row(j) for j in us_jobs], columns=JOB_COLUMNS)
+    df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
+    df_korea = pd.DataFrame([_job_to_row(j) for j in korea_jobs], columns=JOB_COLUMNS)
+    df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
+
+    with pd.ExcelWriter(str(filepath), engine="xlsxwriter") as writer:
+        _write_summary_dashboard(writer, all_jobs, rec_pis)
+
+        for sheet_name, df, jobs in [
+            ("US Positions", df_us, us_jobs),
+            ("EU Positions", df_eu, eu_jobs),
+            ("Korea Positions", df_korea, korea_jobs),
+            ("Other Positions", df_other, other_jobs),
+        ]:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            if len(df) > 0:
+                _style_worksheet(writer, sheet_name, df)
+                _style_deadline_cells(writer, sheet_name, df)
+                _write_paper_links(writer, sheet_name, df, jobs)
+                _style_citizenship_cells(writer, sheet_name, df, jobs)
+
+        df_rec = pd.DataFrame(
+            [_pi_to_row(p) for p in rec_pis], columns=PI_COLUMNS)
+        df_rec.to_excel(writer, sheet_name="PI Recommendations", index=False)
+        if len(df_rec) > 0:
+            _style_worksheet(writer, "PI Recommendations", df_rec)
+
+    return filepath
+
+
+def _incremental_update(
+    prev_path: Path, filepath: Path,
+    new_jobs_by_region: dict, all_dismissed: set,
+    all_jobs: list[dict], rec_pis: list[dict],
+) -> Path:
+    """Incremental update: load previous file with openpyxl, preserving formatting.
+
+    Existing cell formatting (bold, background color, text color, user notes)
+    is fully preserved.  Only dismissed rows are removed and new jobs appended.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(str(prev_path))
+
+    sheet_region_map = {
+        "US Positions": "US",
+        "EU Positions": "EU",
+        "Korea Positions": "Korea",
+        "Other Positions": "Other",
+    }
+
+    total_new = 0
+    for sheet_name, region_key in sheet_region_map.items():
+        new_jobs = _update_sheet(wb, sheet_name, region_key,
+                                 new_jobs_by_region, all_dismissed)
+        total_new += len(new_jobs)
+
+    logger.info("Incremental update: %d new jobs appended "
+                "(formatting preserved)", total_new)
+
+    # Rebuild auto-generated sheets (no user formatting to preserve)
+    _rebuild_summary_dashboard_openpyxl(wb, all_jobs, rec_pis)
+    _rebuild_pi_sheet_openpyxl(wb, rec_pis)
+
+    wb.save(str(filepath))
+    return filepath
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path:
+    """Export job data to a multi-sheet Excel file.
+
+    Split path:
+    - full_refresh=True   → reset all statuses, clear exported_at, delete
+                            existing Excel, export ALL active jobs via
+                            _fresh_export() with hard exclusion only
+    - Previous file exists → _incremental_update() (openpyxl, preserves formatting)
+    - No previous file    → _fresh_export() (xlsxwriter, full generation)
     """
     output_dir = output_dir or EXCEL_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     filepath = output_dir / "JobSearch_Auto.xlsx"
 
-    # Phase 1: Read previous Excel (preserves user edits)
-    prev_sheets = _read_previous_excel(output_dir)
+    if full_refresh:
+        # ── Full refresh: reset DB, delete old file, export everything ──
+        from src.db import get_connection
+        with get_connection() as conn:
+            conn.execute("UPDATE jobs SET status = 'new' WHERE status IN ('dismissed','merged')")
+            conn.execute("UPDATE jobs SET exported_at = NULL")
+        logger.info("Full refresh: reset all statuses and exported_at")
 
-    # Phase 2: Detect user deletions from previous Excel
-    raw_pre = get_jobs(limit=10000)
-    _skip_statuses = {"dismissed", "merged"}
-    pre_urls = {j.get("url") for j in raw_pre
-                if j.get("url") and not _is_excluded(j) and j.get("status") not in _skip_statuses}
-    dismissed = _detect_dismissed_urls(prev_sheets, pre_urls)
+        # Delete existing file so we get a clean _fresh_export()
+        if filepath.exists():
+            filepath.unlink()
+            logger.info("Full refresh: deleted existing %s", filepath)
 
-    # Also include all permanently dismissed URLs
-    from src.db import get_dismissed_urls
-    all_dismissed = get_dismissed_urls() | dismissed
+        # Load all jobs, apply hard exclusion only (EXCLUDE_KEYWORDS in description)
+        raw_jobs = get_jobs(limit=10000)
+        all_jobs = [j for j in raw_jobs if not _is_excluded(j)]
+        all_dismissed: set[str] = set()
 
-    # Phase 3: Load all non-excluded, non-dismissed jobs from DB
-    raw_jobs = get_jobs(limit=10000)
-    all_jobs = [j for j in raw_jobs
-                if not _is_excluded(j)
-                and j.get("status") not in _skip_statuses
-                and j.get("url") not in all_dismissed]
+        excluded_count = len(raw_jobs) - len(all_jobs)
+        logger.info("Full refresh: %d total → %d after exclusion (%d excluded)",
+                    len(raw_jobs), len(all_jobs), excluded_count)
+    else:
+        # ── Incremental (existing behaviour) ──
+        # Phase 1: Read previous Excel (values only, for dismiss detection)
+        prev_sheets = _read_previous_excel(output_dir)
 
-    logger.info("Filtered %d → %d jobs (excluded %d by keywords, %d dismissed)",
-                len(raw_jobs), len(all_jobs),
-                len(raw_jobs) - len(all_jobs) - len(all_dismissed), len(all_dismissed))
+        # Phase 2: Detect user deletions from previous Excel
+        raw_pre = get_jobs(limit=10000)
+        _skip_statuses = {"dismissed"}
+        pre_urls = {j.get("url") for j in raw_pre
+                    if j.get("url") and j.get("status") not in _skip_statuses}
+        dismissed = _detect_dismissed_urls(prev_sheets, pre_urls)
 
-    # Phase 4: Split new jobs by region
+        # Also include all permanently dismissed URLs
+        from src.db import get_dismissed_urls
+        all_dismissed = get_dismissed_urls() | dismissed
+
+        # Phase 3: Load all non-dismissed jobs from DB
+        raw_jobs = get_jobs(limit=10000)
+        all_jobs = [j for j in raw_jobs
+                    if j.get("status") not in _skip_statuses
+                    and j.get("url") not in all_dismissed]
+
+        # Apply exclusion filter (expired deadlines, past-year posts, keyword exclusions)
+        pre_filter = len(all_jobs)
+        all_jobs = [j for j in all_jobs if not _is_excluded(j)]
+        excluded_count = pre_filter - len(all_jobs)
+        logger.info("Loaded %d → %d jobs (%d excluded, %d dismissed)",
+                    len(raw_jobs), len(all_jobs), excluded_count, len(all_dismissed))
+
+    # Phase 4: Split by region and sort
     us_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "US"])
     eu_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "EU"])
     korea_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") == "Korea"])
     other_jobs = _sort_by_tier([j for j in all_jobs if j.get("region") not in ("US", "EU", "Korea")])
 
-    new_jobs_by_region = {
-        "US": us_jobs,
-        "EU": eu_jobs,
-        "Korea": korea_jobs,
-        "Other": other_jobs,
-    }
-
-    # Phase 5: Merge with previous Excel data
-    if prev_sheets:
-        merged = _merge_with_previous(prev_sheets, new_jobs_by_region, all_dismissed)
-        # Sort the merged DataFrames
-        df_us = _sort_merged_df(merged.get("US Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
-        df_eu = _sort_merged_df(merged.get("EU Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
-        df_korea = _sort_merged_df(merged.get("Korea Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
-        df_other = _sort_merged_df(merged.get("Other Positions", (pd.DataFrame(columns=JOB_COLUMNS), []))[0])
-
-        new_count = sum(len(m[1]) for m in merged.values())
-        logger.info("Incremental merge: %d new jobs added, preserving existing rows", new_count)
-    else:
-        # First run: generate from scratch
-        df_us = pd.DataFrame([_job_to_row(j) for j in us_jobs], columns=JOB_COLUMNS)
-        df_eu = pd.DataFrame([_job_to_row(j) for j in eu_jobs], columns=JOB_COLUMNS)
-        df_korea = pd.DataFrame([_job_to_row(j) for j in korea_jobs], columns=JOB_COLUMNS)
-        df_other = pd.DataFrame([_job_to_row(j) for j in other_jobs], columns=JOB_COLUMNS)
-
     rec_pis = _sort_pis_by_tier(get_recommended_pis())
 
-    with pd.ExcelWriter(str(filepath), engine="xlsxwriter") as writer:
-        # Sheet 0: Summary Dashboard (charts + statistics)
-        _write_summary_dashboard(writer, all_jobs, rec_pis)
-
-        # Sheet 1: US Positions
-        df_us.to_excel(writer, sheet_name="US Positions", index=False)
-        if len(df_us) > 0:
-            _style_worksheet(writer, "US Positions", df_us)
-            _style_deadline_cells(writer, "US Positions", df_us)
-            # Paper links and citizenship styling only for fresh rows
-            if not prev_sheets:
-                _write_paper_links(writer, "US Positions", df_us, us_jobs)
-                _style_citizenship_cells(writer, "US Positions", df_us, us_jobs)
-
-        # Sheet 2: EU Positions
-        df_eu.to_excel(writer, sheet_name="EU Positions", index=False)
-        if len(df_eu) > 0:
-            _style_worksheet(writer, "EU Positions", df_eu)
-            _style_deadline_cells(writer, "EU Positions", df_eu)
-            if not prev_sheets:
-                _write_paper_links(writer, "EU Positions", df_eu, eu_jobs)
-                _style_citizenship_cells(writer, "EU Positions", df_eu, eu_jobs)
-
-        # Sheet 3: Korea Positions (includes faculty)
-        df_korea.to_excel(writer, sheet_name="Korea Positions", index=False)
-        if len(df_korea) > 0:
-            _style_worksheet(writer, "Korea Positions", df_korea)
-            _style_deadline_cells(writer, "Korea Positions", df_korea)
-            if not prev_sheets:
-                _write_paper_links(writer, "Korea Positions", df_korea, korea_jobs)
-                _style_citizenship_cells(writer, "Korea Positions", df_korea, korea_jobs)
-
-        # Sheet 4: Other Positions
-        df_other.to_excel(writer, sheet_name="Other Positions", index=False)
-        if len(df_other) > 0:
-            _style_worksheet(writer, "Other Positions", df_other)
-            _style_deadline_cells(writer, "Other Positions", df_other)
-            if not prev_sheets:
-                _write_paper_links(writer, "Other Positions", df_other, other_jobs)
-                _style_citizenship_cells(writer, "Other Positions", df_other, other_jobs)
-
-        # Sheet 4: PI Recommendations
-        df_rec = pd.DataFrame([_pi_to_row(p) for p in rec_pis], columns=PI_COLUMNS)
-        df_rec.to_excel(writer, sheet_name="PI Recommendations", index=False)
-        if len(df_rec) > 0:
-            _style_worksheet(writer, "PI Recommendations", df_rec)
+    # Phase 5: Choose export path
+    if full_refresh:
+        # Always do a fresh export on full refresh
+        filepath = _fresh_export(filepath, us_jobs, eu_jobs, korea_jobs,
+                                 other_jobs, all_jobs, rec_pis)
+    else:
+        prev_path = _find_previous_excel(output_dir)
+        if prev_path:
+            new_jobs_by_region = {
+                "US": us_jobs, "EU": eu_jobs,
+                "Korea": korea_jobs, "Other": other_jobs,
+            }
+            filepath = _incremental_update(prev_path, filepath, new_jobs_by_region,
+                                           all_dismissed, all_jobs, rec_pis)
+        else:
+            filepath = _fresh_export(filepath, us_jobs, eu_jobs, korea_jobs,
+                                     other_jobs, all_jobs, rec_pis)
 
     # Mark all exported jobs so we can detect user deletions next time
     exported_urls = [j.get("url") for j in all_jobs if j.get("url")]
     _mark_exported(exported_urls)
 
-    total_rows = len(df_us) + len(df_eu) + len(df_korea) + len(df_other)
+    total_rows = len(us_jobs) + len(eu_jobs) + len(korea_jobs) + len(other_jobs)
     logger.info("Excel exported to %s (%d total rows)", filepath, total_rows)
     return filepath

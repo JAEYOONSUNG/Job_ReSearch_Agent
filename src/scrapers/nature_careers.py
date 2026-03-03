@@ -110,7 +110,7 @@ class NatureCareersScraper(BaseScraper):
                 "country": country,
                 "posted_date": _parse_date(pub_date),
                 "url": link,
-                "description": description[:2000],
+                "description": description[:15000],
                 "source": self.name,
                 "field": category or None,
             })

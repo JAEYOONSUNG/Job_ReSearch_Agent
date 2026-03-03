@@ -41,7 +41,54 @@ from src.scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 MAX_PAGES = 5
-DETAIL_LIMIT = 30  # max detail pages to fetch per sub-scraper
+DETAIL_LIMIT = 50  # max detail pages to fetch per sub-scraper
+
+# ── Site-specific CSS selector hints (tried first, in order) ──
+_SITE_HINTS: dict[str, list[str]] = {
+    "ibric":     ["div.view-content", "div.board-view", "div#content div.content", "td.content"],
+    "hibrain":   ["div.recruit-view", "div.view-body", "div.content-view", "div#content"],
+    "rpik":      ["div.board-view", "div.view-content"],
+    "nst_onest": ["div.detail-content", "div.view-content", "div.job-detail"],
+    "nst":       ["div.board-view", "div.view-content"],
+    "ibs":       ["div.recruit-view", "div.board-view", "div.view-content", "div#content"],
+    "kist":      ["div.board-view", "div.view-content", "div.content-view"],
+    "kribb":     ["div.view-content", "div.board-view", "div#content"],
+    "krict":     ["div.board-view", "div.view-content"],
+    "kbsi":      ["div.board-view", "div.view-content"],
+    "kiost":     ["div.board-view", "div.bbs-view", "div.view-content"],
+    "kfri":      ["div.board-view", "div.view-content"],
+    "kaeri":     ["div.board-view", "div.view-content", "div.bbs-view"],
+    "wikim":     ["div.board-view", "div.bbs-view", "div.view-content"],
+    "kaist":     ["div.detail-content", "div.view-content", "div.job-detail"],
+    "snu":       ["div.board-view", "div.view-content", "article.board-view"],
+    "postech":   ["div.detail-content", "div.view-content", "div.job-detail"],
+}
+
+# ── Generic Korean government board selectors (fallback after site hints) ──
+_KOREAN_BOARD_SELECTORS = [
+    "div.board-view", "div.view-content", "div.bbs-view",
+    "div.detail-content", "div.recruit-view", "div.content-view",
+    "div#content div.content", "td.content", "article",
+    "div.job-detail", "div#content",
+    "div[class*='view']", "div[class*='content']", "div[class*='detail']",
+]
+
+# ── Default institute names per source ──
+_DEFAULT_INSTITUTES: dict[str, str] = {
+    "ibs": "Institute for Basic Science (IBS)",
+    "kist": "Korea Institute of Science and Technology (KIST)",
+    "kribb": "Korea Research Institute of Bioscience and Biotechnology (KRIBB)",
+    "krict": "Korea Research Institute of Chemical Technology (KRICT)",
+    "kbsi": "Korea Basic Science Institute (KBSI)",
+    "kiost": "Korea Institute of Ocean Science and Technology (KIOST)",
+    "kfri": "Korea Food Research Institute (KFRI)",
+    "kaeri": "Korea Atomic Energy Research Institute (KAERI)",
+    "wikim": "World Institute of Kimchi (WIKIM)",
+    "nst": "National Research Council of Science & Technology (NST)",
+    "kaist": "KAIST",
+    "snu": "Seoul National University",
+    "postech": "POSTECH",
+}
 
 
 class KoreanJobsScraper(BaseScraper):
@@ -103,13 +150,22 @@ class KoreanJobsScraper(BaseScraper):
         )
 
     def _scrape_hibrain(self) -> list[dict[str, Any]]:
-        """HiBrainNet (hibrain.net) — professor/postdoc positions."""
-        return self._scrape_board_site(
+        """HiBrainNet (hibrain.net) — professor/postdoc positions.
+
+        HiBrainNet lists ALL professional positions (banks, government,
+        factories, etc.), so we filter to bio/research-relevant titles.
+        """
+        jobs = self._scrape_board_site(
             base_url="https://www.hibrain.net/recruitment/recruits",
             page_param="page",
             sub_source="hibrain",
             link_pattern=r"recruit|detail|view",
         )
+        pre = len(jobs)
+        jobs = [j for j in jobs if _is_bio_relevant_korean(j.get("title", ""))]
+        if pre > len(jobs):
+            self.logger.info("HiBrainNet bio filter: %d → %d", pre, len(jobs))
+        return jobs
 
     def _scrape_rpik(self) -> list[dict[str, Any]]:
         """RPiK / NRF (rpik.or.kr) — postdoc/professor positions."""
@@ -190,11 +246,11 @@ class KoreanJobsScraper(BaseScraper):
     def _scrape_kist(self) -> list[dict[str, Any]]:
         """KIST (kist.re.kr) — researcher positions."""
         return self._scrape_board_site(
-            base_url="https://kist.re.kr/eng/recruit/announce-list.do",
+            base_url="https://kist.re.kr/ko/notice/employment-announcement.do",
             page_param="page",
             sub_source="kist",
             default_institute="Korea Institute of Science and Technology (KIST)",
-            link_pattern=r"recruit|announce|view|detail",
+            link_pattern=r"notice|view|detail|announcement",
             site_root="https://kist.re.kr",
         )
 
@@ -268,7 +324,7 @@ class KoreanJobsScraper(BaseScraper):
 
         # Primary: official site
         try:
-            resp = self.fetch("https://www.kbsi.re.kr/recruit0102")
+            resp = self.fetch("https://www.kbsi.re.kr/board?menuId=MENU002051102000000&boardId=BOARD00086")
             soup = BeautifulSoup(resp.text, "html.parser")
             rows = soup.select("table tbody tr, div.list-item, ul li.item")
             if not rows:
@@ -318,7 +374,7 @@ class KoreanJobsScraper(BaseScraper):
 
         # Official site
         try:
-            resp = self.fetch("https://www.kfri.re.kr/web/board/13/")
+            resp = self.fetch("https://www.kfri.re.kr/web/board/13/postList")
             soup = BeautifulSoup(resp.text, "html.parser")
             rows = soup.select("table tbody tr, div.list-item, ul li.item")
             if not rows:
@@ -450,7 +506,8 @@ class KoreanJobsScraper(BaseScraper):
         for page in range(1, MAX_PAGES + 1):
             try:
                 params = {page_param: str(page)}
-                resp = self.fetch(f"{base_url}?{urlencode(params)}")
+                page_url = f"{base_url}?{urlencode(params)}"
+                resp = self.fetch(page_url)
                 soup = BeautifulSoup(resp.text, "html.parser")
 
                 rows = soup.select(
@@ -468,7 +525,9 @@ class KoreanJobsScraper(BaseScraper):
                     break
 
                 for row in rows:
-                    job = self._parse_generic_row(row, root, sub_source)
+                    # Use page_url (not root) so relative hrefs like
+                    # "?mode=view&id=123" resolve correctly.
+                    job = self._parse_generic_row(row, page_url, sub_source)
                     if job:
                         if default_institute:
                             job["institute"] = job.get("institute") or default_institute
@@ -584,10 +643,50 @@ class KoreanJobsScraper(BaseScraper):
             link = row
         else:
             link = row.select_one("a[href]")
-        if not link:
-            return None
 
-        title = link.get_text(strip=True)
+        # Fallback: extract URL from onclick on <a> or <tr>
+        href = ""
+        if link:
+            href = link.get("href", "")
+            # Some Korean sites use href="#view" with real URL in onclick
+            if not href or href in ("#", "#view", "javascript:void(0)", "javascript:;"):
+                onclick = link.get("onclick", "") or row.get("onclick", "")
+                onclick_href = _extract_onclick_href(onclick)
+                if onclick_href:
+                    href = onclick_href
+        elif row.get("onclick"):
+            # No <a> tag at all — URL is on the <tr> onclick
+            onclick_href = _extract_onclick_href(row["onclick"])
+            if onclick_href:
+                href = onclick_href
+                link = None  # title will come from td text below
+
+        # Fallback: form-based navigation (e.g. KIOST uses <form action=URL>
+        # with <input type="submit" value="TITLE">)
+        if not link and not href:
+            form = row.select_one("form[action]")
+            if form:
+                action = form.get("action", "")
+                # Strip jsessionid from action URL
+                action = re.sub(r";jsessionid=[^?]*", "", action)
+                if action:
+                    href = action
+                submit = form.select_one("input[type='submit']")
+                if submit and submit.get("value"):
+                    link = submit  # use submit button as "link" for title
+
+        # Determine title
+        if link:
+            title = link.get("value", "") or link.get_text(strip=True)
+        else:
+            # No link — get title from the longest td (skip number/date cols)
+            tds = row.select("td")
+            title = ""
+            for td in tds:
+                t = td.get_text(strip=True)
+                if len(t) > len(title) and not _looks_like_date(t) and not t.isdigit():
+                    title = t
+
         if not title or len(title) < 3:
             return None
 
@@ -600,7 +699,6 @@ class KoreanJobsScraper(BaseScraper):
         if not _is_valid_korean_job_title(title):
             return None
 
-        href = link.get("href", "")
         url = urljoin(base_url, href) if href else None
         if not url:
             return None
@@ -670,6 +768,7 @@ class KoreanJobsScraper(BaseScraper):
         """Fetch detail pages for the top N jobs to get full descriptions
         and structured Korean fields (department, PI, requirements, etc.)."""
         enriched: list[dict[str, Any]] = []
+        desc_found = 0
 
         for job in jobs[:DETAIL_LIMIT]:
             url = job.get("url")
@@ -678,21 +777,31 @@ class KoreanJobsScraper(BaseScraper):
                 continue
             try:
                 resp = self.fetch(url)
-                soup = BeautifulSoup(resp.text, "html.parser")
+                html = resp.text
+                soup = BeautifulSoup(html, "html.parser")
+                sub_source = (job.get("source") or "").split(":")[-1]
 
-                # ── Description ──
-                desc_el = soup.select_one(
-                    "div.content, div.view-content, div.board-view, "
-                    "div.detail-content, div.recruit-view, "
-                    "article, div.job-detail, div.bbs-view"
-                )
-                if desc_el:
-                    job["description"] = desc_el.get_text(
-                        separator="\n", strip=True
-                    )[:5000]
+                # ── RALP: 4-strategy description extraction ──
+                desc = self._extract_description_ralp(soup, html, sub_source)
+                if desc:
+                    job["description"] = desc[:5000]
+                    desc_found += 1
 
                 # ── Extract structured fields from Korean table/detail layout ──
                 _extract_korean_fields(soup, job)
+
+                # ── Institute fallback ──
+                if not job.get("institute"):
+                    job["institute"] = _extract_institute_from_page(
+                        soup, sub_source
+                    )
+
+                # ── Title normalization ──
+                job["title"] = _normalize_korean_title(
+                    job.get("title", ""),
+                    job.get("institute"),
+                    job.get("description"),
+                )
 
             except Exception:
                 self.logger.debug("Detail fetch failed: %s", url)
@@ -701,10 +810,99 @@ class KoreanJobsScraper(BaseScraper):
 
         # Add remaining jobs without enrichment
         enriched.extend(jobs[DETAIL_LIMIT:])
+        self.logger.info(
+            "Enriched %d/%d jobs, descriptions found: %d",
+            min(len(jobs), DETAIL_LIMIT), len(jobs), desc_found,
+        )
         return enriched
+
+    def _extract_description_ralp(
+        self, soup: BeautifulSoup, html: str, sub_source: str,
+        min_len: int = 100,
+    ) -> str | None:
+        """RALP: try 4 strategies to extract description."""
+
+        # Strategy 1: Per-site CSS hints
+        for sel in _SITE_HINTS.get(sub_source, []):
+            el = soup.select_one(sel)
+            if el and len(el.get_text(strip=True)) >= min_len:
+                return el.get_text(separator="\n", strip=True)[:5000]
+
+        # Strategy 2: Generic Korean board selectors
+        for sel in _KOREAN_BOARD_SELECTORS:
+            el = soup.select_one(sel)
+            if el and len(el.get_text(strip=True)) >= min_len:
+                return el.get_text(separator="\n", strip=True)[:5000]
+
+        # Strategy 3: Table body (Korean sites use tables for layout)
+        for table in soup.find_all("table"):
+            text = table.get_text(separator="\n", strip=True)
+            if len(text) >= min_len * 2:  # higher threshold for table noise
+                return text[:5000]
+
+        # Strategy 4: Base class fallback (largest text block)
+        return self._extract_description_fallback(html, min_length=min_len)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────
+
+
+def _extract_onclick_href(onclick: str) -> str | None:
+    """Extract URL from onclick handlers like ``location.href='/path'`` or ``href='/path'``."""
+    if not onclick:
+        return None
+    # location.href = '/web/board/13/23862'  or  href='/prog/jobOffer/.../view.do?nttId=155'
+    m = re.search(r"""(?:location\.)?href\s*=\s*['"]([^'"]+)['"]""", onclick)
+    return m.group(1) if m else None
+
+
+# ── Title normalization ──────────────────────────────────────────────────
+
+_TITLE_IS_INST_RE = re.compile(
+    r"^[\[\(]?(?:.*대학교|.*대학|.*연구원|.*연구소|.*병원|"
+    r"KAIST|POSTECH|DGIST|UNIST|GIST|.*University)[\]\)]?\s*$", re.I)
+
+_POSITION_EXTRACT = [
+    (re.compile(r"박사\s*후|포스닥|postdoc", re.I), "박사후연구원"),
+    (re.compile(r"석사\s*후"), "석사후연구원"),
+    (re.compile(r"연구\s*교수"), "연구교수"),
+    (re.compile(r"전임\s*교원|교수\s*초빙|교원\s*초빙"), "전임교원"),
+    (re.compile(r"연구원\s*모집|연구원\s*채용"), "연구원"),
+]
+
+
+def _normalize_korean_title(
+    title: str, institute: str | None, description: str | None,
+) -> str:
+    """Supplement incomplete titles that only contain institute names."""
+    # Already has position info — keep as-is
+    if any(kw in title for kw in [
+        "채용", "모집", "공고", "researcher", "fellow", "postdoc",
+    ]):
+        return title
+
+    # Title is just an institute name — try to extract position from description
+    if _TITLE_IS_INST_RE.match(title.strip()):
+        desc = (description or "")[:500]
+        for pat, label in _POSITION_EXTRACT:
+            if pat.search(desc):
+                return f"{title} {label} 모집"
+
+    return title
+
+
+def _extract_institute_from_page(
+    soup: BeautifulSoup, sub_source: str,
+) -> str | None:
+    """Extract institute name from page metadata or source defaults."""
+    # og:site_name meta tag
+    meta = soup.select_one('meta[property="og:site_name"]')
+    if meta and meta.get("content"):
+        name = meta["content"].strip()
+        if len(name) > 3 and not _looks_like_date(name):
+            return name
+    # Source-specific default institute name
+    return _DEFAULT_INSTITUTES.get(sub_source)
 
 
 # ── Korean title / content validation ─────────────────────────────────────
@@ -755,6 +953,32 @@ _KOREAN_JOB_INDICATORS = [
     "researcher", "fellow", "scientist", "professor", "교수",
     "recruit", "position", "opening", "vacancy",
 ]
+
+
+_KOREAN_BIO_SIGNALS = [
+    # Postdoc positions (always research-relevant)
+    "박사후", "박사 후", "석사후", "석사 후",
+    "postdoc", "post-doc", "postdoctoral",
+    # Bio / medical / science fields (Korean)
+    "바이오", "생명", "생물", "약학", "의과", "의학", "의생명",
+    "뇌과학", "뇌공학", "유전", "분자", "단백질", "효소", "미생물",
+    "세포", "게놈", "면역", "약리", "생화학", "발효", "보건연구",
+    "생명공학", "합성생물", "대사공학", "식품공학",
+    # English bio terms
+    "biotech", "crispr", "genomic", "protein", "biology",
+    "molecular", "biochem", "bioinformat", "microbio",
+    "synthetic bio", "enzyme", "ferment",
+]
+
+
+def _is_bio_relevant_korean(title: str) -> bool:
+    """Return True if a Korean job title is relevant to bio/research fields.
+
+    Used to filter out non-bio positions from general Korean job boards
+    (HiBrainNet, etc.) that list ALL types of professional positions.
+    """
+    t = title.lower()
+    return any(sig in t for sig in _KOREAN_BIO_SIGNALS)
 
 
 def _is_valid_korean_job_title(title: str) -> bool:

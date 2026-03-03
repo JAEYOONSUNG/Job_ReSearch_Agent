@@ -199,6 +199,13 @@ EXCLUDE_TITLE_KEYWORDS = [
     "phd student",
     "phd candidate",
     "phd fellow",
+    # Intern / Student positions
+    "intern",
+    "internship",
+    "visiting student",
+    "master's degree intern",
+    "undergraduate",
+    "bachelor's degree",
     # Non-research roles
     "software engineer",
     "data scientist",

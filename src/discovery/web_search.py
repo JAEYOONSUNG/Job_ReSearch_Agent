@@ -3,6 +3,7 @@
 Uses direct HTTP requests to DuckDuckGo HTML search with built-in
 rate limiting, thread safety, and a circuit breaker.
 """
+from __future__ import annotations
 
 import logging
 import re

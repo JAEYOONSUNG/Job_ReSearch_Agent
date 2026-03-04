@@ -34,14 +34,22 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urljoin, urlencode
 
+import urllib3
 from bs4 import BeautifulSoup, Tag
 
 from src.scrapers.base import BaseScraper
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
 MAX_PAGES = 5
 DETAIL_LIMIT = 50  # max detail pages to fetch per sub-scraper
+
+# *.recruitment.kr domains silently drop HTTPS GET requests (SSL connects
+# but server never sends response body). HEAD and port-80 work, but full
+# GET hangs indefinitely. Disabled until the server-side issue is resolved.
+_RECRUITMENT_KR_DISABLED = True
 
 # ── Site-specific CSS selector hints (tried first, in order) ──
 _SITE_HINTS: dict[str, list[str]] = {
@@ -85,9 +93,13 @@ _DEFAULT_INSTITUTES: dict[str, str] = {
     "kaeri": "Korea Atomic Energy Research Institute (KAERI)",
     "wikim": "World Institute of Kimchi (WIKIM)",
     "nst": "National Research Council of Science & Technology (NST)",
+    "nst_onest": "National Research Council of Science & Technology (NST)",
     "kaist": "KAIST",
     "snu": "Seoul National University",
     "postech": "POSTECH",
+    "rpik": "NRF (National Research Foundation of Korea)",
+    "hibrain": "HiBrainNet",
+    "ibric": "IBRIC",
 }
 
 
@@ -178,38 +190,39 @@ class KoreanJobsScraper(BaseScraper):
 
     def _scrape_nst_onest(self) -> list[dict[str, Any]]:
         """NST onest portal (onest.recruitment.kr) — centralized 출연연 recruitment."""
-        base = "https://onest.recruitment.kr"
         jobs: list[dict[str, Any]] = []
 
-        for page in range(1, MAX_PAGES + 1):
-            try:
-                # Try the main job listing page
-                params = {"page": str(page)}
-                resp = self.fetch(f"{base}/app/jobnotice/list?{urlencode(params)}")
-                soup = BeautifulSoup(resp.text, "html.parser")
+        # onest.recruitment.kr disabled — silently drops HTTPS GETs
+        if not _RECRUITMENT_KR_DISABLED:
+            base = "https://onest.recruitment.kr"
+            for page in range(1, MAX_PAGES + 1):
+                try:
+                    params = {"page": str(page)}
+                    resp = self.fetch(f"{base}/app/jobnotice/list?{urlencode(params)}")
+                    soup = BeautifulSoup(resp.text, "html.parser")
 
-                rows = soup.select(
-                    "table tbody tr, "
-                    "div.recruit-list li, "
-                    "ul.list-group li, "
-                    "div.job-item, "
-                    "div.list-item, "
-                    "div.card"
-                )
-                if not rows:
-                    rows = self._find_job_links(soup, base, r"jobnotice|detail|view")
+                    rows = soup.select(
+                        "table tbody tr, "
+                        "div.recruit-list li, "
+                        "ul.list-group li, "
+                        "div.job-item, "
+                        "div.list-item, "
+                        "div.card"
+                    )
+                    if not rows:
+                        rows = self._find_job_links(soup, base, r"jobnotice|detail|view")
 
-                if not rows and page > 1:
+                    if not rows and page > 1:
+                        break
+
+                    for row in rows:
+                        job = self._parse_generic_row(row, base, "nst_onest")
+                        if job:
+                            jobs.append(job)
+
+                except Exception:
+                    self.logger.debug("NST onest page %d failed", page)
                     break
-
-                for row in rows:
-                    job = self._parse_generic_row(row, base, "nst_onest")
-                    if job:
-                        jobs.append(job)
-
-            except Exception:
-                self.logger.debug("NST onest page %d failed", page)
-                break
 
         # NST main recruitment boards (bbsNo=15: NST자체, bbsNo=19: 출연연 공동)
         for bbs_no, key in [("15", "56"), ("19", "61")]:
@@ -282,20 +295,21 @@ class KoreanJobsScraper(BaseScraper):
         except Exception:
             self.logger.debug("KRIBB recruitment page failed")
 
-        # Fallback: recruitment.kr portal
-        try:
-            resp = self.fetch("https://kribb.recruitment.kr/app/jobnotice/list")
-            soup = BeautifulSoup(resp.text, "html.parser")
-            rows = soup.select("table tbody tr, div.list-item, div.card, ul li.item")
-            if not rows:
-                rows = self._find_job_links(soup, "https://kribb.recruitment.kr", r"jobnotice|detail|view")
-            for row in rows:
-                job = self._parse_generic_row(row, "https://kribb.recruitment.kr", "kribb")
-                if job:
-                    job["institute"] = job.get("institute") or "Korea Research Institute of Bioscience and Biotechnology (KRIBB)"
-                    jobs.append(job)
-        except Exception:
-            self.logger.debug("KRIBB recruitment.kr failed")
+        # Fallback: recruitment.kr portal (disabled — HTTPS silently drops)
+        if not _RECRUITMENT_KR_DISABLED:
+            try:
+                resp = self.fetch("https://kribb.recruitment.kr/app/jobnotice/list")
+                soup = BeautifulSoup(resp.text, "html.parser")
+                rows = soup.select("table tbody tr, div.list-item, div.card, ul li.item")
+                if not rows:
+                    rows = self._find_job_links(soup, "https://kribb.recruitment.kr", r"jobnotice|detail|view")
+                for row in rows:
+                    job = self._parse_generic_row(row, "https://kribb.recruitment.kr", "kribb")
+                    if job:
+                        job["institute"] = job.get("institute") or "Korea Research Institute of Bioscience and Biotechnology (KRIBB)"
+                        jobs.append(job)
+            except Exception:
+                self.logger.debug("KRIBB recruitment.kr failed")
 
         return self._enrich_korean_detail(jobs)
 
@@ -555,6 +569,9 @@ class KoreanJobsScraper(BaseScraper):
         default_institute: str,
     ) -> list[dict[str, Any]]:
         """Scrape a *.recruitment.kr portal (shared system used by many 출연연)."""
+        if _RECRUITMENT_KR_DISABLED:
+            self.logger.debug("Skipping %s (recruitment.kr disabled)", sub_source)
+            return []
         jobs: list[dict[str, Any]] = []
         base = url.rsplit("/app/", 1)[0] if "/app/" in url else url.rsplit("/", 1)[0]
 
@@ -596,10 +613,64 @@ class KoreanJobsScraper(BaseScraper):
         sub_source: str,
         default_institute: str,
     ) -> list[dict[str, Any]]:
-        """Scrape a *.recruiter.co.kr portal (shared system used by many 출연연)."""
+        """Scrape a *.recruiter.co.kr portal via JSON API."""
         jobs: list[dict[str, Any]] = []
         base = url.rsplit("/app/", 1)[0] if "/app/" in url else url.rsplit("/", 1)[0]
 
+        # Try JSON API first (recruiter.co.kr SPA pattern)
+        api_url = url.rstrip("/") + ".json"
+        for page in range(1, MAX_PAGES + 1):
+            try:
+                resp = self.session.post(
+                    api_url,
+                    data={
+                        "jobnoticeStateCode": "10",
+                        "pageSize": "20",
+                        "searchByNameOnly": "true",
+                        "currentPage": str(page),
+                    },
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": url,
+                    },
+                    timeout=15,
+                    verify=False,
+                )
+                data = resp.json()
+                items = data.get("list", [])
+                if not items:
+                    break
+                for item in items:
+                    name = item.get("jobnoticeName", "").strip()
+                    sn = item.get("jobnoticeSn")
+                    if not name or not sn:
+                        continue
+                    kind = item.get("systemKindCode", "MRS2")
+                    detail_url = (
+                        f"{base}/app/jobnotice/view"
+                        f"?systemKindCode={kind}&jobnoticeSn={sn}"
+                    )
+                    jobs.append({
+                        "title": name,
+                        "institute": default_institute,
+                        "country": "South Korea",
+                        "url": detail_url,
+                        "source": f"korean_jobs:{sub_source}",
+                    })
+                # Stop if we got all pages
+                page_util = data.get("pageUtil", {})
+                if page >= page_util.get("lastPage", 1):
+                    break
+            except Exception:
+                self.logger.debug("%s recruiter.co.kr API page %d failed", sub_source, page)
+                break
+
+        if jobs:
+            return jobs
+
+        # Fallback: HTML scraping (in case API changes)
         for page in range(1, MAX_PAGES + 1):
             try:
                 params = {"page": str(page)}

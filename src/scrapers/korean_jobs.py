@@ -211,20 +211,29 @@ class KoreanJobsScraper(BaseScraper):
                 self.logger.debug("NST onest page %d failed", page)
                 break
 
-        # Also try the NST main recruitment page
-        try:
-            resp = self.fetch("https://www.nst.re.kr/www/sub.do?key=56")
-            soup = BeautifulSoup(resp.text, "html.parser")
-            rows = soup.select("table tbody tr")
-            if not rows:
-                rows = self._find_job_links(soup, "https://www.nst.re.kr", r"sub\.do|view|detail")
-            for row in rows:
-                job = self._parse_generic_row(row, "https://www.nst.re.kr", "nst")
-                if job:
-                    job["institute"] = job.get("institute") or "National Research Council of Science & Technology (NST)"
-                    jobs.append(job)
-        except Exception:
-            self.logger.debug("NST main page failed")
+        # NST main recruitment boards (bbsNo=15: NST자체, bbsNo=19: 출연연 공동)
+        for bbs_no, key in [("15", "56"), ("19", "61")]:
+            try:
+                list_url = (
+                    f"https://www.nst.re.kr/www/selectBbsNttList.do"
+                    f"?bbsNo={bbs_no}&key={key}"
+                )
+                resp = self.fetch(list_url)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                rows = soup.select("table tbody tr")
+                if not rows:
+                    rows = self._find_job_links(
+                        soup, list_url, r"selectBbs|View|view|detail"
+                    )
+                for row in rows:
+                    job = self._parse_generic_row(row, list_url, "nst")
+                    if job:
+                        job["institute"] = job.get("institute") or (
+                            "National Research Council of Science & Technology (NST)"
+                        )
+                        jobs.append(job)
+            except Exception:
+                self.logger.debug("NST bbsNo=%s page failed", bbs_no)
 
         return self._enrich_korean_detail(jobs)
 
@@ -638,11 +647,18 @@ class KoreanJobsScraper(BaseScraper):
         self, row: Tag, base_url: str, sub_source: str
     ) -> dict[str, Any] | None:
         """Parse a table row or list item into a job dict."""
-        # Get the primary link
+        # Get the primary link (prefer one with text content)
         if row.name == "a":
             link = row
         else:
-            link = row.select_one("a[href]")
+            link = None
+            for a in row.select("a[href]"):
+                if a.get_text(strip=True):
+                    link = a
+                    break
+            # Fallback: any <a> with href (even if text is empty)
+            if not link:
+                link = row.select_one("a[href]")
 
         # Fallback: extract URL from onclick on <a> or <tr>
         href = ""
@@ -679,19 +695,39 @@ class KoreanJobsScraper(BaseScraper):
         if link:
             title = link.get("value", "") or link.get_text(strip=True)
         else:
-            # No link — get title from the longest td (skip number/date cols)
-            tds = row.select("td")
             title = ""
-            for td in tds:
-                t = td.get_text(strip=True)
-                if len(t) > len(title) and not _looks_like_date(t) and not t.isdigit():
-                    title = t
+
+        # If primary title is missing or invalid, try alternative sources
+        title = re.sub(r"^종료\s*", "", (title or "")).strip()
+        title = re.sub(r"새글$|첨부파일\s*있음$|new$", "", title, flags=re.IGNORECASE).strip()
+
+        if not title or len(title) < 3 or not _is_valid_korean_job_title(title):
+            # Try form submit button (KIOST pattern)
+            form = row.select_one("form[action]")
+            if form:
+                submit = form.select_one("input[type='submit']")
+                if submit and submit.get("value"):
+                    title = submit["value"].strip()
+                if not href:
+                    action = form.get("action", "")
+                    action = re.sub(r";jsessionid=[^?]*", "", action)
+                    if action:
+                        href = action
+            # Try longest td text
+            if not title or len(title) < 3 or not _is_valid_korean_job_title(title):
+                for td in row.select("td"):
+                    t = td.get_text(strip=True)
+                    if (len(t) > len(title or "")
+                            and not _looks_like_date(t)
+                            and not t.isdigit()
+                            and _is_valid_korean_job_title(t)):
+                        title = t
 
         if not title or len(title) < 3:
             return None
 
-        # Strip "종료" (closed) prefix
-        title = re.sub(r"^종료\s*", "", title).strip()
+        # Strip "종료" / "진행중" prefix
+        title = re.sub(r"^(?:종료|진행중)\s*", "", title).strip()
         # Strip trailing "새글" / "첨부파일 있음" noise
         title = re.sub(r"새글$|첨부파일\s*있음$|new$", "", title, flags=re.IGNORECASE).strip()
 

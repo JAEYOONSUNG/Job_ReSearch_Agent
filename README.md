@@ -21,7 +21,11 @@ Automated pipeline for finding postdoctoral (or other academic) positions. Scrap
 git clone https://github.com/YOUR_USERNAME/job-search-pipeline.git
 cd job-search-pipeline
 
-# Using conda (recommended)
+# Option A: One-command setup (recommended)
+./setup.sh
+
+# Option B: Manual setup
+# Using conda
 conda create -n jobsearch python=3.10 -y
 conda activate jobsearch
 pip install -r requirements.txt
@@ -31,84 +35,69 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Install Playwright browsers (needed for ResearchGate, Glassdoor scraping)
+# Install Playwright browsers (optional — for ResearchGate, Glassdoor scraping)
 playwright install chromium
 ```
 
-### 2. Configure environment
+### 2. Personalize your profile
+
+Copy the example and edit with your research interests — **no source code changes needed**:
+
+```bash
+cp config/user_profile.example.yaml config/user_profile.yaml
+nano config/user_profile.yaml   # or your preferred editor
+```
+
+**`config/user_profile.yaml`:**
+```yaml
+# Your research fields → auto-generates "postdoc {field}" search keywords
+research_interests:
+  - synthetic biology
+  - CRISPR
+  - protein engineering
+
+# Extra search keywords (e.g., target institutions)
+extra_search_keywords:
+  - postdoc Broad Institute
+  - postdoc EMBL
+
+# CV keywords → used for scoring job relevance (0-100)
+cv_keywords:
+  - synthetic biology
+  - CRISPR
+  - Cas9
+  - protein engineering
+  - directed evolution
+
+# Seed PIs (Semantic Scholar Author IDs)
+# Find IDs: semanticscholar.org → author page URL → number at the end
+seed_pis:
+  "George Church": "145892667"
+  "Frances Arnold": "2795724"
+```
+
+See `config/user_profile.example.yaml` for the full template with all options.
+
+> **Note**: `config/user_profile.yaml` is gitignored. If the file is absent, hardcoded defaults in `src/config.py` are used (100% backward compatible).
+
+### 3. Configure environment
 
 ```bash
 # Create config directory and .env file
 mkdir -p ~/.config/job-search-pipeline
 cp .env.example ~/.config/job-search-pipeline/.env
-
-# Edit with your credentials
 nano ~/.config/job-search-pipeline/.env
 ```
 
-**.env file:**
-```
-# Gmail (optional - for email reports)
-GMAIL_ADDRESS=your_email@gmail.com
-GMAIL_APP_PASSWORD=your_app_password
-REPORT_RECIPIENTS=your_email@gmail.com
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GMAIL_ADDRESS` | For email reports | Gmail address |
+| `GMAIL_APP_PASSWORD` | For email reports | Google App Password ([create one](https://myaccount.google.com/apppasswords)) |
+| `REPORT_RECIPIENTS` | For email reports | Comma-separated recipient emails |
+| `SEMANTIC_SCHOLAR_API_KEY` | Optional | Increases rate limit 10x ([request key](https://www.semanticscholar.org/product/api#api-key)) |
+| `EXCEL_OUTPUT_DIR` | Optional | Where to save Excel files (default: `~/Dropbox/.../Postdoc`) |
 
-# Semantic Scholar API key (optional - increases rate limit from 100 to 1000 req/5min)
-SEMANTIC_SCHOLAR_API_KEY=
-```
-
-### 3. Customize your research interests
-
-Edit `src/config.py`:
-
-```python
-# Search keywords — what to search on job boards
-SEARCH_KEYWORDS = [
-    "postdoc synthetic biology",
-    "postdoc CRISPR",
-    "postdoc protein engineering",
-    # Add your own...
-]
-
-# CV keywords — used for scoring job relevance (0-100)
-CV_KEYWORDS = [
-    "synthetic biology",
-    "CRISPR",
-    "protein engineering",
-    "directed evolution",
-    # Add skills/techniques from your CV...
-]
-
-# Exclude keywords — filter out irrelevant fields
-EXCLUDE_KEYWORDS = [
-    "neuroscience",
-    "psychiatry",
-    # Add fields you want to exclude...
-]
-```
-
-### 4. Add your seed PIs
-
-Seed PIs are researchers whose co-author/citation networks will be explored to discover new PIs.
-
-Edit `src/discovery/seed_profiler.py`:
-
-```python
-KNOWN_S2_IDS: dict[str, str] = {
-    # "PI Name": "Semantic Scholar Author ID"
-    # Find IDs at https://www.semanticscholar.org/
-    "George Church": "145892667",
-    "Frances Arnold": "2795724",
-    # Add PIs in your field...
-}
-```
-
-To find Semantic Scholar author IDs:
-1. Go to https://www.semanticscholar.org/
-2. Search for the PI's name
-3. The author ID is the number in the URL: `semanticscholar.org/author/[ID]`
-
-### 5. Run the pipeline
+### 4. Run the pipeline
 
 ```bash
 # First run — scrapes all sources and builds the database
@@ -156,8 +145,11 @@ crontab -e
 
 ```
 job-search-pipeline/
+├── config/
+│   ├── user_profile.yaml          # Your settings (gitignored)
+│   └── user_profile.example.yaml  # Template with guide comments
 ├── src/
-│   ├── config.py              # All configuration (keywords, weights, etc.)
+│   ├── config.py              # Central config (loads user_profile.yaml)
 │   ├── db.py                  # SQLite database schema and helpers
 │   ├── pipeline.py            # Main orchestrator
 │   ├── scrapers/              # Job board scrapers
@@ -168,7 +160,7 @@ job-search-pipeline/
 │   │   ├── scholarshipdb.py   # ScholarshipDB
 │   │   └── ...
 │   ├── discovery/             # PI network discovery
-│   │   ├── seed_profiler.py   # Seed PI profiles (edit KNOWN_S2_IDS here)
+│   │   ├── seed_profiler.py   # Seed PI profiles (loads from YAML)
 │   │   ├── coauthor_network.py
 │   │   ├── citation_network.py
 │   │   └── pi_recommender.py
@@ -182,6 +174,7 @@ job-search-pipeline/
 │   └── institution_rankings.json  # University tier rankings
 ├── tests/                     # Test suite
 ├── launchd/                   # macOS scheduling
+├── setup.sh                   # One-command setup script
 ├── run.sh                     # Runner script
 ├── requirements.txt
 └── .env.example               # Environment template
@@ -204,22 +197,17 @@ Each job row includes: Title, PI Name, Institute, Tier, Country, Field, Keywords
 
 ## Configuration Reference
 
-### `src/config.py`
+### `config/user_profile.yaml` (primary — edit this)
 
-| Variable | Description |
-|----------|-------------|
-| `SEARCH_KEYWORDS` | Search queries used on job boards |
-| `CV_KEYWORDS` | Your skills/expertise for job scoring |
-| `EXCLUDE_KEYWORDS` | Fields to filter out |
-| `RECOMMENDER_WEIGHTS` | PI recommendation scoring weights |
-| `REGION_PRIORITY` | Region sort order (US, EU, Asia, Other) |
-| `EXCEL_OUTPUT_DIR` | Where to save Excel files (default: ~/Desktop) |
-
-### `src/discovery/seed_profiler.py`
-
-| Variable | Description |
-|----------|-------------|
-| `KNOWN_S2_IDS` | Seed PI names and Semantic Scholar IDs |
+| Key | Description |
+|-----|-------------|
+| `research_interests` | Your fields → auto-generates search keywords |
+| `extra_search_keywords` | Additional search queries (e.g., target institutions) |
+| `cv_keywords` | Skills/techniques for job scoring (0-100) |
+| `seed_pis` | PI names + Semantic Scholar author IDs |
+| `extra_exclude_keywords` | Additional fields to filter out (appended to built-in list) |
+| `region_priority` | Region sort order (default: US=1, EU=2, Korea=3, Asia=4, Other=5) |
+| `recommender_weights` | PI recommendation scoring weights |
 
 ### `~/.config/job-search-pipeline/.env`
 
@@ -229,6 +217,7 @@ Each job row includes: Title, PI Name, Institute, Tier, Country, Field, Keywords
 | `GMAIL_APP_PASSWORD` | Google App Password (not your regular password) |
 | `REPORT_RECIPIENTS` | Comma-separated recipient emails |
 | `SEMANTIC_SCHOLAR_API_KEY` | Optional S2 API key for higher rate limits |
+| `EXCEL_OUTPUT_DIR` | Where to save Excel files |
 
 ## License
 

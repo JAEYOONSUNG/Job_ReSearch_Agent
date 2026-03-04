@@ -15,7 +15,7 @@ from semanticscholar import SemanticScholar
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src import db
-from src.config import SEMANTIC_SCHOLAR_API_KEY
+from src.config import SEMANTIC_SCHOLAR_API_KEY, _USER_PROFILE_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +26,36 @@ _S2_DELAY = 3.1  # ~100 requests per 5 min for free tier
 # The S2 search API (limit=20) often fails to return these researchers
 # because their profiles are buried under namesakes with empty affiliations.
 # These IDs were verified via DOI→paper→author lookups on S2.
+# Loaded dynamically from config/user_profile.yaml when available.
 # ---------------------------------------------------------------------------
-KNOWN_S2_IDS: dict[str, str] = {
-    "George Church": "145892667",      # h=173, Harvard genetics/genomics
-    "David Baker": "2241617405",       # h=153, UW protein design, Nobel 2024
-    "Feng Zhang": "145126988",         # h=95, MIT/Broad CRISPR
-    "James Collins": "2231125920",     # h=124, MIT synthetic biology
-    "Frances Arnold": "2795724",       # h=116, Caltech directed evolution, Nobel 2018
-    "Christa Schleper": "6940827",     # h=74, Vienna archaea/extremophiles
-    "William Whitman": "2073798315",   # Prokaryotes/archaea taxonomy
-    "Ahmed Badran": "144777372",       # h=24, Scripps directed evolution
-    "David Liu": "2949942",            # h=100, Harvard base editing/prime editing
-}
+
+
+def _load_seed_pis() -> dict[str, str]:
+    """Load seed PI IDs from user profile YAML, falling back to defaults."""
+    if _USER_PROFILE_PATH.exists():
+        try:
+            import yaml
+
+            with open(_USER_PROFILE_PATH) as f:
+                profile = yaml.safe_load(f) or {}
+            if "seed_pis" in profile:
+                return {str(k): str(v) for k, v in profile["seed_pis"].items()}
+        except Exception:
+            pass
+    return {  # Default fallback
+        "George Church": "145892667",
+        "David Baker": "2241617405",
+        "Feng Zhang": "145126988",
+        "James Collins": "2231125920",
+        "Frances Arnold": "2795724",
+        "Christa Schleper": "6940827",
+        "William Whitman": "2073798315",
+        "Ahmed Badran": "144777372",
+        "David Liu": "2949942",
+    }
+
+
+KNOWN_S2_IDS: dict[str, str] = _load_seed_pis()
 
 _s2_client: Optional[SemanticScholar] = None
 

@@ -154,7 +154,8 @@ EXCLUDE_KEYWORDS = [
     "linguistics",
     "language acquisition",
     "language sciences",
-    "archaeology",
+    "archaeolog",       # archaeology, archaeologies, archaeological
+    "anthropolog",      # anthropology, anthropologies (not anthropogenic)
     "social work",
     # Earth Sciences
     "sediment-water",
@@ -170,9 +171,15 @@ EXCLUDE_KEYWORDS = [
     "natural language processing",
     "cybersecurity",
     # Art / Other
-    "art history",
+    "art histor",       # art history, art histories
     "musicology",
     "theology",
+    # Misclassified MPG / institutional positions
+    "astrochemistry",
+    "astronomy",
+    "catalyst",         # catalysts, catalytic, catalysis
+    "climate system",
+    "operando",
 ]
 
 # Title patterns that indicate non-researcher / non-postdoc positions.
@@ -672,3 +679,45 @@ def load_rankings() -> dict:
         with open(RANKINGS_PATH) as f:
             return json.load(f)
     return {}
+
+
+# ── User Profile Override ─────────────────────────────────────────────────
+_USER_PROFILE_PATH = PROJECT_ROOT / "config" / "user_profile.yaml"
+
+
+def _load_user_profile() -> dict:
+    """Load user profile from YAML. Returns empty dict if not found."""
+    if not _USER_PROFILE_PATH.exists():
+        return {}
+    try:
+        import yaml
+
+        with open(_USER_PROFILE_PATH) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+_profile = _load_user_profile()
+if _profile:
+    if "research_interests" in _profile:
+        _interests = _profile["research_interests"]
+        SEARCH_KEYWORDS = (
+            [f"postdoc {kw}" for kw in _interests]
+            + [f"postdoctoral {kw}" for kw in _interests[:6]]
+            + _profile.get("extra_search_keywords", [])
+        )
+    elif "extra_search_keywords" in _profile:
+        SEARCH_KEYWORDS.extend(_profile["extra_search_keywords"])
+
+    if "cv_keywords" in _profile:
+        CV_KEYWORDS = _profile["cv_keywords"]
+
+    if "extra_exclude_keywords" in _profile:
+        EXCLUDE_KEYWORDS.extend(_profile["extra_exclude_keywords"])
+
+    if "region_priority" in _profile:
+        REGION_PRIORITY = _profile["region_priority"]
+
+    if "recommender_weights" in _profile:
+        RECOMMENDER_WEIGHTS = _profile["recommender_weights"]

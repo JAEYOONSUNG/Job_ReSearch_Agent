@@ -27,6 +27,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# User profile (personal settings)
+config/user_profile.yaml
+
 # Claude Code
 .claude/*
 !.claude/commands/

@@ -1248,7 +1248,9 @@ def _is_excluded(job: dict) -> bool:
         return True
 
     # Title-only exclusion (non-researcher positions)
-    if any(kw.lower() in title for kw in EXCLUDE_TITLE_KEYWORDS):
+    # Normalize Unicode quotes so "bachelor\u2019s" matches "bachelor's"
+    title_norm = title.replace("\u2018", "'").replace("\u2019", "'")
+    if any(kw.lower() in title_norm for kw in EXCLUDE_TITLE_KEYWORDS):
         # Exception: keep if title also says "postdoc" or "research fellow"
         if any(k in title for k in ("postdoc", "post-doc", "postdoctoral",
                                      "post-doctoral", "research fellow")):
@@ -1270,12 +1272,42 @@ def _is_excluded(job: dict) -> bool:
     if any(pat.lower() in title for pat in GARBAGE_TITLE_PATTERNS):
         return True
 
+    # Korean jobs: require bio/research signal in title.
+    # Korean job boards (esp. HiBrainNet) list ALL types of positions
+    # (banks, government, factories, etc.).  Without this check,
+    # irrelevant jobs like 소상공인, 기념관장, 임기제공무원 leak through.
+    if _has_korean(job.get("title") or ""):
+        if not _is_bio_relevant_korean_title(job.get("title") or ""):
+            return True
+
     return False
 
 
 def _has_korean(text: str) -> bool:
     """Return True if text contains Korean characters."""
     return bool(re.search(r"[\uac00-\ud7a3]", text))
+
+
+_KOREAN_BIO_TITLE_SIGNALS = [
+    # Postdoc positions (always research-relevant)
+    "박사후", "박사 후", "석사후", "석사 후",
+    "postdoc", "post-doc", "postdoctoral",
+    # Bio / medical / science fields (Korean)
+    "바이오", "생명", "생물", "약학", "의과", "의학", "의생명",
+    "뇌과학", "뇌공학", "유전", "분자", "단백질", "효소", "미생물",
+    "세포", "게놈", "면역", "약리", "생화학", "발효", "보건연구",
+    "생명공학", "합성생물", "대사공학", "식품공학",
+    # English bio terms
+    "biotech", "crispr", "genomic", "protein", "biology",
+    "molecular", "biochem", "bioinformat", "microbio",
+    "synthetic bio", "enzyme", "ferment",
+]
+
+
+def _is_bio_relevant_korean_title(title: str) -> bool:
+    """Return True if a Korean job title contains bio/research signals."""
+    t = title.lower()
+    return any(sig in t for sig in _KOREAN_BIO_TITLE_SIGNALS)
 
 
 # PhD/Doctoral keywords — matched against TITLE only (not description)
@@ -2395,8 +2427,13 @@ def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path
 
         # Apply exclusion filter (expired deadlines, past-year posts, keyword exclusions)
         pre_filter = len(all_jobs)
+        excluded_urls = {j.get("url") for j in all_jobs
+                         if _is_excluded(j) and j.get("url")}
         all_jobs = [j for j in all_jobs if not _is_excluded(j)]
         excluded_count = pre_filter - len(all_jobs)
+        # Add excluded URLs to dismissed set so _update_sheet removes them
+        # from existing Excel rows too (not just new jobs)
+        all_dismissed = all_dismissed | excluded_urls
         logger.info("Loaded %d → %d jobs (%d excluded, %d dismissed)",
                     len(raw_jobs), len(all_jobs), excluded_count, len(all_dismissed))
 

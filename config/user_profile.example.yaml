@@ -1,0 +1,47 @@
+# Job Search Pipeline — User Profile
+# 이 파일을 user_profile.yaml로 복사 후 편집하세요.
+# cp config/user_profile.example.yaml config/user_profile.yaml
+
+# ── 관심 연구 분야 ──
+# 자동으로 "postdoc {분야}" 형태의 검색 키워드가 생성됩니다.
+research_interests:
+  - "your research field 1"
+  - "your research field 2"
+
+# ── 추가 검색 키워드 (기관별 등, 선택사항) ──
+# extra_search_keywords:
+#   - "postdoc Your Target Institute"
+
+# ── CV 키워드 (job description과 매칭하여 적합도 점수 산출) ──
+cv_keywords:
+  - "your skill 1"
+  - "your technique 1"
+
+# ── Seed PIs (Semantic Scholar Author ID) ──
+# 본인 분야의 주요 교수 5~20명을 등록하세요.
+# ID 찾는 법: https://www.semanticscholar.org/ 에서 검색
+#   → 저자 페이지 URL: semanticscholar.org/author/NAME/12345678
+#   → 12345678이 Author ID
+seed_pis:
+  "PI Name": "semantic_scholar_author_id"
+  # "Jane Doe": "12345678"
+
+# ── 제외 키워드 (기본 제외 목록에 추가됨, 선택사항) ──
+# extra_exclude_keywords:
+#   - "irrelevant field for you"
+
+# ── 지역 우선순위 (숫자 낮을수록 우선, 선택사항) ──
+# region_priority:
+#   US: 1
+#   EU: 2
+#   Korea: 3
+#   Asia: 4
+#   Other: 5
+
+# ── PI 추천 가중치 (선택사항) ──
+# recommender_weights:
+#   field_similarity: 0.30      # 연구 분야 유사도
+#   connection_strength: 0.25   # 공저자/인용 관계
+#   institution_ranking: 0.15   # 기관 티어
+#   h_index: 0.10               # h-index
+#   recent_activity: 0.20       # 최근 활동성

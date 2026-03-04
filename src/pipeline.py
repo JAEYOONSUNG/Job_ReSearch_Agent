@@ -588,8 +588,10 @@ def print_summary(jobs: list[dict]) -> None:
                 source = j.get("source") or ""
                 keywords = j.get("keywords") or ""
                 conditions = j.get("conditions") or ""
+                score = j.get("match_score") or 0
+                score_str = f" | Score: {score:.0%}" if score else ""
                 print(f"  {i}. {title}")
-                print(f"     {inst} {tier_str} | {country} [{source}]")
+                print(f"     {inst} {tier_str} | {country} [{source}]{score_str}")
                 if pi:
                     print(f"     PI: {pi}")
                 if keywords:

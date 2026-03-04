@@ -36,11 +36,14 @@ SQLite at `data/jobs.db`. Schema defined in `src/db.py`.
 - Config: `~/.config/job-search-pipeline/.env`
 
 ## Customization
-- **Search keywords**: Edit `SEARCH_KEYWORDS` in `src/config.py`
-- **CV matching keywords**: Edit `CV_KEYWORDS` in `src/config.py`
-- **Exclude keywords**: Edit `EXCLUDE_KEYWORDS` in `src/config.py`
-- **Seed PIs**: Edit `KNOWN_S2_IDS` in `src/discovery/seed_profiler.py`
-- **Scoring weights**: Edit `RECOMMENDER_WEIGHTS` in `src/config.py`
+Edit `config/user_profile.yaml` to personalize (no source code changes needed):
+- **Research interests** → auto-generates search keywords
+- **CV keywords** → job matching scores
+- **Seed PIs** → Semantic Scholar author IDs
+- **Region priority / Recommender weights** → optional overrides
+
+Template: `cp config/user_profile.example.yaml config/user_profile.yaml`
+Fallback: If YAML is absent, hardcoded defaults in `src/config.py` are used.
 
 ## Style
 - Type hints for all function signatures

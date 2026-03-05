@@ -634,28 +634,34 @@ def main() -> None:
         logger.info("Excel exported to %s", excel_path)
         return
 
+    # ── Module: Weekly PI discovery (pre-step, before core) ──
     if args.weekly:
         run_weekly_discovery()
 
-    # Daily scrape + score
-    jobs = run_scrapers(sequential=args.sequential)
+    # ── Data source: scrape OR load from DB ──
+    do_scrape = not (args.weekly and not args.full_refresh)
+    if do_scrape:
+        jobs = run_scrapers(sequential=args.sequential)
+    else:
+        from src.db import get_jobs
+        jobs = get_jobs(limit=10000)
+        logger.info("Weekly PI mode: loaded %d existing jobs from DB (no scraping)", len(jobs))
+
+    # ── Core pipeline (always the same, regardless of mode) ──
     jobs = run_scoring(jobs)
 
-    # Deep enrichment: resolve aggregators + single-name PIs
     try:
         from src.matching.job_enricher import enrich_jobs_deep
         jobs = enrich_jobs_deep(jobs)
     except Exception as e:
         logger.error("Deep enrichment failed: %s", e, exc_info=True)
 
-    # PI URL enrichment (batch, after scoring)
     if not args.skip_pi_lookup:
         jobs = run_pi_enrichment(jobs)
 
-    # Dept URL enrichment (always runs, uses persistent cache)
     jobs = run_dept_enrichment(jobs)
 
-    # Export Excel (always)
+    # ── Export (weekly without full-refresh → incremental to preserve edits) ──
     try:
         from src.reporting.excel_export import export_to_excel
         excel_path = export_to_excel(full_refresh=args.full_refresh)

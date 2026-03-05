@@ -119,6 +119,12 @@ _FALSE_POSITIVE_NAMES = {
     "red apply", "mechanics employment", "description the",
     "hill anton",  # "Chapel Hill" + "Anton lab" misparse
     "about the", "about our", "about this",
+    # Garbage PI names from actual logs
+    "msc students", "based food", "positions cii", "cologne have",
+    "t. biotechnology", "department bouchard", "department usmarc",
+    "enrollment management", "material measurement",
+    "collaborative screening", "center chaikof", "cxc calibration",
+    "profs annina", "photosynthesis to",
 }
 
 
@@ -515,6 +521,11 @@ def _is_valid_name(name: str) -> bool:
         "further", "former", "info", "weekend", "smart", "spring",
         "professor", "doc", "phd", "ellis",  # titles/acronyms, not first names
         "principal",  # "Principal Investigator" false match
+        # Garbage PI starters from actual logs
+        "department", "center", "centre", "collaborative", "enrollment",
+        "material", "detectors", "positions", "msc", "bsc",
+        "based", "list", "photosynthesis", "profs", "cologne",
+        "cxc", "msci",
     }
     if first_word in non_name_starters:
         return False
@@ -548,11 +559,14 @@ def _is_valid_name(name: str) -> bool:
         "employment", "apply", "expired", "status", "description",
         "systems", "skills", "schedule", "leadership", "networks",
         "people", "harbor", "harbour", "acoustics", "university",
+        # Garbage PI second-words from actual logs
+        "students", "food", "management", "measurement", "screening",
+        "characterization", "calibration", "biotechnology", "have",
     }
     if len(words) == 2 and words[1] in non_surname_seconds:
         return False
     # Reject phrases with common prepositions/conjunctions as second word
-    if len(words) >= 2 and words[1] in {"and", "from", "with", "at", "the", "for", "or", "in", "on"}:
+    if len(words) >= 2 and words[1] in {"and", "from", "with", "at", "the", "for", "or", "in", "on", "of", "to"}:
         return False
     return True
 

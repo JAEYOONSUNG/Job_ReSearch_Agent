@@ -2390,10 +2390,17 @@ def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path
             conn.execute("UPDATE jobs SET exported_at = NULL")
         logger.info("Full refresh: reset all statuses and exported_at")
 
-        # Delete existing file so we get a clean _fresh_export()
+        # Backup existing file with date suffix instead of deleting
         if filepath.exists():
-            filepath.unlink()
-            logger.info("Full refresh: deleted existing %s", filepath)
+            from datetime import datetime as _dt
+            date_str = _dt.now().strftime("%Y%m%d")
+            backup_path = filepath.with_name(f"JobSearch_Auto_{date_str}.xlsx")
+            # If today's backup already exists, add time
+            if backup_path.exists():
+                date_str = _dt.now().strftime("%Y%m%d_%H%M")
+                backup_path = filepath.with_name(f"JobSearch_Auto_{date_str}.xlsx")
+            filepath.rename(backup_path)
+            logger.info("Full refresh: backed up existing → %s", backup_path)
 
         # Load all jobs, apply hard exclusion only (EXCLUDE_KEYWORDS in description)
         raw_jobs = get_jobs(limit=10000)

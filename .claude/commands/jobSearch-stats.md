@@ -1,12 +1,19 @@
 ---
-allowed-tools: Bash(/home/sunjgaeyoon/Desktop/miniconda3/envs/jobsearch/bin/python3:*)
+allowed-tools: Bash(cd:*),Bash(./run.sh:*),Bash(bash:*),Bash(python*:*)
 ---
 
 DB 현황 통계 출력. Run:
 
 ```bash
-cd /home/sunjgaeyoon/Job_ReSearch_Agent && /home/sunjgaeyoon/Desktop/miniconda3/envs/jobsearch/bin/python3 << 'PYEOF'
-import sqlite3
+cd /home/sunjgaeyoon/Job_ReSearch_Agent && ./run.sh --stats $ARGUMENTS
+```
+
+If `--stats` flag is not supported, fall back to running inline:
+
+```bash
+cd /home/sunjgaeyoon/Job_ReSearch_Agent && python3 << 'PYEOF'
+import sqlite3, os
+db_path = os.path.join(os.path.dirname(__file__) if '__file__' in dir() else '.', 'data', 'jobs.db')
 conn = sqlite3.connect('data/jobs.db')
 cur = conn.cursor()
 

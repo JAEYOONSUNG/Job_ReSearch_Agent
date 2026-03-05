@@ -9,26 +9,38 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONDA_ENV="jobsearch"
 LOG_FILE="${SCRIPT_DIR}/logs/run_$(date +%Y-%m-%d_%H%M).log"
 
-# Find the conda env Python (try multiple locations)
+# Read Python path from config/user_profile.yaml if available
 PYTHON=""
-for candidate in \
-    "$HOME/Desktop/miniconda3/envs/${CONDA_ENV}/bin/python" \
-    "$HOME/miniconda3/envs/${CONDA_ENV}/bin/python" \
-    "$HOME/miniforge3/envs/${CONDA_ENV}/bin/python" \
-    "$HOME/mambaforge/envs/${CONDA_ENV}/bin/python" \
-    "$HOME/anaconda3/envs/${CONDA_ENV}/bin/python" \
-    "$HOME/conda/envs/${CONDA_ENV}/bin/python"; do
-    if [[ -x "$candidate" ]]; then
-        PYTHON="$candidate"
-        break
+PROFILE="${SCRIPT_DIR}/config/user_profile.yaml"
+if [[ -f "$PROFILE" ]]; then
+    _yaml_python=$(grep -A1 'paths:' "$PROFILE" | grep 'python:' | sed 's/.*python:\s*//' | sed "s|~|$HOME|g" | tr -d ' ')
+    if [[ -n "$_yaml_python" && -x "$_yaml_python" ]]; then
+        PYTHON="$_yaml_python"
     fi
-done
+fi
+
+# Fallback: search common conda locations
+if [[ -z "$PYTHON" ]]; then
+    CONDA_ENV="jobsearch"
+    for candidate in \
+        "$HOME/Desktop/miniconda3/envs/${CONDA_ENV}/bin/python" \
+        "$HOME/miniconda3/envs/${CONDA_ENV}/bin/python" \
+        "$HOME/miniforge3/envs/${CONDA_ENV}/bin/python" \
+        "$HOME/mambaforge/envs/${CONDA_ENV}/bin/python" \
+        "$HOME/anaconda3/envs/${CONDA_ENV}/bin/python" \
+        "$HOME/conda/envs/${CONDA_ENV}/bin/python"; do
+        if [[ -x "$candidate" ]]; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+fi
 
 if [[ -z "$PYTHON" ]]; then
-    # Fallback: try conda activate
+    # Last resort: try conda activate
+    CONDA_ENV="jobsearch"
     eval "$(conda shell.bash hook 2>/dev/null)" || eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
     conda activate "${CONDA_ENV}" 2>/dev/null || {
         echo "Creating conda env ${CONDA_ENV}..."

@@ -21,10 +21,8 @@ DB_PATH = DATA_DIR / "jobs.db"
 RANKINGS_PATH = DATA_DIR / "institution_rankings.json"
 CV_KEYWORDS_PATH = DATA_DIR / "cv_keywords.json"
 
-EXCEL_OUTPUT_DIR = Path(os.getenv(
-    "EXCEL_OUTPUT_DIR",
-    str(Path.home() / "Dropbox/0.Personal folder/1. CV/0. Postdoc"),
-))
+_default_excel_dir = str(Path.home() / "Dropbox/0.Personal folder/1. CV/0. Postdoc")
+EXCEL_OUTPUT_DIR = Path(os.getenv("EXCEL_OUTPUT_DIR", _default_excel_dir)).expanduser()
 
 # ── Email ──────────────────────────────────────────────────────────────────
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
@@ -700,6 +698,11 @@ def _load_user_profile() -> dict:
 
 _profile = _load_user_profile()
 if _profile:
+    # Paths override
+    _paths = _profile.get("paths", {})
+    if _paths.get("excel_output_dir"):
+        EXCEL_OUTPUT_DIR = Path(_paths["excel_output_dir"]).expanduser()
+
     if "research_interests" in _profile:
         _interests = _profile["research_interests"]
         SEARCH_KEYWORDS = (

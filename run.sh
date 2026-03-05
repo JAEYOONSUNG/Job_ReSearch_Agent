@@ -1,12 +1,10 @@
 #!/bin/bash
-# Job Search Pipeline Runner (base script — use run-daily.sh or run-full-refresh.sh)
+# Job Search Pipeline Runner (base script)
 # Usage:
-#   ./run-daily.sh              # Incremental: new jobs only, email
-#   ./run-full-refresh.sh       # Full refresh: reset + complete re-export, email
-#   ./run.sh --email            # Direct: daily run with email
-#   ./run.sh --full-refresh     # Direct: full refresh
-#   ./run.sh --weekly --email   # Weekly PI discovery + daily run
-#   ./run.sh --summary          # Daily run with console summary
+#   ./run-daily.sh              # Daily: scrape + email (PI lookup skip)
+#   ./run-pi-lookup.sh          # Weekly: PI discovery + enrichment (no scraping)
+#   ./run-full-refresh.sh       # Setup: PI discovery + scrape + fresh Excel
+#   ./run.sh [flags]            # Direct: pass any pipeline flags
 
 set -euo pipefail
 

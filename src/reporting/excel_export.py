@@ -2383,12 +2383,13 @@ def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path
     filepath = output_dir / "JobSearch_Auto.xlsx"
 
     if full_refresh:
-        # ── Full refresh: reset DB, delete old file, export everything ──
+        # ── Full refresh: reset merged jobs, preserve user dismissals ──
         from src.db import get_connection
         with get_connection() as conn:
-            conn.execute("UPDATE jobs SET status = 'new' WHERE status IN ('dismissed','merged')")
+            # Only reset 'merged' (dedup artifacts) — never touch 'dismissed' (user choice)
+            conn.execute("UPDATE jobs SET status = 'new' WHERE status = 'merged'")
             conn.execute("UPDATE jobs SET exported_at = NULL")
-        logger.info("Full refresh: reset all statuses and exported_at")
+        logger.info("Full refresh: reset merged→new, preserved dismissed, cleared exported_at")
 
         # Backup existing file with date suffix instead of deleting
         if filepath.exists():
@@ -2402,13 +2403,17 @@ def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path
             filepath.rename(backup_path)
             logger.info("Full refresh: backed up existing → %s", backup_path)
 
-        # Load all jobs, apply hard exclusion only (EXCLUDE_KEYWORDS in description)
+        # Load all non-dismissed jobs, apply hard exclusion
         raw_jobs = get_jobs(limit=10000)
-        all_jobs = [j for j in raw_jobs if not _is_excluded(j)]
-        all_dismissed: set[str] = set()
+        from src.db import get_dismissed_urls
+        all_dismissed = get_dismissed_urls()
+        all_jobs = [j for j in raw_jobs
+                    if j.get("status") != "dismissed"
+                    and j.get("url") not in all_dismissed
+                    and not _is_excluded(j)]
 
         excluded_count = len(raw_jobs) - len(all_jobs)
-        logger.info("Full refresh: %d total → %d after exclusion (%d excluded)",
+        logger.info("Full refresh: %d total → %d after exclusion (%d excluded/dismissed)",
                     len(raw_jobs), len(all_jobs), excluded_count)
     else:
         # ── Incremental (existing behaviour) ──

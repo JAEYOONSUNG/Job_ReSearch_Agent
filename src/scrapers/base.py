@@ -895,48 +895,49 @@ class BaseScraper(abc.ABC):
     async def async_run(self) -> list[dict[str, Any]]:
         """Async full scrape cycle: fetch -> enrich -> dedup -> upsert -> log.
 
-        Falls back to running the sync ``scrape()`` in a thread executor
-        if the scraper does not override ``async_scrape()``.
+        For sync scrapers (no ``async_scrape`` override), the *entire*
+        pipeline (scrape + enrich + upsert) runs inside a thread executor.
+        This guarantees that DB upserts complete even when
+        ``asyncio.wait_for`` cancels the coroutine on timeout — the
+        background thread keeps running and saves results to the DB.
         """
         from src.db import log_scrape, upsert_job
 
         self.logger.info("Starting async scraper: %s", self.name)
         try:
-            # Use async_scrape if overridden, else run sync scrape in executor
             if self._has_async_scrape():
+                # Async path: custom async_scrape -> enrich -> upsert in coroutine
                 raw_jobs = await self.async_scrape()
+                self.logger.info("Raw results: %d", len(raw_jobs))
+
+                enriched = [self.enrich(j) for j in raw_jobs]
+                enriched = [j for j in enriched if not self.is_garbage_title(j.get("title"))]
+                unique = self._deduplicate(enriched)
+                self.logger.info("After dedup: %d", len(unique))
+
+                new_count = 0
+                for job in unique:
+                    try:
+                        _, is_new = upsert_job(job)
+                        if is_new:
+                            new_count += 1
+                    except Exception:
+                        self.logger.exception("Failed to upsert job: %s", job.get("url"))
+
+                self.logger.info(
+                    "Scraper %s finished: %d found, %d new",
+                    self.name, len(unique), new_count,
+                )
+                log_scrape(
+                    source=self.name, status="success",
+                    jobs_found=len(unique), new_jobs=new_count,
+                )
+                return unique
             else:
+                # Sync path: run FULL pipeline (scrape+enrich+upsert) in
+                # executor thread so DB writes survive asyncio timeout.
                 loop = asyncio.get_running_loop()
-                raw_jobs = await loop.run_in_executor(None, self.scrape)
-            self.logger.info("Raw results: %d", len(raw_jobs))
-
-            enriched = [self.enrich(j) for j in raw_jobs]
-            enriched = [j for j in enriched if not self.is_garbage_title(j.get("title"))]
-            unique = self._deduplicate(enriched)
-            self.logger.info("After dedup: %d", len(unique))
-
-            new_count = 0
-            for job in unique:
-                try:
-                    _, is_new = upsert_job(job)
-                    if is_new:
-                        new_count += 1
-                except Exception:
-                    self.logger.exception("Failed to upsert job: %s", job.get("url"))
-
-            self.logger.info(
-                "Scraper %s finished: %d found, %d new",
-                self.name,
-                len(unique),
-                new_count,
-            )
-            log_scrape(
-                source=self.name,
-                status="success",
-                jobs_found=len(unique),
-                new_jobs=new_count,
-            )
-            return unique
+                return await loop.run_in_executor(None, self.run)
 
         except Exception as exc:
             self.logger.exception("Scraper %s failed", self.name)

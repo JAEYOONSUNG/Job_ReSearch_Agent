@@ -40,11 +40,24 @@ print("\n=== Jobs by Status ===")
 for r in cur.fetchall():
     print(f"  {r[0]:25s} {r[1]:4d}")
 
-cur.execute("SELECT COUNT(*) FROM jobs WHERE match_score > 0")
+cur.execute("SELECT COUNT(*) FROM jobs WHERE match_score > 0 AND status != 'dismissed'")
 scored = cur.fetchone()[0]
-cur.execute("SELECT COUNT(*) FROM jobs WHERE scholar_url IS NOT NULL AND scholar_url != ''")
+cur.execute("SELECT COUNT(*) FROM jobs WHERE scholar_url IS NOT NULL AND scholar_url != '' AND status != 'dismissed'")
 scholar = cur.fetchone()[0]
-print(f"\n=== Enrichment: {scored} scored, {scholar} with Scholar URL ===")
+cur.execute("SELECT COUNT(*) FROM jobs WHERE lab_url IS NOT NULL AND lab_url != '' AND status != 'dismissed'")
+lab = cur.fetchone()[0]
+print(f"\n=== Job Enrichment: {scored} scored, {scholar} scholar_url, {lab} lab_url ===")
+
+cur.execute("SELECT COUNT(*) FROM pis WHERE scholar_url IS NOT NULL AND scholar_url != ''")
+pi_scholar = cur.fetchone()[0]
+cur.execute("SELECT COUNT(*) FROM pis WHERE lab_url IS NOT NULL AND lab_url != ''")
+pi_lab = cur.fetchone()[0]
+print(f"=== PI Enrichment: {pi_scholar} scholar_url, {pi_lab} lab_url (of {rec} recommended) ===")
+
+cur.execute("SELECT region, COUNT(*) FROM jobs WHERE status='new' GROUP BY region ORDER BY COUNT(*) DESC")
+print("\n=== New Jobs by Region ===")
+for r in cur.fetchall():
+    print(f"  {(r[0] or 'Unknown'):25s} {r[1]:4d}")
 conn.close()
 PYEOF
 ```

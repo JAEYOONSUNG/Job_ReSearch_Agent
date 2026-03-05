@@ -200,22 +200,28 @@ def run_scoring(jobs: list[dict]) -> list[dict]:
 
 
 def _persist_match_scores(jobs: list[dict]) -> None:
-    """Write match_score back to the DB for all scored jobs."""
+    """Write match_score back to the DB for all scored jobs.
+
+    Persists ALL scores (including 0) so that every job is evaluated
+    and stale scores from previous runs are updated.
+    """
     from src.db import get_connection
 
     updates = [
-        (j["match_score"], j["url"])
+        (j["match_score"], j.get("region"), j.get("tier"), j["url"])
         for j in jobs
-        if j.get("url") and j.get("match_score", 0) > 0
+        if j.get("url") and j.get("match_score") is not None
     ]
     if not updates:
         return
     with get_connection() as conn:
         conn.executemany(
-            "UPDATE jobs SET match_score = ? WHERE url = ?",
+            "UPDATE jobs SET match_score = ?, region = COALESCE(?, region),"
+            " tier = COALESCE(?, tier) WHERE url = ?",
             updates,
         )
-    logger.info("Persisted match_score for %d jobs", len(updates))
+    scored = sum(1 for u in updates if u[0] > 0)
+    logger.info("Persisted match_score for %d jobs (%d with score>0)", len(updates), scored)
 
 
 def _persist_alt_urls(jobs: list[dict]) -> None:
@@ -642,6 +648,22 @@ def main() -> None:
     do_scrape = not (args.weekly and not args.full_refresh)
     if do_scrape:
         jobs = run_scrapers(sequential=args.sequential)
+
+        if args.full_refresh:
+            # Timed-out scrapers' threads may still be upserting to DB.
+            # Wait briefly, then merge DB data so their results are included
+            # and ALL existing jobs get re-scored.
+            import time
+            time.sleep(5)
+            from src.db import get_jobs
+            all_db = get_jobs(limit=10000)
+            scraped_urls = {j["url"] for j in jobs if j.get("url")}
+            extra = [j for j in all_db if j.get("url") and j["url"] not in scraped_urls]
+            jobs.extend(extra)
+            logger.info(
+                "Full-refresh: %d scraped + %d from DB = %d total for scoring",
+                len(scraped_urls), len(extra), len(jobs),
+            )
     else:
         from src.db import get_jobs
         jobs = get_jobs(limit=10000)

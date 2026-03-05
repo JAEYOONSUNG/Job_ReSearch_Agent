@@ -11,7 +11,6 @@ from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
-from scholarly import scholarly
 
 from src import db
 from src.discovery.web_search import ddg_search
@@ -34,37 +33,24 @@ _HEADERS = {"User-Agent": _USER_AGENT}
 def _find_url_via_scholar(name: str, institute: Optional[str] = None) -> Optional[str]:
     """Search Google Scholar for a PI and extract the homepage URL.
 
-    Scholarly fills the ``homepage`` field from the author profile page.
-    Uses FreeProxies to avoid IP blocking.
+    Uses the fast direct-scrape ``search_scholar_author`` with built-in
+    circuit breaker instead of the slow ``scholarly`` library.
     """
-    from src.discovery.seed_profiler import _setup_scholarly_proxy
-    _setup_scholarly_proxy()
     try:
-        query = f"{name} {institute}" if institute else name
-        results = scholarly.search_author(query)
-        author = next(results, None)
-        if author is None:
-            return None
-
-        time.sleep(_SCHOLARLY_DELAY)
-        author = scholarly.fill(author)
-
-        homepage = author.get("homepage", "")
-        if homepage and _is_valid_lab_url(homepage):
-            logger.debug("Scholar homepage for %s: %s", name, homepage)
-            return homepage
-
-        # Some profiles link to the university page in the affiliation
-        # or email domain -- we can derive a search from that
-        email_domain = author.get("email_domain", "")
-        if email_domain:
-            return _search_university_directory(name, email_domain)
-
+        from src.discovery.scholar_scraper import search_scholar_author
+    except ImportError:
+        logger.debug("scholar_scraper unavailable, skipping Scholar lookup")
         return None
-    except StopIteration:
+
+    try:
+        gs_data = search_scholar_author(name, institute)
+        if gs_data and gs_data.get("scholar_url"):
+            logger.debug("Scholar profile for %s: %s", name, gs_data["scholar_url"])
+            # The Scholar profile URL itself is not a lab URL,
+            # but we return None here — the caller stores scholar_url separately.
         return None
     except Exception:
-        logger.exception("Error searching Scholar for %s", name)
+        logger.debug("Scholar lookup failed for %s", name)
         return None
 
 
@@ -294,14 +280,7 @@ def find_lab_url_for_pi(name: str, institute: Optional[str] = None) -> Optional[
 
     Returns the URL string if found, else None.
     """
-    # Strategy 1: Google Scholar homepage
-    url = _find_url_via_scholar(name, institute)
-    if url:
-        return url
-
-    time.sleep(_SCHOLARLY_DELAY)
-
-    # Strategy 2: DDG multi-query search (richer than single directory query)
+    # Strategy 1: DDG multi-query search
     url = find_lab_url_multi_strategy(name, institute)
     if url:
         return url
@@ -479,53 +458,97 @@ def _ddg_find_domain(institute: str) -> Optional[str]:
 
 
 def find_lab_urls() -> dict:
-    """Find lab URLs for all recommended PIs that lack one.
+    """Find lab URLs and Scholar URLs for recommended PIs that lack them.
+
+    Uses the fast direct-scrape ``search_scholar_author`` (with circuit
+    breaker) instead of the slow ``scholarly`` library.  Stores both
+    ``lab_url`` and ``scholar_url`` in the PI record.
 
     Returns
     -------
     dict
-        Summary: ``{"checked": int, "found": int, "failed": int}``.
+        Summary: ``{"checked": int, "found_lab": int, "found_scholar": int, "failed": int}``.
     """
     with db.get_connection() as conn:
         rows = conn.execute(
             "SELECT id, name, institute FROM pis "
-            "WHERE is_recommended = 1 AND (lab_url IS NULL OR lab_url = '')"
+            "WHERE is_recommended = 1 "
+            "AND ((lab_url IS NULL OR lab_url = '') "
+            "  OR (scholar_url IS NULL OR scholar_url = ''))"
         ).fetchall()
         pis_to_check = [dict(r) for r in rows]
 
     if not pis_to_check:
-        logger.info("No PIs need lab URL lookup.")
-        return {"checked": 0, "found": 0, "failed": 0}
+        logger.info("No PIs need lab/scholar URL lookup.")
+        return {"checked": 0, "found_lab": 0, "found_scholar": 0, "failed": 0}
 
-    logger.info("Looking up lab URLs for %d PIs", len(pis_to_check))
+    logger.info("Looking up lab/scholar URLs for %d PIs", len(pis_to_check))
 
-    found = 0
+    found_lab = 0
+    found_scholar = 0
     failed = 0
+
+    # Import the fast direct-scrape Scholar searcher (has its own circuit breaker)
+    try:
+        from src.discovery.scholar_scraper import search_scholar_author
+        _has_scholar_scraper = True
+    except ImportError:
+        _has_scholar_scraper = False
 
     for pi in pis_to_check:
         name = pi["name"]
         institute = pi.get("institute")
         pi_id = pi["id"]
 
-        logger.info("Searching lab URL for %s (%s)", name, institute or "?")
+        logger.info("Searching lab URL for %s", name)
 
-        url = find_lab_url_for_pi(name, institute)
+        scholar_url = None
+        lab_url = None
 
-        if url:
+        # Strategy 1: Fast Google Scholar direct scrape (scholar_url + citations)
+        is_single_name = " " not in name.strip()
+        if _has_scholar_scraper and not is_single_name:
+            gs_data = search_scholar_author(name, institute)
+            if gs_data:
+                scholar_url = gs_data.get("scholar_url")
+
+        # Strategy 2: DDG multi-query for lab_url
+        lab_url = find_lab_url_multi_strategy(name, institute)
+
+        # Strategy 3: University directory search
+        if not lab_url and institute:
+            domain = _institute_to_domain(institute)
+            if domain:
+                lab_url = _search_university_directory(name, domain)
+
+        # Persist whatever we found
+        updates: list[str] = []
+        values: list = []
+        if scholar_url:
+            updates.append("scholar_url = ?")
+            values.append(scholar_url)
+            found_scholar += 1
+        if lab_url:
+            updates.append("lab_url = ?")
+            values.append(lab_url)
+            found_lab += 1
+
+        if updates:
+            updates.append("updated_at = datetime('now')")
+            values.append(pi_id)
             with db.get_connection() as conn:
                 conn.execute(
-                    "UPDATE pis SET lab_url = ?, updated_at = datetime('now') WHERE id = ?",
-                    (url, pi_id),
+                    f"UPDATE pis SET {', '.join(updates)} WHERE id = ?",
+                    values,
                 )
-            found += 1
-            logger.info("Found lab URL for %s: %s", name, url)
+            logger.info("Found URLs for %s: scholar=%s lab=%s", name, scholar_url or "-", lab_url or "-")
         else:
             failed += 1
-            logger.debug("No lab URL found for %s", name)
+            logger.debug("No URLs found for %s", name)
 
-        # Rate limit between PIs
         time.sleep(_SCHOLARLY_DELAY)
 
-    summary = {"checked": len(pis_to_check), "found": found, "failed": failed}
-    logger.info("Lab URL search complete: %s", summary)
+    summary = {"checked": len(pis_to_check), "found_lab": found_lab,
+               "found_scholar": found_scholar, "failed": failed}
+    logger.info("Lab/scholar URL search complete: %s", summary)
     return summary

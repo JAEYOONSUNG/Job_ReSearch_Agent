@@ -15,7 +15,7 @@ LOG_FILE="${SCRIPT_DIR}/logs/run_$(date +%Y-%m-%d_%H%M).log"
 PYTHON=""
 PROFILE="${SCRIPT_DIR}/config/user_profile.yaml"
 if [[ -f "$PROFILE" ]]; then
-    _yaml_python=$(grep -A1 'paths:' "$PROFILE" | grep 'python:' | sed 's/.*python:\s*//' | sed "s|~|$HOME|g" | tr -d ' ')
+    _yaml_python=$(grep '^\s*python:' "$PROFILE" | head -1 | sed 's/.*python:\s*//' | sed "s|~|$HOME|g" | tr -d ' ')
     if [[ -n "$_yaml_python" && -x "$_yaml_python" ]]; then
         PYTHON="$_yaml_python"
     fi

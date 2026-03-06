@@ -9,7 +9,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_FILE="${SCRIPT_DIR}/logs/run_$(date +%Y-%m-%d_%H%M).log"
+LOG_DIR="${SCRIPT_DIR}/logs"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/run_$(date +%Y-%m-%d_%H%M).log"
+GIT_BRANCH="$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+GIT_COMMIT="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # Read Python path from config/user_profile.yaml if available
 PYTHON=""
@@ -55,6 +59,7 @@ cd "${SCRIPT_DIR}"
 
 # Run pipeline
 echo "[$(date)] Starting job search pipeline..." | tee -a "${LOG_FILE}"
+echo "[$(date)] Repo: ${GIT_BRANCH}@${GIT_COMMIT} (${SCRIPT_DIR})" | tee -a "${LOG_FILE}"
 echo "[$(date)] Using Python: ${PYTHON}" | tee -a "${LOG_FILE}"
 ${PYTHON} -m src.pipeline "$@" 2>&1 | tee -a "${LOG_FILE}"
 echo "[$(date)] Pipeline complete." | tee -a "${LOG_FILE}"

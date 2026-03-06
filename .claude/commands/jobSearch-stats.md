@@ -2,18 +2,27 @@
 allowed-tools: Bash(cd:*),Bash(./run.sh:*),Bash(bash:*),Bash(python*:*)
 ---
 
-DB 현황 통계 출력. Run:
+DB 현황 통계 출력. 현재 git 루트 또는 `JOB_RESEARCH_AGENT_ROOT`를 기준으로 실행.
 
 ```bash
-cd /home/sunjgaeyoon/Job_ReSearch_Agent && ./run.sh --stats $ARGUMENTS
-```
-
-If `--stats` flag is not supported, fall back to running inline:
-
-```bash
-cd /home/sunjgaeyoon/Job_ReSearch_Agent && python3 << 'PYEOF'
+REPO_ROOT="${JOB_RESEARCH_AGENT_ROOT:-}"
+if [ -z "$REPO_ROOT" ]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [ -z "$REPO_ROOT" ] || [ ! -x "$REPO_ROOT/run.sh" ]; then
+  for candidate in "$HOME/Job_ReSearch_Agent" "$HOME/Desktop/Job_ReSearch_Agent" "/home/sunjgaeyoon/Job_ReSearch_Agent"; do
+    if [ -x "$candidate/run.sh" ]; then
+      REPO_ROOT="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$REPO_ROOT" ] || [ ! -x "$REPO_ROOT/run.sh" ]; then
+  echo "Could not locate Job_ReSearch_Agent. Set JOB_RESEARCH_AGENT_ROOT." >&2
+  exit 1
+fi
+cd "$REPO_ROOT" && python3 << 'PYEOF'
 import sqlite3, os
-db_path = os.path.join(os.path.dirname(__file__) if '__file__' in dir() else '.', 'data', 'jobs.db')
 conn = sqlite3.connect('data/jobs.db')
 cur = conn.cursor()
 
@@ -63,3 +72,4 @@ PYEOF
 ```
 
 Show the output to the user.
+Optional env: `JOB_RESEARCH_AGENT_ROOT=/path/to/Job_ReSearch_Agent`

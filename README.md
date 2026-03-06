@@ -1,89 +1,96 @@
-# Academic Job Search Pipeline
+# Job ReSearch Agent
 
-Automated pipeline for finding postdoctoral (or other academic) positions. Scrapes 12+ job boards, discovers PIs through citation networks, scores matches against your CV keywords, and exports structured Excel reports.
+Automated academic job search pipeline that scrapes 15+ job boards, discovers PIs through Semantic Scholar citation/co-author networks, scores matches against your CV, and exports structured Excel dashboards.
+
+## How It Works
+
+```
+YAML Profile ──> Seed PIs ──> Co-author / Citation Network ──> PI Recommendations
+     │                                                               │
+     └──> Search Keywords ──> 15+ Scrapers ──> Dedup + Score ──> Excel Dashboard
+                                                    │
+                                              PI Name Extraction
+                                              Institution Tiering
+                                              Keyword Matching
+```
+
+**Three operating modes:**
+
+| Mode | What it does | When to use |
+|------|-------------|-------------|
+| **Full Refresh** | PI discovery + scrape all sources + fresh Excel | Initial setup, or monthly reset |
+| **Daily** | Scrape new jobs + score + incremental Excel update | Twice daily (cron) |
+| **Weekly PI Lookup** | PI network expansion + enrichment (no scraping) | Weekly (cron) |
 
 ## Features
 
-- **Multi-source scraping**: LinkedIn, Indeed, Euraxess, ScholarshipDB, ResearchGate, Glassdoor, Nature Careers, jobs.ac.uk, AcademicPositions, and more
-- **PI discovery**: Builds co-author and citation networks from seed PIs using Semantic Scholar to discover new labs
-- **Smart matching**: Scores jobs against your CV keywords and research interests
-- **Institution ranking**: Automatic tier classification (T1-T4) of universities and research institutes
-- **PI name extraction**: Extracts supervisor names from job descriptions using 20+ regex patterns
-- **Excel export**: Multi-sheet report with charts, conditional formatting, and hyperlinks
-- **Email reports**: Automated daily/weekly email summaries
-- **Scheduled runs**: launchd (macOS) or cron support for fully automated operation
+- **15+ job sources**: LinkedIn, Indeed, Euraxess, ScholarshipDB, ResearchGate, Nature Careers, jobs.ac.uk, AcademicPositions, Glassdoor, Korean job boards (KRIBB, IBS, NRF RPIK, HiBrainNet, Wanted), institutional career pages (Broad, Salk, HHMI, etc.)
+- **PI discovery pipeline**: Seed PIs -> Semantic Scholar co-author/citation networks -> topic-based PubMed discovery -> scored recommendations
+- **PI enrichment**: Automatic Google Scholar profiles, lab URLs, department pages, Semantic Scholar metadata
+- **Smart scoring**: CV keyword matching (0-100%), institution tier ranking (T1-T5), region prioritization
+- **Exclusion filters**: Expired deadlines, stale postings, non-research roles, PhD positions, Korean bio-relevance filter
+- **Excel dashboard**: Summary stats, charts (region/field/tier distribution), 4 region sheets + PI recommendations
+- **Incremental updates**: Daily runs preserve your formatting and manual edits in Excel; health check prevents building on corrupted files
+- **Email reports**: HTML summary of new jobs with direct links
+- **Deduplication**: Fuzzy title matching + URL normalization across all sources
 
 ## Quick Start
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/job-search-pipeline.git
-cd job-search-pipeline
+git clone https://github.com/JAEYOONSUNG/Job_ReSearch_Agent.git
+cd Job_ReSearch_Agent
 
-# Option A: One-command setup (recommended)
-./setup.sh
-
-# Option B: Manual setup
-# Using conda
+# Using conda (recommended)
 conda create -n jobsearch python=3.10 -y
 conda activate jobsearch
 pip install -r requirements.txt
 
-# Or using venv
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Install Playwright browsers (optional — for ResearchGate, Glassdoor scraping)
+# Install Playwright browsers (for ResearchGate, Glassdoor)
 playwright install chromium
 ```
 
-### 2. Personalize your profile
-
-Copy the example and edit with your research interests — **no source code changes needed**:
+### 2. Configure your profile
 
 ```bash
 cp config/user_profile.example.yaml config/user_profile.yaml
-nano config/user_profile.yaml   # or your preferred editor
+nano config/user_profile.yaml
 ```
 
 **`config/user_profile.yaml`:**
 ```yaml
-# Your research fields → auto-generates "postdoc {field}" search keywords
+# Research fields -> auto-generates "postdoc {field}" search keywords
 research_interests:
   - synthetic biology
   - CRISPR
   - protein engineering
 
-# Extra search keywords (e.g., target institutions)
+# Target institutions
 extra_search_keywords:
   - postdoc Broad Institute
   - postdoc EMBL
 
-# CV keywords → used for scoring job relevance (0-100)
+# CV keywords for job scoring (matched against title + description)
 cv_keywords:
   - synthetic biology
   - CRISPR
   - Cas9
-  - protein engineering
   - directed evolution
 
-# Seed PIs (Semantic Scholar Author IDs)
-# Find IDs: semanticscholar.org → author page URL → number at the end
+# Seed PIs -> drives co-author/citation network discovery
+# Find IDs: semanticscholar.org -> author page -> number in URL
 seed_pis:
   "George Church": "145892667"
+  "Feng Zhang": "145126988"
   "Frances Arnold": "2795724"
 ```
 
-See `config/user_profile.example.yaml` for the full template with all options.
+> `config/user_profile.yaml` is gitignored. If absent, defaults in `src/config.py` are used.
 
-> **Note**: `config/user_profile.yaml` is gitignored. If the file is absent, hardcoded defaults in `src/config.py` are used (100% backward compatible).
-
-### 3. Configure environment
+### 3. Set up environment variables
 
 ```bash
-# Create config directory and .env file
 mkdir -p ~/.config/job-search-pipeline
 cp .env.example ~/.config/job-search-pipeline/.env
 nano ~/.config/job-search-pipeline/.env
@@ -91,133 +98,175 @@ nano ~/.config/job-search-pipeline/.env
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GMAIL_ADDRESS` | For email reports | Gmail address |
-| `GMAIL_APP_PASSWORD` | For email reports | Google App Password ([create one](https://myaccount.google.com/apppasswords)) |
-| `REPORT_RECIPIENTS` | For email reports | Comma-separated recipient emails |
-| `SEMANTIC_SCHOLAR_API_KEY` | Optional | Increases rate limit 10x ([request key](https://www.semanticscholar.org/product/api#api-key)) |
-| `EXCEL_OUTPUT_DIR` | Optional | Where to save Excel files (default: `~/Dropbox/.../Postdoc`) |
+| `GMAIL_ADDRESS` | For email | Gmail address |
+| `GMAIL_APP_PASSWORD` | For email | [Google App Password](https://myaccount.google.com/apppasswords) |
+| `REPORT_RECIPIENTS` | For email | Comma-separated recipients |
+| `SEMANTIC_SCHOLAR_API_KEY` | Optional | 10x higher rate limit ([request](https://www.semanticscholar.org/product/api#api-key)) |
 
-### 4. Run the pipeline
-
-```bash
-# First run — scrapes all sources and builds the database
-python -m src.pipeline --no-email --summary
-
-# Subsequent runs — only fetches new jobs
-python -m src.pipeline --no-email --summary
-
-# Weekly run — includes PI network discovery
-python -m src.pipeline --weekly --no-email --summary
-
-# Export Excel only (if database already populated)
-python -c "from src.reporting.excel_export import export_to_excel; export_to_excel()"
-```
-
-The Excel report is saved to `~/Desktop/JobSearch_Auto_YYYY-MM-DD.xlsx`.
-
-## Automated Scheduling (macOS)
+### 4. Run
 
 ```bash
-# Copy and edit the launchd plist
-cp launchd/com.jobsearch.plist ~/Library/LaunchAgents/
-# Edit paths in the plist to match your installation
-nano ~/Library/LaunchAgents/com.jobsearch.plist
+# Full refresh (first time) — builds everything from scratch
+./run.sh --weekly --full-refresh --no-email --summary
 
-# Load (starts the schedule)
-launchctl load ~/Library/LaunchAgents/com.jobsearch.plist
+# Daily run — scrape new jobs, update Excel
+./run.sh --no-email --summary
 
-# Unload (stops the schedule)
-launchctl unload ~/Library/LaunchAgents/com.jobsearch.plist
+# Weekly PI discovery — expand PI network, enrich metadata
+./run.sh --weekly --no-email --summary
 ```
 
-Default schedule: Daily at 08:00 and 20:00, weekly PI discovery on Sundays at 02:00.
+## Pipeline Modes
 
-## Automated Scheduling (Linux/cron)
+### Full Refresh
+```bash
+./run-full-refresh.sh
+# or: ./run.sh --weekly --full-refresh --no-email --summary
+```
+- Discovers PIs from seed PI networks (co-author, citation, topic)
+- Scrapes all 15+ job sources
+- Scores and deduplicates
+- Enriches PI metadata (Semantic Scholar, Google Scholar, lab URLs)
+- Creates fresh Excel with full dashboard
+- Backs up previous Excel as `JobSearch_Auto_YYYYMMDD.xlsx`
+
+### Daily
+```bash
+./run-daily.sh
+# or: ./run.sh --skip-pi-lookup --email --summary
+```
+- Scrapes all sources for new postings
+- Scores against CV keywords
+- Incrementally updates existing Excel (preserves formatting/edits)
+- Sends email report of new jobs
+
+### Weekly PI Lookup
+```bash
+./run-pi-lookup.sh
+# or: ./run.sh --weekly --no-email --summary
+```
+- Expands PI network from seed PIs (co-author + citation graphs)
+- Discovers new PIs via PubMed topic queries
+- Enriches PI metadata (scholar profiles, lab URLs, department pages)
+- Updates Excel PI Recommendations sheet
+
+## CLI Reference
+
+```bash
+./run.sh [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--weekly` | Include PI discovery pipeline |
+| `--full-refresh` | Fresh Excel export (backup old, rebuild from scratch) |
+| `--email` | Send email report |
+| `--no-email` | Skip email |
+| `--summary` | Print text summary to stdout |
+| `--skip-pi-lookup` | Skip PI URL enrichment (faster daily runs) |
+| `--max-pi-lookup N` | Limit PI URL lookups per run (default: 100) |
+| `--export-only` | Only export Excel (no scraping) |
+| `--backfill-pi` | Backfill PI URLs for existing jobs |
+| `--sequential` | Run scrapers one at a time (debug) |
+| `--verbose` / `-v` | Debug-level logging |
+
+## Automated Scheduling
+
+### Linux (cron)
 
 ```bash
 crontab -e
-# Add:
-0 8,20 * * * cd /path/to/job-search-pipeline && ./run.sh --email
-0 2 * * 0 cd /path/to/job-search-pipeline && ./run.sh --weekly --email
 ```
 
-## Project Structure
+```cron
+# Daily: scrape + email (08:00, 20:00)
+0 8,20 * * * cd /path/to/Job_ReSearch_Agent && ./run-daily.sh
 
+# Weekly: PI network discovery (Saturday 10:00)
+0 10 * * 6 cd /path/to/Job_ReSearch_Agent && ./run-pi-lookup.sh
 ```
-job-search-pipeline/
-├── config/
-│   ├── user_profile.yaml          # Your settings (gitignored)
-│   └── user_profile.example.yaml  # Template with guide comments
-├── src/
-│   ├── config.py              # Central config (loads user_profile.yaml)
-│   ├── db.py                  # SQLite database schema and helpers
-│   ├── pipeline.py            # Main orchestrator
-│   ├── scrapers/              # Job board scrapers
-│   │   ├── base.py            # Base scraper class
-│   │   ├── euraxess.py        # EU research jobs
-│   │   ├── jobspy_scraper.py  # LinkedIn + Indeed via JobSpy
-│   │   ├── researchgate.py    # ResearchGate jobs
-│   │   ├── scholarshipdb.py   # ScholarshipDB
-│   │   └── ...
-│   ├── discovery/             # PI network discovery
-│   │   ├── seed_profiler.py   # Seed PI profiles (loads from YAML)
-│   │   ├── coauthor_network.py
-│   │   ├── citation_network.py
-│   │   └── pi_recommender.py
-│   ├── matching/              # Job scoring and parsing
-│   │   ├── scorer.py          # CV keyword matching
-│   │   └── job_parser.py      # PI name extraction, deadline parsing
-│   └── reporting/             # Output generation
-│       ├── excel_export.py    # Multi-sheet Excel with charts
-│       └── email_report.py    # Email summaries
-├── data/
-│   └── institution_rankings.json  # University tier rankings
-├── tests/                     # Test suite
-├── launchd/                   # macOS scheduling
-├── setup.sh                   # One-command setup script
-├── run.sh                     # Runner script
-├── requirements.txt
-└── .env.example               # Environment template
+
+### macOS (launchd)
+
+```bash
+cp launchd/com.jobsearch.plist ~/Library/LaunchAgents/
+# Edit paths, then:
+launchctl load ~/Library/LaunchAgents/com.jobsearch.plist
 ```
 
 ## Excel Output
 
-The generated Excel file contains:
+| Sheet | Contents |
+|-------|----------|
+| **Summary Dashboard** | KPI cards, doughnut chart (regions), bar chart (sources), tier distribution, deadline urgency, top fields, top institutions |
+| **US Positions** | US/Canada jobs sorted by institution tier, then match score |
+| **EU Positions** | European jobs sorted by tier |
+| **Korea Positions** | Korean jobs (IBS, KRIBB, NRF, HiBrainNet, Wanted) |
+| **Other Positions** | Asia, Oceania, Middle East, etc. |
+| **PI Recommendations** | Discovered PIs with scholar profiles, lab URLs, h-index, fields |
 
-| Sheet | Description |
-|-------|-------------|
-| Summary Dashboard | Statistics, charts (jobs by region, field) |
-| US Positions | US/Canada jobs sorted by institution tier |
-| EU Positions | European jobs sorted by institution tier |
-| Other Positions | Asia, Oceania, etc. |
-| PI Recommendations | Discovered PIs from citation networks |
-| All History | All jobs combined |
+Each job row: Title, PI Name, Institute, Tier, Country, Field, Keywords, Match Score, Posted Date, Deadline, Conditions, URL, Scholar URL, Lab URL, and more.
 
-Each job row includes: Title, PI Name, Institute, Tier, Country, Field, Keywords, Salary, Duration, Description, Match Score, and more.
+## Project Structure
 
-## Configuration Reference
+```
+Job_ReSearch_Agent/
+├── config/
+│   ├── user_profile.yaml          # Your settings (gitignored)
+│   └── user_profile.example.yaml  # Template
+├── src/
+│   ├── config.py                  # Central config (loads YAML)
+│   ├── db.py                      # SQLite schema + CRUD
+│   ├── pipeline.py                # Main orchestrator
+│   ├── scrapers/                  # 15+ job board scrapers
+│   │   ├── base.py                # Base scraper class
+│   │   ├── jobspy_scraper.py      # LinkedIn + Indeed (via JobSpy)
+│   │   ├── euraxess.py            # EU research jobs
+│   │   ├── korean_jobs.py         # KRIBB, IBS, NRF, HiBrainNet
+│   │   ├── institutional.py       # Broad, Salk, HHMI career pages
+│   │   ├── nature_careers.py      # Nature Careers
+│   │   ├── jobs_ac_uk.py          # jobs.ac.uk
+│   │   ├── academicpositions.py   # AcademicPositions.com
+│   │   ├── scholarshipdb.py       # ScholarshipDB
+│   │   ├── researchgate.py        # ResearchGate
+│   │   ├── glassdoor.py           # Glassdoor
+│   │   └── wanted.py              # Wanted (Korea)
+│   ├── discovery/                 # PI network discovery
+│   │   ├── seed_profiler.py       # Seed PI loading + Semantic Scholar profiles
+│   │   ├── coauthor_network.py    # Co-author graph expansion
+│   │   ├── citation_network.py    # Citation graph (forward + backward)
+│   │   ├── topic_discovery.py     # PubMed topic-based PI discovery
+│   │   ├── pi_recommender.py      # PI scoring and ranking
+│   │   ├── pi_enricher.py         # Semantic Scholar metadata enrichment
+│   │   ├── lab_finder.py          # Lab URL + Google Scholar lookup
+│   │   └── scholar_scraper.py     # Google Scholar direct scraper
+│   ├── matching/                  # Job scoring and parsing
+│   │   ├── scorer.py              # CV keyword matching
+│   │   ├── job_parser.py          # PI name extraction, deadline parsing
+│   │   └── dedup.py               # Fuzzy deduplication
+│   └── reporting/                 # Output generation
+│       ├── excel_export.py        # Multi-sheet Excel with dashboard
+│       └── email_report.py        # HTML email summaries
+├── data/
+│   ├── jobs.db                    # SQLite database (gitignored)
+│   └── institution_rankings.json  # University tier rankings
+├── run.sh                         # Base runner script
+├── run-daily.sh                   # Daily cron wrapper
+├── run-pi-lookup.sh               # Weekly PI discovery wrapper
+├── run-full-refresh.sh            # Full refresh wrapper
+├── setup.sh                       # One-command setup
+├── requirements.txt
+└── .env.example
+```
 
-### `config/user_profile.yaml` (primary — edit this)
+## Database
 
-| Key | Description |
-|-----|-------------|
-| `research_interests` | Your fields → auto-generates search keywords |
-| `extra_search_keywords` | Additional search queries (e.g., target institutions) |
-| `cv_keywords` | Skills/techniques for job scoring (0-100) |
-| `seed_pis` | PI names + Semantic Scholar author IDs |
-| `extra_exclude_keywords` | Additional fields to filter out (appended to built-in list) |
-| `region_priority` | Region sort order (default: US=1, EU=2, Korea=3, Asia=4, Other=5) |
-| `recommender_weights` | PI recommendation scoring weights |
+SQLite at `data/jobs.db` with two main tables:
 
-### `~/.config/job-search-pipeline/.env`
+- **jobs**: All scraped positions (title, PI, institute, region, tier, score, URLs, etc.)
+- **pis**: Discovered/recommended PIs (name, institute, h-index, scholar_url, lab_url, fields, etc.)
 
-| Variable | Description |
-|----------|-------------|
-| `GMAIL_ADDRESS` | Gmail for sending reports |
-| `GMAIL_APP_PASSWORD` | Google App Password (not your regular password) |
-| `REPORT_RECIPIENTS` | Comma-separated recipient emails |
-| `SEMANTIC_SCHOLAR_API_KEY` | Optional S2 API key for higher rate limits |
-| `EXCEL_OUTPUT_DIR` | Where to save Excel files |
+Jobs go through statuses: `new` -> `exported` (in Excel) or `dismissed` (user-removed or excluded).
 
 ## License
 

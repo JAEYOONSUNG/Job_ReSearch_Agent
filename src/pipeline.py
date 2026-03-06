@@ -489,7 +489,7 @@ def run_dept_enrichment(jobs: list[dict]) -> list[dict]:
     return jobs
 
 
-def run_weekly_discovery() -> None:
+def run_weekly_discovery(max_pi_lookup: int = 100) -> None:
     """Run the weekly PI discovery pipeline."""
     logger.info("Starting weekly PI discovery pipeline...")
 
@@ -529,9 +529,17 @@ def run_weekly_discovery() -> None:
         logger.error("PI scoring failed: %s", e, exc_info=True)
 
     try:
+        from src.discovery.pi_enricher import enrich_recommended_pis
+        logger.info("Phase 6: Enriching PI metadata (Semantic Scholar)...")
+        result = enrich_recommended_pis(limit=200)
+        logger.info("PI enrichment: %s", result)
+    except Exception as e:
+        logger.error("PI enrichment failed: %s", e, exc_info=True)
+
+    try:
         from src.discovery.lab_finder import find_lab_urls
-        logger.info("Phase 6: Finding lab URLs...")
-        find_lab_urls()
+        logger.info("Phase 7: Finding lab URLs (max %d PIs)...", max_pi_lookup)
+        find_lab_urls(max_pis=max_pi_lookup)
     except Exception as e:
         logger.error("Lab finder failed: %s", e, exc_info=True)
 
@@ -622,6 +630,8 @@ def main() -> None:
                         help="Full refresh: reset all statuses, export complete list")
     parser.add_argument("--sequential", action="store_true", help="Run scrapers sequentially (debug mode)")
     parser.add_argument("--skip-pi-lookup", action="store_true", help="Skip PI URL enrichment (faster)")
+    parser.add_argument("--max-pi-lookup", type=int, default=100,
+                        help="Max PIs for lab/scholar URL lookup per run (default 100)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -642,7 +652,7 @@ def main() -> None:
 
     # ── Module: Weekly PI discovery (pre-step, before core) ──
     if args.weekly:
-        run_weekly_discovery()
+        run_weekly_discovery(max_pi_lookup=args.max_pi_lookup)
 
     # ── Data source: scrape OR load from DB ──
     do_scrape = not (args.weekly and not args.full_refresh)

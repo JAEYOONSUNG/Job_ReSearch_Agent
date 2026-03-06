@@ -469,8 +469,53 @@ def profile_single_pi(name: str, institute: Optional[str] = None) -> dict:
     return profile
 
 
+def ensure_seed_pis_in_db() -> int:
+    """Insert seed PIs from YAML config into the DB if not already present.
+
+    Matches by name (not name+institute) since seed PIs are well-known.
+    Returns the number of newly inserted seed PIs.
+    """
+    yaml_seeds = _load_seed_pis()
+    if not yaml_seeds:
+        return 0
+
+    inserted = 0
+    for name, s2_id in yaml_seeds.items():
+        with db.get_connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM pis WHERE name = ? ORDER BY is_seed DESC, id ASC LIMIT 1",
+                (name,),
+            ).fetchone()
+
+            if existing:
+                # Mark existing record as seed and fill semantic_id if missing
+                conn.execute(
+                    "UPDATE pis SET is_seed = 1, is_recommended = 1, "
+                    "semantic_id = COALESCE(NULLIF(semantic_id, ''), ?) "
+                    "WHERE id = ?",
+                    (s2_id, existing["id"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO pis (name, institute, is_seed, is_recommended, semantic_id) "
+                    "VALUES (?, '', 1, 1, ?)",
+                    (name, s2_id),
+                )
+                inserted += 1
+                logger.info("Inserted seed PI: %s (s2=%s)", name, s2_id)
+
+    if inserted:
+        logger.info("Inserted %d new seed PIs into database", inserted)
+    else:
+        logger.info("All %d seed PIs already in database", len(yaml_seeds))
+    return inserted
+
+
 def profile_seed_pis() -> None:
     """Profile every seed PI in the database using Semantic Scholar."""
+    # Ensure seed PIs exist in DB first
+    ensure_seed_pis_in_db()
+
     seed_pis = db.get_seed_pis()
     if not seed_pis:
         logger.info("No seed PIs found in database.")

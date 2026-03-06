@@ -457,12 +457,19 @@ def _ddg_find_domain(institute: str) -> Optional[str]:
     return None
 
 
-def find_lab_urls() -> dict:
+def find_lab_urls(max_pis: int = 100) -> dict:
     """Find lab URLs and Scholar URLs for recommended PIs that lack them.
 
     Uses the fast direct-scrape ``search_scholar_author`` (with circuit
     breaker) instead of the slow ``scholarly`` library.  Stores both
     ``lab_url`` and ``scholar_url`` in the PI record.
+
+    Parameters
+    ----------
+    max_pis : int
+        Maximum number of PIs to process per run.  PIs are sorted by
+        recommendation score (highest first) so the most relevant ones
+        are enriched first.  Default 100.
 
     Returns
     -------
@@ -474,7 +481,8 @@ def find_lab_urls() -> dict:
             "SELECT id, name, institute FROM pis "
             "WHERE is_recommended = 1 "
             "AND ((lab_url IS NULL OR lab_url = '') "
-            "  OR (scholar_url IS NULL OR scholar_url = ''))"
+            "  OR (scholar_url IS NULL OR scholar_url = '')) "
+            "ORDER BY COALESCE(recommendation_score, 0) DESC"
         ).fetchall()
         pis_to_check = [dict(r) for r in rows]
 
@@ -482,7 +490,14 @@ def find_lab_urls() -> dict:
         logger.info("No PIs need lab/scholar URL lookup.")
         return {"checked": 0, "found_lab": 0, "found_scholar": 0, "failed": 0}
 
-    logger.info("Looking up lab/scholar URLs for %d PIs", len(pis_to_check))
+    total_eligible = len(pis_to_check)
+    if max_pis and len(pis_to_check) > max_pis:
+        pis_to_check = pis_to_check[:max_pis]
+
+    logger.info(
+        "Looking up lab/scholar URLs for %d PIs (of %d eligible)",
+        len(pis_to_check), total_eligible,
+    )
 
     found_lab = 0
     found_scholar = 0
@@ -495,12 +510,23 @@ def find_lab_urls() -> dict:
     except ImportError:
         _has_scholar_scraper = False
 
-    for pi in pis_to_check:
+    consecutive_failures = 0
+    _MAX_CONSECUTIVE_FAILURES = 10  # stop early if DDG is completely blocked
+
+    for idx, pi in enumerate(pis_to_check, 1):
         name = pi["name"]
         institute = pi.get("institute")
         pi_id = pi["id"]
 
-        logger.info("Searching lab URL for %s", name)
+        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            logger.warning(
+                "Stopping PI lookup after %d consecutive failures (%d/%d done)",
+                _MAX_CONSECUTIVE_FAILURES, idx - 1, len(pis_to_check),
+            )
+            break
+
+        if idx % 10 == 1:
+            logger.info("PI URL lookup progress: %d/%d", idx, len(pis_to_check))
 
         scholar_url = None
         lab_url = None
@@ -541,10 +567,11 @@ def find_lab_urls() -> dict:
                     f"UPDATE pis SET {', '.join(updates)} WHERE id = ?",
                     values,
                 )
-            logger.info("Found URLs for %s: scholar=%s lab=%s", name, scholar_url or "-", lab_url or "-")
+            logger.debug("Found URLs for %s: scholar=%s lab=%s", name, scholar_url or "-", lab_url or "-")
+            consecutive_failures = 0
         else:
             failed += 1
-            logger.debug("No URLs found for %s", name)
+            consecutive_failures += 1
 
         time.sleep(_SCHOLARLY_DELAY)
 

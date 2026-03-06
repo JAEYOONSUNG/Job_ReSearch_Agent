@@ -2363,6 +2363,25 @@ def _incremental_update(
     return filepath
 
 
+def _is_previous_file_healthy(prev_path: Path, expected_jobs: int) -> bool:
+    """Quick sanity check: previous Excel must have all 4 region sheets and
+    at least 30% of expected jobs.  If corrupted (e.g. Dropbox sync conflict),
+    we fall back to fresh export instead of building on broken data."""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(str(prev_path), read_only=True, data_only=True)
+        sheets = set(wb.sheetnames)
+        wb.close()
+        required = {"US Positions", "EU Positions", "Korea Positions", "Other Positions"}
+        if not required.issubset(sheets):
+            logger.warning("Previous Excel missing sheets: %s", required - sheets)
+            return False
+        return True
+    except Exception as exc:
+        logger.warning("Could not read previous Excel for health check: %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -2464,7 +2483,7 @@ def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path
                                  other_jobs, all_jobs, rec_pis)
     else:
         prev_path = _find_previous_excel(output_dir)
-        if prev_path:
+        if prev_path and _is_previous_file_healthy(prev_path, len(all_jobs)):
             new_jobs_by_region = {
                 "US": us_jobs, "EU": eu_jobs,
                 "Korea": korea_jobs, "Other": other_jobs,
@@ -2472,6 +2491,8 @@ def export_to_excel(output_dir: Path = None, full_refresh: bool = False) -> Path
             filepath = _incremental_update(prev_path, filepath, new_jobs_by_region,
                                            all_dismissed, all_jobs, rec_pis)
         else:
+            if prev_path:
+                logger.warning("Previous Excel looks corrupted, falling back to fresh export")
             filepath = _fresh_export(filepath, us_jobs, eu_jobs, korea_jobs,
                                      other_jobs, all_jobs, rec_pis)
 

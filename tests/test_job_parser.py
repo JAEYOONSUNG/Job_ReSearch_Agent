@@ -3,6 +3,9 @@
 import pytest
 
 from src.matching.job_parser import (
+    extract_application_materials,
+    extract_preferred_qualifications,
+    extract_responsibilities,
     extract_pi_name,
     extract_pi_from_title,
     expand_pi_last_name,
@@ -320,6 +323,18 @@ class TestExtractDeadline:
         result = extract_deadline(posting_german_salary)
         assert result == "2026-06-15"
 
+    def test_korean_deadline_format(self):
+        text = "지원 마감: 2026년 3월 31일"
+        assert extract_deadline(text) == "2026-03-31"
+
+    def test_closing_date_with_hyphenated_month(self):
+        text = "Closing Date August-8-2021"
+        assert extract_deadline(text) == "2021-08-08"
+
+    def test_posted_date_context_is_not_treated_as_deadline(self):
+        text = "공고일: 2026년 3월 31일"
+        assert extract_deadline(text) is None
+
 
 # =====================================================================
 # Section Extraction (Requirements, Conditions)
@@ -336,6 +351,20 @@ class TestExtractRequirements:
         result = extract_requirements(posting_with_pi_supervision)
         assert result is not None
         assert "PhD" in result
+
+
+class TestExtractAdditionalSections:
+    def test_extracts_preferred_and_responsibilities(self):
+        text = (
+            "Responsibilities:\n"
+            "- Build CRISPR screening assays\n"
+            "- Analyze sequencing data\n\n"
+            "Preferred Qualifications:\n"
+            "- Experience with NGS\n"
+            "- Experience with Python\n"
+        )
+        assert "CRISPR screening assays" in extract_responsibilities(text)
+        assert "Experience with NGS" in extract_preferred_qualifications(text)
 
     def test_returns_none_when_missing(self):
         text = "Postdoc position in synthetic biology. Apply now."
@@ -451,3 +480,55 @@ class TestParseStructuredDescription:
     def test_no_sections_found(self):
         text = "Just a plain text description with no section headers."
         assert parse_structured_description(text) == {}
+
+    def test_parses_korean_sections(self):
+        text = (
+            "모집 내용:\n"
+            "합성생물학 기반 RNA 센서 개발 연구를 수행합니다.\n\n"
+            "담당 업무:\n"
+            "- CRISPR 스크리닝 수행\n"
+            "- 동물세포 실험 및 데이터 분석\n\n"
+            "지원 자격:\n"
+            "- 생명과학 관련 박사학위 소지자\n"
+            "- 분자생물학 경험 필수\n\n"
+            "우대 사항:\n"
+            "- NGS 분석 경험 우대\n\n"
+            "근무 조건:\n"
+            "- 연봉 6,000만원\n"
+            "- 계약기간 2년\n"
+        )
+        result = parse_structured_description(text)
+        assert result["summary"].startswith("합성생물학")
+        assert "CRISPR" in result["responsibilities"]
+        assert "박사학위" in result["requirements"]
+        assert "NGS" in result["preferred"]
+        assert "연봉" in result["conditions"]
+
+
+class TestExtractApplicationMaterials:
+    def test_extracts_korean_application_materials(self):
+        text = (
+            "제출 서류:\n"
+            "- 이력서\n"
+            "- 자기소개서\n"
+            "- 연구계획서\n"
+            "- 추천서 2부\n"
+            "- 학위증명서\n"
+            "- 성적증명서\n"
+        )
+        assert extract_application_materials(text) == (
+            "CV; Cover letter; Research plan; Reference letters; "
+            "Diplomas/Certificates; Transcripts"
+        )
+
+
+class TestParseJobPosting:
+    def test_returns_preferred_and_responsibilities(self):
+        text = (
+            "담당 업무:\n- 세포주 제작\n\n"
+            "지원 자격:\n- 박사학위\n\n"
+            "우대 사항:\n- NGS 경험\n"
+        )
+        parsed = parse_job_posting(text)
+        assert "세포주 제작" in parsed["responsibilities"]
+        assert "NGS 경험" in parsed["preferred"]

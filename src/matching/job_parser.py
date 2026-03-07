@@ -148,6 +148,31 @@ _REQUIREMENTS_HEADERS = [
     r"지원\s*자격\s*[:.]?",
     r"우대\s*(?:사항|조건)\s*[:.]?",
     r"필요\s*역량\s*[:.]?",
+    r"응시\s*자격\s*[:.]?",
+    r"필수\s*(?:사항|역량|조건)\s*[:.]?",
+    r"모집\s*대상\s*[:.]?",
+]
+
+_PREFERRED_HEADERS = [
+    r"preferred\s+(?:experience|education|skills|qualifications?)\s*[:.]?",
+    r"(?:nice to have|desired|bonus|assets?|advantages?|plus)\s*[:.]?",
+    r"(?:desired|preferred)\s+(?:criteria|competencies)\s*[:.]?",
+    r"우대\s*(?:사항|조건|전공|경력)\s*[:.]?",
+    r"가산점\s*[:.]?",
+]
+
+_RESPONSIBILITIES_HEADERS = [
+    r"(?:position |key |primary )?responsibilities\s*[:.]?",
+    r"(?:key |major )?(?:duties|tasks)\s*[:.]?",
+    r"what (?:you'll|you will) do\s*[:.]?",
+    r"the role\s*[:.]?",
+    r"(?:key |main )?(?:tasks?|activities)\s*[:.]?",
+    r"your (?:tasks?|role|mission)\s*[:.]?",
+    r"key duties\s*[:.]?",
+    r"(?:main |key )?responsibilities\s*[:.]?",
+    r"(?:담당|수행|주요)\s*업무\s*[:.]?",
+    r"(?:직무|업무)\s*(?:내용|범위|소개|설명)\s*[:.]?",
+    r"연구\s*(?:수행|업무)\s*[:.]?",
 ]
 
 _CONDITIONS_HEADERS = [
@@ -166,6 +191,8 @@ _CONDITIONS_HEADERS = [
     r"근무\s*조건\s*[:.]?",
     r"계약\s*(?:기간|조건)\s*[:.]?",
     r"복리\s*후생\s*[:.]?",
+    r"근무\s*(?:형태|지역|장소)\s*[:.]?",
+    r"채용\s*조건\s*[:.]?",
 ]
 
 _DESCRIPTION_HEADERS = [
@@ -178,6 +205,8 @@ _DESCRIPTION_HEADERS = [
     r"(?:직무|업무)\s*(?:내용|설명)\s*[:.]?",
     r"연구\s*(?:내용|분야|개요)\s*[:.]?",
     r"모집\s*(?:내용|분야)\s*[:.]?",
+    r"채용\s*(?:내용|분야)\s*[:.]?",
+    r"(?:연구|프로젝트)\s*주제\s*[:.]?",
 ]
 
 
@@ -761,6 +790,9 @@ def extract_section(text: str, header_patterns: list[str], max_chars: int = 5000
             r"\n\s*(?:자격\s*(?:요건|조건)|지원\s*자격|우대\s*사항|제출\s*서류|"
             r"급여|보수|처우|근무\s*조건|접수\s*방법|지원\s*방법|문의|연락처|"
             r"기타\s*사항|연구\s*내용|모집\s*분야|근무\s*기간)\s*[:.]?",
+            r"\n\s*[□■▣]\s*(?:자격\s*(?:요건|조건)|지원\s*자격|우대\s*사항|제출\s*서류|"
+            r"급여|보수|처우|근무\s*조건|접수\s*방법|지원\s*방법|문의|연락처|"
+            r"기타\s*사항|연구\s*내용|모집\s*분야|근무\s*기간)",
         ]
         end_pos = len(remaining)
         for ep in end_patterns:
@@ -769,7 +801,8 @@ def extract_section(text: str, header_patterns: list[str], max_chars: int = 5000
                 end_pos = min(end_pos, em.start())
 
         section = remaining[:end_pos].strip()
-        if section and len(section) > 10:
+        min_len = 4 if re.search(r"[\uac00-\ud7a3]", section or "") else 10
+        if section and len(section) >= min_len:
             return section[:max_chars]
 
     return None
@@ -778,6 +811,16 @@ def extract_section(text: str, header_patterns: list[str], max_chars: int = 5000
 def extract_requirements(text: str) -> Optional[str]:
     """Extract requirements/qualifications section."""
     return extract_section(text, _REQUIREMENTS_HEADERS)
+
+
+def extract_preferred_qualifications(text: str) -> Optional[str]:
+    """Extract preferred qualifications / nice-to-have section."""
+    return extract_section(text, _PREFERRED_HEADERS)
+
+
+def extract_responsibilities(text: str) -> Optional[str]:
+    """Extract responsibilities / duties section."""
+    return extract_section(text, _RESPONSIBILITIES_HEADERS)
 
 
 def extract_conditions(text: str) -> Optional[str]:
@@ -821,6 +864,9 @@ _APPLICATION_HEADERS = [
     r"please\s+(?:submit|send|include)\s+the\s+following\s*[:.]?",
     r"application\s+(?:documents?|materials?|package)\s*[:.]?",
     r"to\s+apply[,\s]+(?:please\s+)?(?:submit|send|include)\s*[:.]?",
+    r"(?:제출|지원|구비)\s*서류\s*[:.]?",
+    r"(?:접수|지원)\s*방법\s*[:.]?",
+    r"(?:지원|제출)\s*(?:자료|내용)\s*[:.]?",
 ]
 
 _APPLICATION_MATERIAL_KEYWORDS = [
@@ -852,11 +898,26 @@ _APPLICATION_MATERIAL_KEYWORDS = [
     ("academic record", "Transcripts"),
     ("teaching statement", "Teaching statement"),
     ("diversity statement", "Diversity statement"),
+    ("이력서", "CV"),
+    ("자기소개서", "Cover letter"),
+    ("연구계획서", "Research plan"),
+    ("연구계획", "Research plan"),
+    ("연구실적", "Publication list"),
+    ("연구실적목록", "Publication list"),
+    ("논문목록", "Publication list"),
+    ("추천서", "Reference letters"),
+    ("추천인", "Reference letters"),
+    ("학위증명서", "Diplomas/Certificates"),
+    ("졸업증명서", "Diplomas/Certificates"),
+    ("성적증명서", "Transcripts"),
+    ("재학증명서", "Transcripts"),
+    ("포트폴리오", "Portfolio"),
 ]
 
 # Context words that suggest application-related sentences
 _APPLICATION_CONTEXT = re.compile(
-    r"(?:submit|send|include|attach|upload|provide|enclose|forward|prepare)",
+    r"(?:submit|send|include|attach|upload|provide|enclose|forward|prepare|"
+    r"제출|접수|첨부|업로드|송부|지원)",
     re.IGNORECASE,
 )
 
@@ -898,7 +959,7 @@ def extract_application_materials(text: str) -> Optional[str]:
         "CV", "Cover letter", "Research statement", "Research plan",
         "Research proposal", "Publication list", "Reference letters",
         "Diplomas/Certificates", "Transcripts", "Teaching statement",
-        "Diversity statement",
+        "Diversity statement", "Portfolio",
     ]
     sorted_materials = [m for m in order if m in found]
     # Include any not in the predefined order
@@ -961,7 +1022,11 @@ _STRUCTURED_SECTIONS = {
         r"^About (?:us|the (?:lab|group|team|institute))\s*[:.]?\s*$|"
         r"^Offer [Dd]escription\s*[:.]?\s*$|"
         r"^Project [Dd]escription\s*[:.]?\s*$|"
-        r"^Presentation of the (?:position|organisation)\s*[:.]?\s*$",
+        r"^Presentation of the (?:position|organisation)\s*[:.]?\s*$|"
+        r"^(?:모집|채용)\s*(?:내용|개요|분야)\s*[:.]?\s*$|"
+        r"^연구\s*(?:내용|개요|주제|분야)\s*[:.]?\s*$|"
+        r"^(?:직무|업무)\s*(?:소개|개요|설명)\s*[:.]?\s*$|"
+        r"^프로젝트\s*(?:소개|개요|설명)\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "responsibilities": re.compile(
@@ -974,7 +1039,10 @@ _STRUCTURED_SECTIONS = {
         r"^Your (?:tasks?|role|mission)\s*[:.]?\s*$|"
         r"^The (?:Postdoc(?:toral)?|position|role|fellow)\s+will\s*[:.]?\s*$|"
         r"^Key [Dd]uties\s*[:.]?\s*$|"
-        r"^(?:Main |Key )?[Rr]esponsibilities\s*[:.]?\s*$",
+        r"^(?:Main |Key )?[Rr]esponsibilities\s*[:.]?\s*$|"
+        r"^(?:담당|수행|주요)\s*업무\s*[:.]?\s*$|"
+        r"^(?:직무|업무)\s*(?:내용|범위)\s*[:.]?\s*$|"
+        r"^연구\s*(?:수행|업무)\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "requirements": re.compile(
@@ -988,7 +1056,11 @@ _STRUCTURED_SECTIONS = {
         r"^Eligibility\s*[:.]?\s*$|"
         r"^(?:We|The candidate|Applicants?)\s+(?:should|must|are expected)\s*[:.]?\s*$|"
         r"^(?:Minimum |Essential )?(?:Education|Experience)\s+(?:and |&\s+)?(?:Experience |Education )?[Rr]equirements?\s*[:.]?\s*$|"
-        r"^Who we are looking for\s*[:.]?\s*$",
+        r"^Who we are looking for\s*[:.]?\s*$|"
+        r"^(?:지원|응시)\s*자격\s*[:.]?\s*$|"
+        r"^자격\s*(?:요건|조건|사항)\s*[:.]?\s*$|"
+        r"^필수\s*(?:사항|역량|조건)\s*[:.]?\s*$|"
+        r"^모집\s*대상\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "preferred": re.compile(
@@ -998,7 +1070,9 @@ _STRUCTURED_SECTIONS = {
         # EURAXESS / AcademicPositions patterns
         r"^Preferred [Ss]kills?\s*[:.]?\s*$|"
         r"^(?:Assets?|Advantages?|Plus)\s*[:.]?\s*$|"
-        r"^(?:Desired|Preferred)\s+(?:Criteria|Competencies)\s*[:.]?\s*$",
+        r"^(?:Desired|Preferred)\s+(?:Criteria|Competencies)\s*[:.]?\s*$|"
+        r"^우대\s*(?:사항|조건|전공|경력)\s*[:.]?\s*$|"
+        r"^가산점\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     "conditions": re.compile(
@@ -1008,10 +1082,23 @@ _STRUCTURED_SECTIONS = {
         r"^(?:We )?[Oo]ffer\s*[:.]?\s*$|"
         r"^(?:Employment |Working )?[Cc]onditions?\s*[:.]?\s*$|"
         r"^(?:Benefits? (?:and |& )?)?[Ss]ervices\s*[:.]?\s*$|"
-        r"^(?:Contract |Position )?[Dd]etails?\s*[:.]?\s*$",
+        r"^(?:Contract |Position )?[Dd]etails?\s*[:.]?\s*$|"
+        r"^(?:근무|채용)\s*조건\s*[:.]?\s*$|"
+        r"^(?:급여|보수|연봉|처우|대우)\s*[:.]?\s*$|"
+        r"^(?:계약|근무)\s*(?:기간|형태|지역|장소)\s*[:.]?\s*$|"
+        r"^복리\s*후생\s*[:.]?\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
 }
+
+
+def _clean_section_text(section_text: str, max_len: int = 8000) -> str:
+    """Normalise whitespace while preserving useful line breaks."""
+    section_text = re.sub(r"\r\n?", "\n", section_text)
+    section_text = re.sub(r"\n{3,}", "\n\n", section_text)
+    section_text = "\n".join(line.strip() for line in section_text.split("\n"))
+    section_text = re.sub(r"[ \t]+", " ", section_text)
+    return section_text.strip()[:max_len]
 
 
 def clean_linkedin_description(text: str) -> str:
@@ -1077,14 +1164,20 @@ def parse_structured_description(text: str) -> dict[str, str]:
     # Sort by position in text
     positions.sort(key=lambda x: x[0])
 
+    first_start = positions[0][0]
+    if first_start > 40:
+        lead = _clean_section_text(text[:first_start])
+        if len(lead) > 40:
+            result["summary"] = lead
+
     # Extract text between consecutive headers
     for i, (start, end, name) in enumerate(positions):
         if name in result:
             continue  # keep first occurrence
         next_start = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-        section_text = text[end:next_start].strip()
+        section_text = _clean_section_text(text[end:next_start])
         if section_text and len(section_text) > 10:
-            result[name] = section_text[:5000]
+            result[name] = section_text
 
     return result
 
@@ -1111,7 +1204,7 @@ _DEADLINE_CONTEXT_PATTERNS = [
     # "Deadline: <date>" or "Application deadline: <date>"
     r"(?:application\s+)?deadline\s*[:=]\s*",
     # "Closing date: <date>" or "Closing date for applications is <date>"
-    r"closing\s+date\s*(?:for\s+\w+\s*)?(?:[:=]|is)\s*",
+    r"closing\s+date\s*(?:for\s+\w+\s*)?(?:[:=]|is)?\s*",
     # "Applications must be received by <date>"
     r"(?:applications?|submissions?)\s+(?:must be|should be|are)\s+(?:received|submitted)\s+(?:by|before|no later than)\s+",
     # "Submit your application by/before/no later than <date>"
@@ -1144,6 +1237,10 @@ _DEADLINE_CONTEXT_PATTERNS = [
     r"Bewerbungsfrist\s*[:=]\s*",
     # French: "Date limite: <date>"
     r"Date\s+limite\s*[:=]?\s*",
+    # Korean
+    r"(?:지원|접수|모집)\s*마감\s*[:=]?\s*",
+    r"(?:지원|접수|모집|원서|서류)\s*기간\s*[:=]?\s*",
+    r"(?:지원|접수)\s*기한\s*[:=]?\s*",
 ]
 
 _DEADLINE_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DEADLINE_CONTEXT_PATTERNS]
@@ -1174,6 +1271,8 @@ def _parse_date_string(text: str) -> Optional[str]:
         r",?\s+(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AP]M)?(?:\s+\w+\s+time)?",
         "", text, flags=re.IGNORECASE,
     ).strip()
+    text = re.sub(r"([A-Za-z]+)\s*-\s*(\d{1,2})\s*-\s*(\d{4})", r"\1 \2 \3", text)
+    text = re.sub(r"(\d{1,2})\s*-\s*([A-Za-z]+)\s*-\s*(\d{4})", r"\1 \2 \3", text)
 
     # MDY: "March 15, 2026"
     m = re.match(_DATE_MDY, text, re.IGNORECASE)
@@ -1195,6 +1294,13 @@ def _parse_date_string(text: str) -> Optional[str]:
     m = re.match(_DATE_ISO, text)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    # Korean: "2026년 3월 15일"
+    m = re.match(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
 
     # EU: "15/03/2026" or "15.03.2026"
     m = re.match(_DATE_EU, text)
@@ -1241,7 +1347,8 @@ def extract_deadline(text: str) -> Optional[str]:
     # Strategy 3: Scan for any date within 120 chars of deadline keywords
     _DEADLINE_PROXIMITY_KW = re.compile(
         r"(?:deadline|closing\s+date|apply\s+before|bewerbungsfrist|date\s+limite"
-        r"|applications?\s+accepted\s+until|vacancy\s+closes)",
+        r"|applications?\s+accepted\s+until|vacancy\s+closes"
+        r"|지원\s*마감|접수\s*마감|모집\s*마감|지원\s*기한|접수\s*기간|모집\s*기간)",
         re.IGNORECASE,
     )
     if not candidates:
@@ -1251,6 +1358,12 @@ def extract_deadline(text: str) -> Optional[str]:
                 dm = dp.search(window)
                 if dm:
                     date = _parse_date_string(dm.group(0))
+                    if date:
+                        candidates.append(date)
+            if not candidates:
+                km = re.search(r"\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일", window)
+                if km:
+                    date = _parse_date_string(km.group(0))
                     if date:
                         candidates.append(date)
 
@@ -1282,6 +1395,8 @@ def parse_job_posting(text: str) -> dict[str, Any]:
 
     pi_name = extract_pi_name(text)
     requirements = extract_requirements(text)
+    preferred = extract_preferred_qualifications(text)
+    responsibilities = extract_responsibilities(text)
     conditions = extract_conditions(text)
     keywords = extract_keywords(text)
     app_materials = extract_application_materials(text)
@@ -1289,6 +1404,8 @@ def parse_job_posting(text: str) -> dict[str, Any]:
     return {
         "pi_name": pi_name,
         "requirements": requirements,
+        "preferred": preferred,
+        "responsibilities": responsibilities,
         "conditions": conditions,
         "keywords": ", ".join(keywords) if keywords else None,
         "application_materials": app_materials,

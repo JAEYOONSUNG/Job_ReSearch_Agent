@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -15,7 +16,15 @@ from src.config import (
     FACULTY_TITLE_KEYWORDS, GARBAGE_TITLE_PATTERNS,
 )
 from src.db import _AGGREGATOR_INSTITUTES, get_all_pis, get_jobs, get_recommended_pis
-from src.matching.job_parser import parse_structured_description
+from src.matching.job_parser import (
+    extract_application_materials,
+    extract_conditions,
+    extract_preferred_qualifications,
+    extract_requirements,
+    extract_responsibilities,
+    infer_field,
+    parse_structured_description,
+)
 from src.matching.scorer import is_company
 
 logger = logging.getLogger(__name__)
@@ -34,17 +43,27 @@ PI_COLUMNS = [
     "Scholar URL",
 ]
 
+_MAX_EXCEL_CELL_LEN = 32000
+_WRAPPED_TEXT_COLUMNS = {
+    "Position Summary",
+    "Responsibilities",
+    "Preferred Qualifications",
+    "Requirements (Full)",
+    "Conditions (Full)",
+    "Application Materials",
+    "Description",
+}
+
 
 # ---------------------------------------------------------------------------
 # Text cleaning helpers
 # ---------------------------------------------------------------------------
 
-def _clean_text(text: str | None, max_len: int = 500) -> str:
+def _clean_text(text: str | None, max_len: int = 500, *, preserve_newlines: bool = False) -> str:
     """Strip markdown, excessive whitespace, and truncate.
 
-    Flattens all newlines into ``|`` section dividers for readable
-    single-line display.  Adjacent short lines are merged; headers
-    (``### Header`` or ``Header =====``) become ``| HEADER |``.
+    By default returns a compact single-line Excel-friendly string.
+    Set ``preserve_newlines=True`` for raw description columns.
     """
     if not text:
         return ""
@@ -63,17 +82,20 @@ def _clean_text(text: str | None, max_len: int = 500) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     # Unescape backslash-escaped characters (e.g. \- from Indeed)
     text = re.sub(r"\\([^\\])", r"\1", text)
-    # Replace paragraph breaks (2+ newlines) with " | "
-    text = re.sub(r"\s*\n\s*\n\s*", " | ", text)
-    # Replace single newlines with space
-    text = text.replace("\n", " ").replace("\r", " ")
-    # Collapse all whitespace
-    text = re.sub(r"\s+", " ", text).strip()
+    if preserve_newlines:
+        text = re.sub(r"\s*\n\s*\n\s*", "\n\n", text)
+        text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    else:
+        text = re.sub(r"\s*\n\s*\n\s*", " | ", text)
+        text = text.replace("\n", " ").replace("\r", " ")
+        text = re.sub(r"\s+", " ", text).strip()
     # Clean up redundant pipe separators
     text = re.sub(r"\|\s*\|", "|", text)
     text = re.sub(r"^\s*\|\s*", "", text)
     text = re.sub(r"\s*\|\s*$", "", text)
-    return text[:max_len]
+    return text[: min(max_len, _MAX_EXCEL_CELL_LEN)]
 
 
 _MAX_PAPER_COLS = 5  # number of individual paper columns
@@ -114,7 +136,7 @@ def _papers_to_columns(prefix: str, papers: list[dict]) -> dict[str, str]:
 def _clean_list(text: str | None, max_len: int = 400) -> str:
     """Clean a list-style section (requirements, etc).
 
-    Flattens bullets into semicolon-separated items for compact display.
+    Flattens bullets into a compact single-cell representation.
     """
     if not text:
         return ""
@@ -129,16 +151,43 @@ def _clean_list(text: str | None, max_len: int = 400) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     # Unescape backslash-escaped characters
     text = re.sub(r"\\([^\\])", r"\1", text)
-    # Normalise bullet markers to "; "
+    # Normalise bullet markers to separators
+    text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"\n\s*[-•*]\s*", "; ", text)
     text = re.sub(r"\n\s*\d+[.)]\s*", "; ", text)
-    # Replace remaining newlines with spaces
+    text = re.sub(r"^\s*[-•*]\s*", "", text)
+    text = re.sub(r"^\s*\d+[.)]\s*", "", text)
     text = text.replace("\n", " ").replace("\r", " ")
-    # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
-    # Clean up leading/trailing semicolons
+    text = re.sub(r"\s*;\s*;\s*", "; ", text)
     text = text.strip("; ").strip()
-    return text[:max_len]
+    return text[: min(max_len, _MAX_EXCEL_CELL_LEN)]
+
+
+def _estimate_row_height(row_values: dict[str, object], width_map: dict[str, int]) -> int | None:
+    """Estimate a useful Excel row height for wrapped long-text cells."""
+    max_lines = 1
+    for column in _WRAPPED_TEXT_COLUMNS:
+        value = row_values.get(column)
+        if not value:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        width = max(width_map.get(column, 20), 12)
+        chars_per_line = max(int(width * 1.15), 12)
+        line_count = 0
+        for logical_line in text.split("\n"):
+            logical_line = logical_line.strip()
+            if not logical_line:
+                line_count += 1
+                continue
+            line_count += max(1, math.ceil(len(logical_line) / chars_per_line))
+        max_lines = max(max_lines, line_count)
+
+    if max_lines <= 1:
+        return None
+    return min(18 * max_lines, 180)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +234,10 @@ def _parse_salary(conditions: str, description: str) -> str:
         r"(Grade\s+\d+|Band\s+\d+|Scale\s+\d+)",
         r"Salary:\s*([\$€£]?\d[\d,.]*(?:\s*[-–]\s*[\$€£]?\d[\d,.]*)?(?:/\w+)?)",
         r"(\d[\d.]*,\d{2}\s*€)",  # EU format: "42.185,28 €"
+        r"((?:\\|₩)\s*\d[\d,]*(?:\s*[~\-–]\s*(?:\\|₩)?\s*\d[\d,]*)?)",
+        r"((?:연봉|월급|급여|보수|시급)\s*[:：]?\s*\d[\d,]*(?:\.\d+)?\s*(?:만원|천원|원|억원))",
+        r"((?:연봉|월급|급여|보수|시급)\s*[:：]?\s*\d+\s*천\s*만원)",
+        r"(\d[\d,]*(?:\.\d+)?\s*(?:만원|천원|원|억원)\s*(?:/년|/월|연|월)?)",
     ]
     for p in patterns:
         m = re.search(p, blob, re.IGNORECASE)
@@ -203,11 +256,14 @@ def _parse_duration(conditions: str, description: str) -> str:
         r"(?:up to|minimum|at least|initially)\s+(\d+)\s+(?:year|yr|month)s?",
         r"(?:duration|length|term)\s*(?:of|:)\s*(\d+\s*(?:year|yr|month)s?)",
         r"Contract:\s*(\w[\w\s,-]*)",
+        r"(?:계약|근무|임용)\s*기간\s*[:：]?\s*(\d+\s*년(?:\s*\d+\s*개월)?|\d+\s*개월)",
+        r"(\d+\s*년(?:\s*\d+\s*개월)?)",
+        r"(\d+\s*개월)",
     ]
     for p in patterns:
         m = re.search(p, blob, re.IGNORECASE)
         if m:
-            return m.group(0).strip()[:60]
+            return (m.group(1).strip() if m.lastindex else m.group(0).strip())[:60]
     return ""
 
 
@@ -223,7 +279,22 @@ def _parse_contract_type(conditions: str, description: str) -> str:
         types.append("Fixed-term")
     elif "permanent" in blob or "tenure" in blob:
         types.append("Permanent")
-    return ", ".join(types) if types else ""
+    if "정규직" in blob:
+        types.append("Permanent")
+    if any(token in blob for token in ("계약직", "계약제", "기간제", "임시직")):
+        types.append("Fixed-term")
+    if any(token in blob for token in ("인턴", "intern")):
+        types.append("Intern")
+    if any(token in blob for token in ("시간제", "파트타임")) and "Part-time" not in types:
+        types.append("Part-time")
+    if any(token in blob for token in ("전일제", "상근", "전임")) and "Full-time" not in types:
+        types.append("Full-time")
+    # Preserve stable order
+    ordered = []
+    for item in types:
+        if item not in ordered:
+            ordered.append(item)
+    return ", ".join(ordered) if ordered else ""
 
 
 def _parse_start_date(conditions: str, description: str) -> str:
@@ -231,9 +302,13 @@ def _parse_start_date(conditions: str, description: str) -> str:
     blob = f"{conditions} {description}"
     patterns = [
         r"(?:start(?:ing)?\s*(?:date)?|commencement|begin(?:ning)?)\s*[:=]?\s*(\w+\s+\d{1,2},?\s+\d{4})",
+        r"(?:start(?:ing)?\s*(?:date)?|commencement|begin(?:ning)?)\s*[:=]?\s*(\w+\s*-\s*\d{1,2}\s*-\s*\d{4})",
         r"(?:start(?:ing)?|available|begin)\s*(?:date)?\s*[:=]?\s*((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})",
         r"(?:start(?:ing)?)\s*[:=]?\s*(\d{4}-\d{2}-\d{2})",
         r"(?:as soon as possible|immediately|ASAP)",
+        r"(?:시작|근무|임용|채용)\s*(?:예정)?\s*(?:일|시기|일자|시점)?\s*[:：]?\s*(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})",
+        r"(?:시작|근무|임용|채용)\s*(?:예정)?\s*(?:일|시기|일자|시점)?\s*[:：]?\s*(\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)",
+        r"(채용\s*즉시|즉시\s*근무|즉시|협의\s*후)",
     ]
     for p in patterns:
         m = re.search(p, blob, re.IGNORECASE)
@@ -246,18 +321,23 @@ def _parse_start_date(conditions: str, description: str) -> str:
 # Requirements parsing — split into sub-fields
 # ---------------------------------------------------------------------------
 
-def _parse_degree(requirements: str, description: str) -> str:
+def _parse_degree(requirements: str, description: str, title: str = "") -> str:
     """Extract required degree."""
-    blob = f"{requirements} {description}"
+    blob = " ".join(part for part in (requirements, description) if part)
     patterns = [
         r"(Ph\.?D\.?\s+in\s+[\w\s,/&]+?)(?:\.|;|\n|$)",
         r"((?:Doctoral|PhD|Ph\.D)\s+(?:degree\s+)?in\s+[\w\s,/&]+?)(?:\.|;|\n|$)",
         r"((?:Master'?s?|M\.?S\.?|M\.?Sc\.?)\s+(?:degree\s+)?in\s+[\w\s,/&]+?)(?:\.|;|\n|$)",
+        r"\b(Doctorate|Doctoral degree|Doctoral)\b",
+        r"((?:박사|석사)\s*(?:학위|학위자|소지자|졸업(?:예정)?자|이상)(?:[^.;\n]{0,40})?)",
     ]
     for p in patterns:
         m = re.search(p, blob, re.IGNORECASE)
         if m:
             return m.group(1).strip()[:120]
+    title_lower = title.lower()
+    if any(token in title_lower for token in ("postdoc", "post-doc", "postdoctoral", "박사후", "박사 후", "ph.d")):
+        return "Doctorate"
     return ""
 
 
@@ -266,22 +346,67 @@ def _parse_skills(requirements: str, description: str) -> str:
     blob = f"{requirements} {description}".lower()
     skills = []
     skill_keywords = [
-        "CRISPR", "Cas9", "Cas12", "flow cytometry", "FACS",
-        "mass spectrometry", "NGS", "PCR", "qPCR", "RT-PCR",
-        "Western blot", "microscopy", "confocal", "cryo-EM",
-        "Python", "R programming", "bioinformatics", "machine learning",
-        "cell culture", "cloning", "protein purification",
-        "HPLC", "NMR", "X-ray crystallography",
-        "mouse model", "animal model", "in vivo",
-        "single-cell", "RNA-seq", "ChIP-seq", "ATAC-seq",
-        "electrophysiology", "patch clamp", "optogenetics",
-        "fermentation", "bioprocess", "metabolic flux",
-        "directed evolution", "high-throughput screening",
-        "gene editing", "genome engineering",
+        ("CRISPR", "CRISPR"),
+        ("Cas9", "Cas9"),
+        ("Cas12", "Cas12"),
+        ("flow cytometry", "Flow cytometry"),
+        ("FACS", "FACS"),
+        ("mass spectrometry", "Mass spectrometry"),
+        ("NGS", "NGS"),
+        ("PCR", "PCR"),
+        ("qPCR", "qPCR"),
+        ("RT-PCR", "RT-PCR"),
+        ("Western blot", "Western blot"),
+        ("microscopy", "Microscopy"),
+        ("confocal", "Confocal microscopy"),
+        ("cryo-EM", "cryo-EM"),
+        ("Python", "Python"),
+        ("R programming", "R programming"),
+        ("bioinformatics", "Bioinformatics"),
+        ("machine learning", "Machine learning"),
+        ("cell culture", "Cell culture"),
+        ("cloning", "Cloning"),
+        ("protein purification", "Protein purification"),
+        ("HPLC", "HPLC"),
+        ("NMR", "NMR"),
+        ("X-ray crystallography", "X-ray crystallography"),
+        ("mouse model", "Mouse model"),
+        ("animal model", "Animal model"),
+        ("in vivo", "In vivo"),
+        ("single-cell", "Single-cell"),
+        ("RNA-seq", "RNA-seq"),
+        ("ChIP-seq", "ChIP-seq"),
+        ("ATAC-seq", "ATAC-seq"),
+        ("electrophysiology", "Electrophysiology"),
+        ("patch clamp", "Patch clamp"),
+        ("optogenetics", "Optogenetics"),
+        ("fermentation", "Fermentation"),
+        ("bioprocess", "Bioprocess"),
+        ("metabolic flux", "Metabolic flux"),
+        ("directed evolution", "Directed evolution"),
+        ("high-throughput screening", "High-throughput screening"),
+        ("gene editing", "Gene editing"),
+        ("genome engineering", "Genome engineering"),
+        ("분자생물학", "Molecular biology"),
+        ("세포배양", "Cell culture"),
+        ("세포 배양", "Cell culture"),
+        ("동물실험", "Animal experiments"),
+        ("동물 모델", "Animal model"),
+        ("유세포분석", "Flow cytometry"),
+        ("세포주", "Cell line work"),
+        ("단백질 정제", "Protein purification"),
+        ("생물정보학", "Bioinformatics"),
+        ("바이오인포매틱스", "Bioinformatics"),
+        ("유전자편집", "Gene editing"),
+        ("유전자 편집", "Gene editing"),
+        ("클로닝", "Cloning"),
+        ("현미경", "Microscopy"),
+        ("발효", "Fermentation"),
+        ("미생물", "Microbiology"),
     ]
-    for skill in skill_keywords:
-        if skill.lower() in blob:
-            skills.append(skill)
+    for keyword, label in skill_keywords:
+        if keyword.lower() in blob and label not in skills:
+            skills.append(label)
     return ", ".join(skills[:10]) if skills else ""
 
 
@@ -343,6 +468,25 @@ JOB_COLUMNS = [
 
 _MAX_INFO_URLS = 3  # number of Info URL columns
 
+_JOB_COLUMN_WIDTHS = {
+    "Title": 65, "PI Name": 18, "Institute": 25, "Department": 20,
+    "Tier": 5, "Country": 12, "Region": 6,
+    "Field": 24, "Keywords": 40,
+    "Position Summary": 55, "Responsibilities": 55, "Preferred Qualifications": 45,
+    "Degree Required": 30, "Skills/Techniques": 30, "Requirements (Full)": 52,
+    "Salary": 18, "Duration": 18, "Contract Type": 14, "Start Date": 14,
+    "Conditions (Full)": 45,
+    "Posted Date": 11, "Deadline": 11,
+    "Application Materials": 42,
+    "Description": 72,
+    **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
+    **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
+    "Contact Email": 25,
+    **{f"Info URL {i+1}": 20 for i in range(_MAX_INFO_URLS)},
+    "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
+    "Match Score": 8, "Source": 12, "Status": 7,
+}
+
 
 def _info_urls_to_columns(info_urls_json: str | None) -> dict[str, str]:
     """Convert info_urls JSON to individual column values."""
@@ -368,12 +512,70 @@ def _format_tier(tier, institute: str = "") -> str:
     return f"T{tier}"
 
 
+def _fallback_summary(desc: str) -> str:
+    """Return the leading descriptive chunk when no structured summary exists."""
+    if not desc:
+        return ""
+    lead = re.split(r"\n\s*\n|(?:지원|응시)\s*자격\s*:|(?:담당|수행)\s*업무\s*:|근무\s*조건\s*:", desc, maxsplit=1)[0]
+    return lead.strip()
+
+
+_PREFERRED_MARKERS = re.compile(
+    r"(?:^|[\n;|])\s*(?:preferred|desired|nice to have|bonus|"
+    r"우대\s*(?:사항|조건|전공|경력)?|가산점)\s*[:.]?",
+    re.IGNORECASE,
+)
+
+
+def _split_preferred_from_requirements(requirements: str) -> tuple[str, str]:
+    """Split mixed requirements text into required/preferred portions."""
+    text = (requirements or "").strip()
+    if not text:
+        return "", ""
+
+    marker = _PREFERRED_MARKERS.search(text)
+    if marker:
+        required = text[:marker.start()].strip(" ;|\n")
+        preferred = text[marker.end():].strip(" ;|\n")
+        return required, preferred
+
+    req_parts: list[str] = []
+    pref_parts: list[str] = []
+    for raw_part in re.split(r"(?:\s*;\s*|\n+)", text):
+        part = raw_part.strip(" -")
+        if not part:
+            continue
+        if re.match(r"(?:preferred|desired|nice to have|bonus|우대|가산점)", part, re.IGNORECASE):
+            pref_parts.append(re.sub(r"^(?:preferred|desired|nice to have|bonus|우대\s*(?:사항|조건|전공|경력)?|가산점)\s*[:.]?\s*", "", part, flags=re.IGNORECASE).strip())
+        else:
+            req_parts.append(part)
+    return "; ".join(req_parts), "; ".join(pref_parts)
+
+
+def _merge_sections(*values: str | None) -> str:
+    """Merge section snippets without duplicate text."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(cleaned)
+    return "\n".join(merged)
+
+
 def _job_to_row(job: dict) -> dict:
     tier = job.get("tier")
     institute = job.get("institute") or ""
+    title = (job.get("title") or "").strip()
     desc = job.get("description") or ""
     req = job.get("requirements") or ""
     cond = job.get("conditions") or ""
+    app_materials = job.get("application_materials") or ""
 
     # Parse structured sections from description (LinkedIn/Indeed format)
     sections = parse_structured_description(desc)
@@ -381,11 +583,34 @@ def _job_to_row(job: dict) -> dict:
     # Use parsed requirements/conditions as fallback for empty fields
     if not req and sections.get("requirements"):
         req = sections["requirements"]
+    if not req:
+        req = extract_requirements(desc) or ""
+    req, preferred_from_req = _split_preferred_from_requirements(req)
     if not cond and sections.get("conditions"):
         cond = sections["conditions"]
+    if not cond:
+        cond = extract_conditions(desc) or ""
+    if not app_materials:
+        app_materials = extract_application_materials(desc) or ""
+
+    responsibilities = _merge_sections(
+        sections.get("responsibilities"),
+        extract_responsibilities(desc),
+    )
+    preferred = _merge_sections(
+        sections.get("preferred"),
+        preferred_from_req,
+        extract_preferred_qualifications(desc),
+    )
+    summary = sections.get("summary") or _fallback_summary(desc) or title
+    if title and (len(summary) > 600 or summary.count(":") > 6):
+        summary = title
+    conditions_full = _format_salary_number(_clean_list(cond, 4000))
+    description_full = _clean_text(desc, _MAX_EXCEL_CELL_LEN, preserve_newlines=True)
+    field = job.get("field") or infer_field(" ".join(part for part in (title, desc[:500]) if part)) or ""
 
     return {
-        "Title": (job.get("title") or "").strip(),
+        "Title": title,
         "PI Name": job.get("pi_name") or "",
         "Institute": institute,
         "Department": job.get("department") or "",
@@ -393,28 +618,28 @@ def _job_to_row(job: dict) -> dict:
         "Country": job.get("country") or "",
         "Region": job.get("region") or "",
         # Research
-        "Field": job.get("field") or "",
+        "Field": field,
         "Keywords": job.get("keywords") or "",
         # Structured sections
-        "Position Summary": _clean_text(sections.get("summary"), 2000),
-        "Responsibilities": _clean_list(sections.get("responsibilities"), 2000),
-        "Preferred Qualifications": _clean_list(sections.get("preferred"), 2000),
+        "Position Summary": _clean_text(summary, 4000),
+        "Responsibilities": _clean_list(responsibilities, 5000),
+        "Preferred Qualifications": _clean_list(preferred, 4000),
         # Requirements parsed
-        "Degree Required": _parse_degree(req, desc),
+        "Degree Required": _parse_degree(req, desc, title),
         "Skills/Techniques": _parse_skills(req, desc),
-        "Requirements (Full)": _clean_list(req, 3000),
+        "Requirements (Full)": _clean_list(req, 6000),
         # Conditions parsed
         "Salary": _parse_salary(cond, desc),
         "Duration": _parse_duration(cond, desc),
         "Contract Type": _parse_contract_type(cond, desc),
         "Start Date": _parse_start_date(cond, desc),
-        "Conditions (Full)": _format_salary_number(_clean_list(cond, 3000)),
+        "Conditions (Full)": conditions_full,
         # Dates
         "Posted Date": job.get("posted_date") or "",
         "Deadline": job.get("deadline") or "",
-        "Application Materials": _clean_list(job.get("application_materials"), 1000),
+        "Application Materials": _clean_list(app_materials, 3000),
         # Description
-        "Description": _clean_text(desc, 15000),
+        "Description": description_full,
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
         **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
         **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
@@ -532,38 +757,28 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
     for i, col in enumerate(df.columns):
         worksheet.write(0, i, col, header_fmt)
 
-    # Column widths (tuned per column type)
-    width_map = {
-        "Title": 65, "PI Name": 18, "Institute": 25, "Department": 20,
-        "Tier": 5, "Country": 12, "Region": 6,
-        "Field": 20, "Keywords": 35,
-        "Position Summary": 45, "Responsibilities": 45, "Preferred Qualifications": 40,
-        "Degree Required": 30, "Skills/Techniques": 30, "Requirements (Full)": 40,
-        "Salary": 18, "Duration": 18, "Contract Type": 12, "Start Date": 14,
-        "Conditions (Full)": 30,
-        "Posted Date": 11, "Deadline": 11,
-        "Description": 50,
-        **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
-        **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
-        "Contact Email": 25,
-        **{f"Info URL {i+1}": 20 for i in range(_MAX_INFO_URLS)},
-        "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
-        "Match Score": 8, "Source": 12, "Status": 7,
-    }
+    width_map = _JOB_COLUMN_WIDTHS
 
-    url_fmt = workbook.add_format({"font_color": "blue", "underline": True, "valign": "vcenter"})
-    default_fmt = workbook.add_format({"valign": "vcenter"})
+    url_fmt = workbook.add_format(
+        {"font_color": "blue", "underline": True, "valign": "top"}
+    )
+    default_fmt = workbook.add_format({"valign": "top"})
+    wrapped_fmt = workbook.add_format({"valign": "top", "text_wrap": True})
 
     for i, col in enumerate(df.columns):
         width = width_map.get(col, 15)
         if col in ("Job URL", "Job URL 2", "Lab URL", "Scholar URL", "Dept URL",
                    "Info URL 1", "Info URL 2", "Info URL 3"):
             worksheet.set_column(i, i, width, url_fmt)
+        elif col in _WRAPPED_TEXT_COLUMNS:
+            worksheet.set_column(i, i, width, wrapped_fmt)
         else:
             worksheet.set_column(i, i, width, default_fmt)
 
-    # Compact row height
-    worksheet.set_default_row(20)
+    for row_idx, row in enumerate(df.to_dict("records"), start=1):
+        row_height = _estimate_row_height(row, width_map)
+        if row_height:
+            worksheet.set_row(row_idx, row_height)
 
     # Auto-filter on all columns
     if len(df) > 0:
@@ -1216,8 +1431,8 @@ def _is_excluded(job: dict) -> bool:
     # Past-year titles: "2025년", "2024년" etc. are clearly old postings
     title_raw = job.get("title") or ""
     current_year = date.today().year
-    for past_yr in range(current_year - 2, current_year):
-        if str(past_yr) in title_raw:
+    for match in re.finditer(r"(?<!\d)(20\d{2})(?!\d)", title_raw):
+        if int(match.group(1)) < current_year:
             return True
 
     # Stale postings: posted in a previous year with no future deadline
@@ -1637,24 +1852,7 @@ def _mark_exported(urls: list[str]) -> None:
 # openpyxl incremental update helpers
 # ---------------------------------------------------------------------------
 
-_HEADER_WIDTH_MAP = {
-    "Title": 65, "PI Name": 18, "Institute": 25, "Department": 20,
-    "Tier": 5, "Country": 12, "Region": 6,
-    "Field": 20, "Keywords": 35,
-    "Position Summary": 45, "Responsibilities": 45, "Preferred Qualifications": 40,
-    "Degree Required": 30, "Skills/Techniques": 30, "Requirements (Full)": 40,
-    "Salary": 18, "Duration": 18, "Contract Type": 12, "Start Date": 14,
-    "Conditions (Full)": 30,
-    "Posted Date": 11, "Deadline": 11,
-    "Application Materials": 30,
-    "Description": 50,
-    **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
-    **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
-    "Contact Email": 25,
-    **{f"Info URL {i+1}": 20 for i in range(_MAX_INFO_URLS)},
-    "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
-    "Match Score": 8, "Source": 12, "Status": 7,
-}
+_HEADER_WIDTH_MAP = _JOB_COLUMN_WIDTHS
 
 _TIER_COLORS = {
     "T1": {"bg": "FFF3CD", "fg": "856404", "bold": True},
@@ -1737,6 +1935,24 @@ def _write_paper_links_openpyxl(ws, row_idx: int, job: dict) -> None:
                 cell.font = link_font
 
 
+def _apply_wrapped_text_openpyxl(ws, row_idx: int) -> None:
+    """Wrap long-text cells and expand the row height for readability."""
+    from openpyxl.styles import Alignment
+
+    row_values: dict[str, object] = {}
+    for col_name in _WRAPPED_TEXT_COLUMNS:
+        col_idx = _find_column_index(ws, col_name)
+        if not col_idx:
+            continue
+        cell = ws.cell(row=row_idx, column=col_idx)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        row_values[col_name] = cell.value
+
+    row_height = _estimate_row_height(row_values, _HEADER_WIDTH_MAP)
+    if row_height:
+        ws.row_dimensions[row_idx].height = row_height
+
+
 def _style_new_row_openpyxl(ws, row_idx: int, job: dict) -> None:
     """Apply formatting to a newly appended row in an openpyxl sheet."""
     from openpyxl.styles import Font, PatternFill
@@ -1781,6 +1997,7 @@ def _style_new_row_openpyxl(ws, row_idx: int, job: dict) -> None:
 
     # Paper hyperlinks
     _write_paper_links_openpyxl(ws, row_idx, job)
+    _apply_wrapped_text_openpyxl(ws, row_idx)
 
     # Citizenship restriction → red Institute
     if _has_citizenship_restriction(job):
@@ -1840,6 +2057,9 @@ def _update_sheet(
             ws.cell(row=row_idx, column=col_idx,
                     value=row_data.get(col_name, ""))
         _style_new_row_openpyxl(ws, row_idx, job)
+
+    for row_idx in range(2, (ws.max_row or 1) + 1):
+        _apply_wrapped_text_openpyxl(ws, row_idx)
 
     # 4. Update auto-filter range
     if ws.max_row and ws.max_row > 1:

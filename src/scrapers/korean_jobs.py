@@ -30,13 +30,18 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from urllib.parse import urljoin, urlencode
 
 import urllib3
 from bs4 import BeautifulSoup, Tag
 
+from src.matching.job_parser import (
+    extract_application_materials,
+    extract_conditions,
+    extract_requirements,
+)
 from src.scrapers.base import BaseScraper
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -45,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 MAX_PAGES = 5
 DETAIL_LIMIT = 50  # max detail pages to fetch per sub-scraper
+DETAIL_TEXT_LIMIT = 15000
 
 # *.recruitment.kr domains silently drop HTTPS GET requests (SSL connects
 # but server never sends response body). HEAD and port-80 work, but full
@@ -53,9 +59,18 @@ _RECRUITMENT_KR_DISABLED = True
 
 # ── Site-specific CSS selector hints (tried first, in order) ──
 _SITE_HINTS: dict[str, list[str]] = {
-    "ibric":     ["div.view-content", "div.board-view", "div#content div.content", "td.content"],
+    "ibric":     [
+        "div.b-view-detail-box",
+        "div.b-view-recruit-info-box",
+        "div.b-view-recruit-work-box",
+        "section#cms-content",
+        "div.view-content",
+        "div.board-view",
+        "div#content div.content",
+        "td.content",
+    ],
     "hibrain":   ["div.recruit-view", "div.view-body", "div.content-view", "div#content"],
-    "rpik":      ["div.board-view", "div.view-content"],
+    "rpik":      ["section.sector1.first", "main#main", "article", "div#content", "div.board-view", "div.view-content"],
     "nst_onest": ["div.detail-content", "div.view-content", "div.job-detail"],
     "nst":       ["div.board-view", "div.view-content"],
     "ibs":       ["div.recruit-view", "div.board-view", "div.view-content", "div#content"],
@@ -81,6 +96,17 @@ _KOREAN_BOARD_SELECTORS = [
     "div[class*='view']", "div[class*='content']", "div[class*='detail']",
 ]
 
+_LIST_ROW_SELECTORS = (
+    "table tbody tr, "
+    "div.board-list tbody tr, "
+    "div.list-item, "
+    "ul.list li, "
+    "div.recruit-item, "
+    "ul.recruit-list li, "
+    "ul.table li.row, "
+    "ul.table li.sortRoot"
+)
+
 # ── Default institute names per source ──
 _DEFAULT_INSTITUTES: dict[str, str] = {
     "ibs": "Institute for Basic Science (IBS)",
@@ -101,6 +127,24 @@ _DEFAULT_INSTITUTES: dict[str, str] = {
     "hibrain": "HiBrainNet",
     "ibric": "IBRIC",
 }
+
+_SITE_REFERERS: dict[str, str] = {
+    "hibrain": "https://www.hibrain.net/",
+    "ibric": "https://www.ibric.org/",
+    "rpik": "https://www.rpik.or.kr/",
+}
+
+_BLOCKED_PAGE_MARKERS = (
+    "403 error",
+    "request blocked",
+    "access denied",
+    "attention required",
+    "cloudfront",
+    "forbidden",
+    "회원전용 메뉴이니 로그인후에 이용바랍니다",
+    "please log in first",
+    "member type selection > join > membership",
+)
 
 
 class KoreanJobsScraper(BaseScraper):
@@ -533,14 +577,7 @@ class KoreanJobsScraper(BaseScraper):
                 resp = self.fetch(page_url)
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                rows = soup.select(
-                    "table tbody tr, "
-                    "div.board-list tbody tr, "
-                    "div.list-item, "
-                    "ul.list li, "
-                    "div.recruit-item, "
-                    "ul.recruit-list li"
-                )
+                rows = soup.select(_LIST_ROW_SELECTORS)
                 if not rows:
                     rows = self._find_job_links(soup, root, link_pattern)
 
@@ -647,6 +684,8 @@ class KoreanJobsScraper(BaseScraper):
                     sn = item.get("jobnoticeSn")
                     if not name or not sn:
                         continue
+                    if _is_clearly_stale_korean_title(name):
+                        continue
                     kind = item.get("systemKindCode", "MRS2")
                     detail_url = (
                         f"{base}/app/jobnotice/view"
@@ -694,6 +733,8 @@ class KoreanJobsScraper(BaseScraper):
                 for row in rows:
                     job = self._parse_generic_row(row, base, sub_source)
                     if job:
+                        if _is_clearly_stale_korean_title(job.get("title", "")):
+                            continue
                         job["institute"] = job.get("institute") or default_institute
                         jobs.append(job)
 
@@ -762,14 +803,19 @@ class KoreanJobsScraper(BaseScraper):
                 if submit and submit.get("value"):
                     link = submit  # use submit button as "link" for title
 
-        # Determine title
+        # Determine title (prefer dedicated title spans over full link text)
+        title = ""
         if link:
-            title = link.get("value", "") or link.get_text(strip=True)
-        else:
-            title = ""
+            title_el = link.select_one(
+                ".title, .big, .subject, .tit, .job-title, .board-title, strong"
+            )
+            if title_el and title_el.get_text(strip=True):
+                title = title_el.get_text(" ", strip=True)
+            if not title:
+                title = link.get("value", "") or link.get_text(" ", strip=True)
 
         # If primary title is missing or invalid, try alternative sources
-        title = re.sub(r"^종료\s*", "", (title or "")).strip()
+        title = _clean_listing_title(re.sub(r"^종료\s*", "", (title or "")).strip())
         title = re.sub(r"새글$|첨부파일\s*있음$|new$", "", title, flags=re.IGNORECASE).strip()
 
         if not title or len(title) < 3 or not _is_valid_korean_job_title(title):
@@ -792,7 +838,7 @@ class KoreanJobsScraper(BaseScraper):
                             and not _looks_like_date(t)
                             and not t.isdigit()
                             and _is_valid_korean_job_title(t)):
-                        title = t
+                        title = _clean_listing_title(t)
 
         if not title or len(title) < 3:
             return None
@@ -804,6 +850,10 @@ class KoreanJobsScraper(BaseScraper):
 
         # Reject invalid titles (navigation, results, non-job)
         if not _is_valid_korean_job_title(title):
+            return None
+
+        row_text_lower = row.get_text(" ", strip=True).lower()
+        if "notice closed" in row_text_lower or "cancelled" in row_text_lower:
             return None
 
         url = urljoin(base_url, href) if href else None
@@ -827,19 +877,41 @@ class KoreanJobsScraper(BaseScraper):
                 institute = inst_text
 
         # Department
-        dept_el = row.select_one(
-            "td.department, span.department, div.dept"
-        )
+        dept_el = row.select_one("td.department, span.department, div.dept")
         department = dept_el.get_text(strip=True) if dept_el else None
 
-        # Deadline — try class-specific selectors first
-        date_el = row.select_one(
-            "td.date, td.deadline, span.date, span.deadline, .period"
+        # Field
+        field_el = row.select_one(
+            "span.co_blue.underLine, span.co_blue, td.field, td.category, span.category"
         )
-        deadline = None
-        if date_el:
+        field = field_el.get_text(" ", strip=True) if field_el else None
+
+        # Hibrain-style receipt window: first date = posted, last date = deadline
+        posted_date = None
+        receipt_dates = [
+            parsed
+            for parsed in (
+                _parse_korean_date(el.get_text(strip=True))
+                for el in row.select(".td_receipt .number")
+            )
+            if parsed
+        ]
+        if receipt_dates:
+            posted_date = receipt_dates[0]
+            deadline = receipt_dates[-1]
+        else:
+            deadline = None
+
+        # Deadline — try class-specific selectors first
+        date_el = row.select_one("td.date, td.deadline, span.date, span.deadline, .period")
+        if date_el and not deadline:
             date_text = date_el.get_text(strip=True)
             deadline = _parse_korean_date(date_text)
+
+        if not posted_date:
+            posted_el = row.select_one(".td_rdtm, td.posted, span.posted, td.registered")
+            if posted_el:
+                posted_date = _parse_korean_date(posted_el.get_text(strip=True))
 
         # Fallback: scan all <td> elements for date-like text (last date = deadline)
         if not deadline:
@@ -854,9 +926,15 @@ class KoreanJobsScraper(BaseScraper):
                     deadline = parsed
                     break
 
-        # Field
-        field_el = row.select_one("td.field, td.category, span.category")
-        field = field_el.get_text(strip=True) if field_el else None
+        if not institute or not department:
+            parsed_inst, parsed_dept = _parse_institute_from_title(title)
+            if parsed_inst and not institute:
+                institute = parsed_inst
+            if parsed_dept and not department:
+                department = parsed_dept
+
+        if not field:
+            field = _infer_korean_field(title, "") or None
 
         return {
             "title": title,
@@ -864,6 +942,7 @@ class KoreanJobsScraper(BaseScraper):
             "department": department,
             "country": "South Korea",
             "url": url,
+            "posted_date": posted_date,
             "deadline": deadline,
             "field": field,
             "source": f"korean_jobs:{sub_source}",
@@ -883,15 +962,14 @@ class KoreanJobsScraper(BaseScraper):
                 enriched.append(job)
                 continue
             try:
-                resp = self.fetch(url)
-                html = resp.text
-                soup = BeautifulSoup(html, "html.parser")
                 sub_source = (job.get("source") or "").split(":")[-1]
+                html = self._fetch_detail_html(url, sub_source)
+                soup = BeautifulSoup(html, "html.parser")
 
                 # ── RALP: 4-strategy description extraction ──
                 desc = self._extract_description_ralp(soup, html, sub_source)
                 if desc:
-                    job["description"] = desc[:5000]
+                    job["description"] = desc[:DETAIL_TEXT_LIMIT]
                     desc_found += 1
 
                 # ── Extract structured fields from Korean table/detail layout ──
@@ -913,6 +991,12 @@ class KoreanJobsScraper(BaseScraper):
             except Exception:
                 self.logger.debug("Detail fetch failed: %s", url)
 
+            _apply_korean_fallbacks(job)
+            job["title"] = _normalize_korean_title(
+                job.get("title", ""),
+                job.get("institute"),
+                job.get("description"),
+            )
             enriched.append(job)
 
         # Add remaining jobs without enrichment
@@ -923,29 +1007,70 @@ class KoreanJobsScraper(BaseScraper):
         )
         return enriched
 
+    def _fetch_detail_html(self, url: str, sub_source: str) -> str:
+        """Fetch detail HTML with a browser fallback for blocked Korean pages."""
+        html = ""
+        headers = {}
+        referer = _SITE_REFERERS.get(sub_source)
+        if referer:
+            headers["Referer"] = referer
+
+        try:
+            resp = self.fetch(url, headers=headers or None)
+            html = resp.text
+        except Exception:
+            html = ""
+
+        if _detail_page_needs_browser(html):
+            try:
+                from src.scrapers.browser import fetch_page
+
+                wait_selector = next(
+                    (sel for sel in _SITE_HINTS.get(sub_source, []) if sel),
+                    None,
+                )
+                browser_html = fetch_page(
+                    url,
+                    wait_selector=wait_selector,
+                    wait_ms=2000,
+                    timeout=45000,
+                )
+                if browser_html:
+                    html = browser_html
+            except Exception:
+                self.logger.debug("Browser fallback failed: %s", url)
+
+        if not html:
+            raise ValueError(f"empty detail html for {url}")
+        return html
+
     def _extract_description_ralp(
         self, soup: BeautifulSoup, html: str, sub_source: str,
         min_len: int = 100,
     ) -> str | None:
         """RALP: try 4 strategies to extract description."""
 
+        site_desc = _extract_site_specific_description(soup, sub_source)
+        if site_desc and len(site_desc) >= min_len:
+            return site_desc
+
         # Strategy 1: Per-site CSS hints
         for sel in _SITE_HINTS.get(sub_source, []):
             el = soup.select_one(sel)
             if el and len(el.get_text(strip=True)) >= min_len:
-                return el.get_text(separator="\n", strip=True)[:5000]
+                return _clean_detail_text(el.get_text(separator="\n", strip=True))
 
         # Strategy 2: Generic Korean board selectors
         for sel in _KOREAN_BOARD_SELECTORS:
             el = soup.select_one(sel)
             if el and len(el.get_text(strip=True)) >= min_len:
-                return el.get_text(separator="\n", strip=True)[:5000]
+                return _clean_detail_text(el.get_text(separator="\n", strip=True))
 
         # Strategy 3: Table body (Korean sites use tables for layout)
         for table in soup.find_all("table"):
             text = table.get_text(separator="\n", strip=True)
             if len(text) >= min_len * 2:  # higher threshold for table noise
-                return text[:5000]
+                return _clean_detail_text(text)
 
         # Strategy 4: Base class fallback (largest text block)
         return self._extract_description_fallback(html, min_length=min_len)
@@ -1077,6 +1202,30 @@ _KOREAN_BIO_SIGNALS = [
     "synthetic bio", "enzyme", "ferment",
 ]
 
+_KOREAN_FALSE_POSITIVE_PATTERNS = [
+    r"(?:한화생명|삼성생명|교보생명|신한생명|흥국생명)",
+    r"(?:보험|검진센터|센터장|지점장|영업|상담)",
+    r"(?:전문의|의사)\s*모집",
+]
+
+_RESEARCH_ROLE_SIGNALS = [
+    "postdoc", "post-doc", "postdoctoral", "ph.d", "박사후", "박사 후",
+    "연구교수", "연구원", "연구실", "연구팀", "연구단", "연구소", "연구클러스터",
+    "lab", "교실", "학교실",
+]
+
+
+def _extract_title_year(title: str) -> int | None:
+    """Return the explicit 4-digit year embedded in a title, if any."""
+    match = re.search(r"(?<!\d)(20\d{2})(?:\s*년)?(?!\d)", title)
+    return int(match.group(1)) if match else None
+
+
+def _is_clearly_stale_korean_title(title: str) -> bool:
+    """Return True for titles that explicitly reference an older recruitment year."""
+    year = _extract_title_year(title)
+    return bool(year and year < date.today().year)
+
 
 def _is_bio_relevant_korean(title: str) -> bool:
     """Return True if a Korean job title is relevant to bio/research fields.
@@ -1085,6 +1234,9 @@ def _is_bio_relevant_korean(title: str) -> bool:
     (HiBrainNet, etc.) that list ALL types of professional positions.
     """
     t = title.lower()
+    if any(re.search(pat, t) for pat in _KOREAN_FALSE_POSITIVE_PATTERNS):
+        if not any(sig in t for sig in _RESEARCH_ROLE_SIGNALS):
+            return False
     return any(sig in t for sig in _KOREAN_BIO_SIGNALS)
 
 
@@ -1135,6 +1287,239 @@ def _looks_like_date(text: str) -> bool:
     return False
 
 
+def _detail_page_needs_browser(html: str | None) -> bool:
+    """Return True when a detail page looks blocked or empty."""
+    if not html:
+        return True
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    if len(text) < 120:
+        return True
+    return any(marker in text for marker in _BLOCKED_PAGE_MARKERS)
+
+
+def _clean_detail_text(text: str | None, max_len: int = DETAIL_TEXT_LIMIT) -> str:
+    """Normalise scraped detail text while preserving line breaks."""
+    if not text:
+        return ""
+    text = re.sub(r"\r\n?", "\n", text)
+    text = text.replace("\xa0", " ")
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()[:max_len]
+
+
+def _merge_text(existing: str | None, new_value: str | None, max_len: int, sep: str = "\n") -> str:
+    """Merge text fragments without duplicating identical content."""
+    existing = (existing or "").strip()
+    new_value = (new_value or "").strip()
+    if not new_value:
+        return existing[:max_len]
+    if not existing:
+        return new_value[:max_len]
+    if new_value in existing:
+        return existing[:max_len]
+    if existing in new_value:
+        return new_value[:max_len]
+    return f"{existing}{sep}{new_value}"[:max_len]
+
+
+def _element_text_or_href(el: Tag | None, max_len: int = 5000) -> str:
+    """Return cleaned element text, falling back to the first href when needed."""
+    if not el:
+        return ""
+    text = _clean_detail_text(el.get_text("\n", strip=True), max_len)
+    if text:
+        return text
+    link = el.select_one("a[href]")
+    if link and link.get("href"):
+        return link["href"].strip()[:max_len]
+    return ""
+
+
+def _clean_listing_title(title: str | None) -> str:
+    """Remove list-level metadata tails from compact board titles."""
+    if not title:
+        return ""
+    cleaned = re.sub(r"\s+", " ", title).strip()
+    # RPiK-style title tails: "<title> Field > Subfield Region | experience"
+    cleaned = re.sub(
+        r"([.!?])\s*[A-Z][A-Za-z/&(),\-\s]+\s*>\s*[A-Z][A-Za-z/&(),\-\s]+"
+        r"(?:[A-Z][a-z-]+(?:-do)?\s*\|\s*.*)?$",
+        r"\1",
+        cleaned,
+    ).strip()
+    cleaned = re.sub(
+        r"\s+(?:Seoul|Busan|Daejeon|Daegu|Incheon|Gwangju|Ulsan|Jeju|"
+        r"Gyeonggi-do|Gangwon-do|Chungcheongbuk-do|Chungcheongnam-do|"
+        r"Jeollabuk-do|Jeollanam-do|Gyeongsangbuk-do|Gyeongsangnam-do)"
+        r"\s*\|\s*.*$",
+        "",
+        cleaned,
+    ).strip()
+    return cleaned.strip(" |")
+
+
+def _extract_site_specific_description(
+    soup: BeautifulSoup, sub_source: str,
+) -> str | None:
+    """Build a cleaner description for sites with known custom layouts."""
+    blocks: list[str] = []
+
+    def add_block(value: str | None) -> None:
+        cleaned = _clean_detail_text(value, DETAIL_TEXT_LIMIT)
+        if cleaned and cleaned not in blocks:
+            blocks.append(cleaned)
+
+    if sub_source == "ibric":
+        pairs: list[str] = []
+        for container in soup.select(
+            "div.b-view-detail-box li, "
+            "div.b-view-recruit-info-box .recruit-info, "
+            "div.b-view-recruit-work-box"
+        ):
+            head = container.select_one(".b-head")
+            detail = container.select_one(".b-detail")
+            header = _clean_detail_text(head.get_text(" ", strip=True), 120) if head else ""
+            value = _element_text_or_href(detail, 5000)
+            if header and value:
+                pairs.append(f"{header}: {value}")
+        if pairs:
+            add_block("\n".join(pairs))
+
+    elif sub_source == "rpik":
+        for sel in ("section.sector1.first", "section.sector1 table.tbl1", "article"):
+            for el in soup.select(sel):
+                add_block(el.get_text("\n", strip=True))
+
+    return "\n\n".join(blocks) if blocks else None
+
+
+def _append_structured_sections(job: dict[str, Any], sections: dict[str, list[str]]) -> None:
+    """Append extracted Korean table/list fields to the description as section blocks."""
+    blocks: list[str] = []
+    desc = _clean_detail_text(job.get("description"))
+
+    for label, values in sections.items():
+        unique_values: list[str] = []
+        for value in values:
+            cleaned = _clean_detail_text(value, 4000)
+            if not cleaned or cleaned in unique_values:
+                continue
+            unique_values.append(cleaned)
+        if not unique_values:
+            continue
+        if desc and all(value in desc for value in unique_values):
+            continue
+        blocks.append(f"{label}:\n" + "\n".join(unique_values))
+
+    if blocks:
+        merged = desc
+        for block in blocks:
+            merged = _merge_text(merged, block, DETAIL_TEXT_LIMIT, sep="\n\n")
+        job["description"] = merged
+
+
+def _apply_korean_fallbacks(job: dict[str, Any]) -> None:
+    """Apply description/title-based fallbacks even when detail scraping is partial."""
+    desc = job.get("description", "")
+    if not job.get("requirements") and desc:
+        req = extract_requirements(desc)
+        if req:
+            job["requirements"] = req[:6000]
+    if not job.get("conditions") and desc:
+        cond = extract_conditions(desc)
+        if cond:
+            job["conditions"] = cond[:4000]
+    if not job.get("application_materials") and desc:
+        app_materials = extract_application_materials(desc)
+        if app_materials:
+            job["application_materials"] = app_materials[:3000]
+
+    if not job.get("keywords") and desc:
+        kws = _extract_korean_keywords(desc)
+        if kws:
+            job["keywords"] = ", ".join(kws)
+
+    if not job.get("pi_name") and desc:
+        pi = _extract_korean_pi(desc)
+        if pi:
+            job["pi_name"] = pi
+
+    if not job.get("field") and job.get("title"):
+        field = _infer_korean_field(job["title"], desc)
+        if field:
+            job["field"] = field
+
+    title = job.get("title") or ""
+    if title and (not job.get("institute") or not job.get("department")):
+        inst, dept = _parse_institute_from_title(title)
+        if inst and not job.get("institute"):
+            job["institute"] = inst
+        if dept and not job.get("department"):
+            job["department"] = dept
+
+    # HiBrain detail pages are login-gated; keep list-page metadata visible
+    # in the Description column instead of leaving the row blank.
+    if not desc and (job.get("source") or "").endswith("hibrain"):
+        blocks: list[str] = []
+        if title:
+            blocks.append(f"모집 내용:\n{title}")
+        org_parts = [part for part in (job.get("institute"), job.get("department")) if part]
+        if org_parts:
+            blocks.append("소속:\n" + " / ".join(dict.fromkeys(org_parts)))
+        if job.get("field"):
+            blocks.append(f"연구 분야:\n{job['field']}")
+        meta_lines: list[str] = []
+        if job.get("posted_date"):
+            meta_lines.append(f"등록일: {job['posted_date']}")
+        if job.get("deadline"):
+            meta_lines.append(f"마감일: {job['deadline']}")
+        if meta_lines:
+            blocks.append("공고 메타:\n" + "\n".join(meta_lines))
+        if blocks:
+            job["description"] = "\n\n".join(blocks)
+            desc = job["description"]
+
+    if not job.get("posted_date") and desc:
+        for pat in [
+            r"(?:등록|등록/수정|공고|게시)\s*(?:일|일자)?\s*[:\s]*(\d{2,4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2})",
+            r"(?:posted|date\s*posted|start\s*date)\s*[:\s]*([A-Za-z]+[\s-]+\d{1,2}[\s,-]+\d{4})",
+        ]:
+            m = re.search(pat, desc, re.IGNORECASE)
+            if m:
+                parsed_posted = _parse_korean_date(m.group(1)) or _parse_date_string_fallback(m.group(1))
+                if parsed_posted:
+                    job["posted_date"] = parsed_posted
+                    break
+
+    if not job.get("deadline") and desc:
+        for pat in [
+            r"(?:접수\s*기간|모집\s*기간)\s*[:\s]*\d{2,4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2}"
+            r"[^~]*~\s*(\d{2,4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})",
+            r"(?:마감|지원\s*기한|접수\s*마감|closing\s*date)\s*[:\s]*([A-Za-z]+[\s-]+\d{1,2}[\s,-]+\d{4})",
+            r"(?:마감|지원\s*기한|접수\s*마감)\s*[:\s]*(\d{2,4})[.\s\-/]*(\d{1,2})[.\s\-/]*(\d{1,2})",
+            r"(?:deadline|closing\s*date)\s*[:\s]*(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})",
+        ]:
+            m = re.search(pat, desc, re.IGNORECASE)
+            if not m:
+                continue
+            if m.lastindex == 1:
+                parsed_deadline = _parse_korean_date(m.group(1)) or _parse_date_string_fallback(m.group(1))
+                if parsed_deadline:
+                    job["deadline"] = parsed_deadline
+                    break
+            try:
+                y = int(m.group(1))
+                y = 2000 + y if y < 100 else y
+                mo, d = int(m.group(2)), int(m.group(3))
+                job["deadline"] = f"{y:04d}-{mo:02d}-{d:02d}"
+                break
+            except (ValueError, IndexError):
+                continue
+
+
 def _extract_korean_fields(soup: BeautifulSoup, job: dict[str, Any]) -> None:
     """Extract structured fields from Korean detail pages.
 
@@ -1142,168 +1527,223 @@ def _extract_korean_fields(soup: BeautifulSoup, job: dict[str, Any]) -> None:
     or <dt>/<dd> pairs.  This function scans for Korean header labels
     and fills in missing job dict fields.
     """
-    # Build a header→value map from all <th>+<td> and <dt>+<dd> pairs
-    kv: list[tuple[str, str]] = []
-    for th in soup.select("th"):
-        td = th.find_next_sibling("td")
-        if td:
-            kv.append((th.get_text(strip=True), td.get_text(separator=" ", strip=True)))
-    for dt in soup.select("dt"):
-        dd = dt.find_next_sibling("dd")
-        if dd:
-            kv.append((dt.get_text(strip=True), dd.get_text(separator=" ", strip=True)))
+    def _collect_pairs() -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add_pair(header: str | None, value: str | None) -> None:
+            h = _clean_detail_text(header, 120).strip(" :")
+            v = _clean_detail_text(value, 5000)
+            if len(h) < 2 or len(v) < 2:
+                return
+            key = (h, v)
+            if key in seen:
+                return
+            seen.add(key)
+            pairs.append(key)
+
+        for th in soup.select("th"):
+            td = th.find_next_sibling("td")
+            if td:
+                add_pair(th.get_text(" ", strip=True), _element_text_or_href(td, 5000))
+        for dt in soup.select("dt"):
+            dd = dt.find_next_sibling("dd")
+            if dd:
+                add_pair(dt.get_text(" ", strip=True), _element_text_or_href(dd, 5000))
+        for head in soup.select("div.b-head"):
+            detail = head.find_next_sibling("div", class_="b-detail")
+            if detail:
+                add_pair(head.get_text(" ", strip=True), _element_text_or_href(detail, 5000))
+        for el in soup.select("li, p"):
+            text = _clean_detail_text(el.get_text("\n", strip=True), 5000)
+            if len(text) < 8 or len(text) > 600:
+                continue
+            m = re.match(r"^([가-힣A-Za-z0-9/&().,\-\s]{2,40})\s*[:：]\s*(.+)$", text, re.DOTALL)
+            if m:
+                add_pair(m.group(1), m.group(2))
+        return pairs
+
+    kv = _collect_pairs()
+    sections: dict[str, list[str]] = {
+        "모집 내용": [],
+        "담당 업무": [],
+        "지원 자격": [],
+        "우대 사항": [],
+        "근무 조건": [],
+        "제출 서류": [],
+        "참고 링크": [],
+    }
 
     for header, value in kv:
-        if not value or len(value) < 2:
-            continue
         h = header.strip()
+        v = value.strip()
 
-        # ── Institute / 기관 ──
-        if not job.get("institute") and re.search(
-            r"기관|소속|대학|연구소|회사|institution|organization", h, re.IGNORECASE
-        ):
-            job["institute"] = value[:200]
+        if (not job.get("institute")
+                and not re.search(r"책임자|담당자|contact|email|이메일", h, re.IGNORECASE)
+                and re.search(
+            r"모집\s*기관|근무\s*기관|기관명|기관|소속|대학|연구소|회사|institution|organization",
+            h,
+            re.IGNORECASE,
+        )):
+            job["institute"] = v[:250]
+            continue
 
-        # ── Department / 부서 ──
-        elif not job.get("department") and re.search(
-            r"부서|학과|학부|전공|분야|센터|연구단|소속\s*부서|department|division|center",
-            h, re.IGNORECASE,
+        if not job.get("department") and re.search(
+            r"부서|학과|학부|전공|센터|연구단|연구실|실험실|랩|소속\s*부서|근무\s*부서"
+            r"|department|division|center|lab",
+            h,
+            re.IGNORECASE,
         ):
-            job["department"] = value[:200]
+            job["department"] = v[:250]
+            continue
 
-        # ── Field / 연구분야 ──
-        elif not job.get("field") and re.search(
-            r"연구\s*분야|전문\s*분야|연구\s*영역|research\s*field|research\s*area",
-            h, re.IGNORECASE,
+        if not job.get("field") and re.search(
+            r"연구\s*분야|모집\s*분야|채용\s*분야|전문\s*분야|연구\s*영역|직무\s*분야"
+            r"|research\s*field|research\s*area",
+            h,
+            re.IGNORECASE,
         ):
-            job["field"] = value[:300]
+            job["field"] = v[:400]
+            continue
 
-        # ── PI name / 연구책임자 ──
-        elif not job.get("pi_name") and re.search(
-            r"책임자|지도\s*교수|연구\s*책임|PI|supervisor|principal\s*investigator"
-            r"|담당\s*교수|지도\s*위원",
-            h, re.IGNORECASE,
+        if not job.get("pi_name") and re.search(
+            r"책임자|책임\s*교수|지도\s*교수|연구\s*책임|PI|supervisor|principal\s*investigator"
+            r"|담당\s*교수|지도\s*위원|lab\s*head",
+            h,
+            re.IGNORECASE,
         ):
-            # Clean: strip phone/email from PI value
-            pi = re.split(r"[,;/]|\s*\(", value)[0].strip()
-            if 2 <= len(pi) <= 40:
+            pi = re.split(r"[,;/]|\s*\(", v)[0].strip()
+            if 2 <= len(pi) <= 60:
                 job["pi_name"] = pi
+            continue
 
-        # ── Deadline / 마감일 ──
-        elif not job.get("deadline") and re.search(
+        if not job.get("deadline") and re.search(
             r"마감|접수\s*기간|모집\s*기간|지원\s*기한|deadline|closing|접수\s*마감",
-            h, re.IGNORECASE,
+            h,
+            re.IGNORECASE,
         ):
-            parsed = _parse_korean_date(value)
+            parsed = _parse_korean_date(v)
             if parsed:
                 job["deadline"] = parsed
+            sections["근무 조건"].append(f"{h}: {v}")
+            continue
 
-        # ── Salary / 급여 ──
-        elif not job.get("conditions") and re.search(
-            r"급여|보수|연봉|처우|salary|compensation|pay|대우",
-            h, re.IGNORECASE,
+        if not job.get("posted_date") and re.search(
+            r"등록\s*일|게시\s*일|공고\s*일|작성\s*일|date\s*posted|posted",
+            h,
+            re.IGNORECASE,
         ):
-            job.setdefault("_salary", value[:300])
+            parsed_posted = _parse_korean_date(v)
+            if parsed_posted:
+                job["posted_date"] = parsed_posted
+            continue
 
-        # ── Duration / 기간 ──
-        elif re.search(
-            r"계약\s*기간|임용\s*기간|근무\s*기간|기간|duration|term|period",
-            h, re.IGNORECASE,
-        ):
-            job.setdefault("_duration", value[:200])
+        if re.search(r"급여|보수|연봉|처우|salary|compensation|pay|대우", h, re.IGNORECASE):
+            job["_salary"] = _merge_text(job.get("_salary"), v[:500], 800, sep=" | ")
+            sections["근무 조건"].append(f"{h}: {v}")
+            continue
 
-        # ── Contract type / 근무형태 ──
-        elif re.search(
-            r"근무\s*형태|고용\s*형태|계약\s*형태|직종|employment\s*type|contract\s*type",
-            h, re.IGNORECASE,
+        if re.search(
+            r"계약\s*기간|임용\s*기간|근무\s*기간|duration|term|period|재계약",
+            h,
+            re.IGNORECASE,
         ):
-            job.setdefault("_contract_type", value[:200])
+            job["_duration"] = _merge_text(job.get("_duration"), v[:500], 800, sep=" | ")
+            sections["근무 조건"].append(f"{h}: {v}")
+            continue
 
-        # ── Requirements / 자격요건 ──
-        elif not job.get("requirements") and re.search(
-            r"자격|요건|조건|우대|필요\s*역량|지원\s*자격|requirement|qualification",
-            h, re.IGNORECASE,
+        if re.search(
+            r"근무\s*형태|고용\s*형태|계약\s*형태|채용\s*방식|채용\s*형태|직종|employment\s*type|contract\s*type",
+            h,
+            re.IGNORECASE,
         ):
-            job["requirements"] = value[:2000]
+            job["_contract_type"] = _merge_text(job.get("_contract_type"), v[:500], 800, sep=" | ")
+            sections["근무 조건"].append(f"{h}: {v}")
+            continue
 
-        # ── Application materials / 제출서류 ──
-        elif not job.get("application_materials") and re.search(
-            r"제출\s*서류|지원\s*서류|접수\s*방법|지원\s*방법|구비\s*서류"
-            r"|application|how\s*to\s*apply|documents",
-            h, re.IGNORECASE,
-        ):
-            job["application_materials"] = value[:500]
+        if re.search(r"근무\s*(?:지역|지|장소)|location", h, re.IGNORECASE):
+            job["_location"] = _merge_text(job.get("_location"), v[:500], 800, sep=" | ")
+            sections["근무 조건"].append(f"{h}: {v}")
+            continue
 
-        # ── Contact / 문의 ──
-        elif not job.get("contact_email") and re.search(
-            r"문의|연락처|담당자|contact|email|이메일", h, re.IGNORECASE
+        if re.search(
+            r"자격|요건|조건|필수|필요\s*역량|지원\s*자격|응시\s*자격|requirement|qualification",
+            h,
+            re.IGNORECASE,
         ):
-            # Try to extract email from value
-            email_m = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", value)
+            job["requirements"] = _merge_text(job.get("requirements"), v, 6000, sep="\n")
+            sections["지원 자격"].append(v)
+            continue
+
+        if re.search(r"우대\s*(?:사항|조건|전공|경력)|가산점", h, re.IGNORECASE):
+            sections["우대 사항"].append(v)
+            continue
+
+        if re.search(
+            r"홈페이지|웹페이지|website|webpage|application\s*ref\.?\s*file|ref\.?\s*file",
+            h,
+            re.IGNORECASE,
+        ):
+            sections["참고 링크"].append(f"{h}: {v}")
+            continue
+
+        if re.search(
+            r"제출\s*서류|지원\s*서류|접수\s*방법|지원\s*방법|구비\s*서류|첨부\s*서류"
+            r"|application(?!\s*ref)|how\s*to\s*apply|documents",
+            h,
+            re.IGNORECASE,
+        ):
+            job["application_materials"] = _merge_text(
+                job.get("application_materials"),
+                v,
+                3000,
+                sep="\n",
+            )
+            sections["제출 서류"].append(v)
+            continue
+
+        if re.search(
+            r"(?:담당|수행|주요)\s*업무|직무\s*(?:내용|소개|설명)|업무\s*(?:내용|범위)",
+            h,
+            re.IGNORECASE,
+        ):
+            sections["담당 업무"].append(v)
+            continue
+
+        if re.search(
+            r"(?:연구|프로젝트)\s*(?:내용|개요|주제)|모집\s*(?:내용|분야)|채용\s*(?:내용|분야)",
+            h,
+            re.IGNORECASE,
+        ):
+            sections["모집 내용"].append(v)
+            continue
+
+        if not job.get("contact_email") and re.search(
+            r"문의|연락처|담당자|person\s+in\s+charge|contact|e-?mail|이메일",
+            h,
+            re.IGNORECASE,
+        ):
+            email_m = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", v)
             if email_m:
                 job["contact_email"] = email_m.group(0)
 
-    # ── Build conditions from salary/duration/contract_type ──
-    if not job.get("conditions"):
-        parts = []
-        if job.get("_salary"):
-            parts.append(f"급여: {job.pop('_salary')}")
-        if job.get("_duration"):
-            parts.append(f"기간: {job.pop('_duration')}")
-        if job.get("_contract_type"):
-            parts.append(f"근무형태: {job.pop('_contract_type')}")
-        if parts:
-            job["conditions"] = " | ".join(parts)
-    else:
-        # Clean up temp keys
-        job.pop("_salary", None)
-        job.pop("_duration", None)
-        job.pop("_contract_type", None)
+    parts = []
+    if job.get("_salary"):
+        parts.append(f"급여: {job.pop('_salary')}")
+    if job.get("_duration"):
+        parts.append(f"기간: {job.pop('_duration')}")
+    if job.get("_contract_type"):
+        parts.append(f"근무형태: {job.pop('_contract_type')}")
+    if job.get("_location"):
+        parts.append(f"근무지: {job.pop('_location')}")
+    if parts:
+        job["conditions"] = _merge_text(job.get("conditions"), " | ".join(parts), 4000, sep=" | ")
 
-    # ── Fallback: extract keywords from description ──
-    desc = job.get("description", "")
-    if not job.get("keywords") and desc:
-        kws = _extract_korean_keywords(desc)
-        if kws:
-            job["keywords"] = ", ".join(kws)
+    if job.get("conditions"):
+        sections["근무 조건"].append(job["conditions"])
 
-    # ── Fallback: extract PI from description patterns ──
-    if not job.get("pi_name") and desc:
-        pi = _extract_korean_pi(desc)
-        if pi:
-            job["pi_name"] = pi
-
-    # ── Fallback: extract field from title ──
-    if not job.get("field") and job.get("title"):
-        field = _infer_korean_field(job["title"], desc)
-        if field:
-            job["field"] = field
-
-    # ── Fallback: parse institute/department from Korean title ──
-    title = job.get("title") or ""
-    if not job.get("institute") and title:
-        inst, dept = _parse_institute_from_title(title)
-        if inst:
-            job["institute"] = inst
-        if dept and not job.get("department"):
-            job["department"] = dept
-
-    # ── Fallback: extract deadline from description text ──
-    if not job.get("deadline") and desc:
-        for pat in [
-            r"(?:접수\s*기간|모집\s*기간)\s*[:\s]*\d{4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2}"
-            r"[^~]*~\s*(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})",
-            r"(?:마감|지원\s*기한|접수\s*마감)\s*[:\s]*(\d{4})[.\s\-/]*(\d{1,2})[.\s\-/]*(\d{1,2})",
-            r"(?:deadline|closing\s*date)\s*[:\s]*(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})",
-        ]:
-            m = re.search(pat, desc, re.IGNORECASE)
-            if m:
-                try:
-                    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                    job["deadline"] = f"{y:04d}-{mo:02d}-{d:02d}"
-                    break
-                except (ValueError, IndexError):
-                    pass
+    _append_structured_sections(job, sections)
+    _apply_korean_fallbacks(job)
 
 
 # Patterns to extract institute name from beginning of Korean job titles
@@ -1312,6 +1752,8 @@ _TITLE_INSTITUTE_PATTERNS = [
     r"^((?:한국)?[\w가-힣]+(?:연구원|연구소|연구센터))\s",
     # "○○대학교" or "○○대학"
     r"^([\w가-힣]+(?:대학교|대학))\s",
+    # "○○병원" / "대학교병원" / "의료원"
+    r"^([\w가-힣]+(?:대학교병원|병원|의료원))\s",
     # Known English acronyms at start
     r"^(KAIST|POSTECH|SNU|GIST|DGIST|UNIST|IBS)\s",
     # "국립○○원" / "○○진흥원" / "○○재단" etc.
@@ -1319,8 +1761,18 @@ _TITLE_INSTITUTE_PATTERNS = [
 ]
 
 _TITLE_DEPT_PATTERNS = [
-    r"([\w가-힣]+(?:학과|공학과|과학과|학부|대학원|센터|연구단|사업단))\s",
+    r"((?:[\w가-힣/&().-]+\s+){0,3}[\w가-힣/&().-]+(?:학과|공학과|과학과|학부|대학원|학교실|교실|연구실|연구팀|연구클러스터|연구원|연구소|센터|연구단|사업단|랩|Lab|의원))",
 ]
+
+_INSTITUTE_CANONICAL_MAP = {
+    "KAIST": "KAIST",
+    "POSTECH": "POSTECH",
+    "SNU": "Seoul National University",
+    "GIST": "Gwangju Institute of Science and Technology (GIST)",
+    "DGIST": "Daegu Gyeongbuk Institute of Science and Technology (DGIST)",
+    "UNIST": "Ulsan National Institute of Science and Technology (UNIST)",
+    "IBS": "Institute for Basic Science (IBS)",
+}
 
 
 def _parse_institute_from_title(title: str) -> tuple[str | None, str | None]:
@@ -1328,7 +1780,8 @@ def _parse_institute_from_title(title: str) -> tuple[str | None, str | None]:
     for pat in _TITLE_INSTITUTE_PATTERNS:
         m = re.search(pat, title)
         if m:
-            inst = m.group(1).strip()
+            inst_raw = m.group(1).strip()
+            inst = _INSTITUTE_CANONICAL_MAP.get(inst_raw, inst_raw)
             # Try to find department in remaining text
             rest = title[m.end():]
             dept = None
@@ -1420,8 +1873,23 @@ def _infer_korean_field(title: str, desc: str) -> str | None:
     return None
 
 
+def _parse_date_string_fallback(text: str | None) -> str | None:
+    """Parse English month-name dates used on some Korean aggregator pages."""
+    if not text:
+        return None
+    value = text.strip()
+    value = re.sub(r"([A-Za-z]+)\s*-\s*(\d{1,2})\s*-\s*(\d{4})", r"\1 \2 \3", value)
+    value = re.sub(r"(\d{1,2})\s*-\s*([A-Za-z]+)\s*-\s*(\d{4})", r"\1 \2 \3", value)
+    for fmt in ("%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_korean_date(text: str | None) -> str | None:
-    """Parse Korean-style dates: '2026.03.15', '2026-03-15', '2026년 3월 15일'.
+    """Parse Korean-style dates: '2026.03.15', '26.03.15', '2026-03-15', '2026년 3월 15일'.
 
     For date ranges like '2026.02.26 ~ 2026.03.08', returns the END date
     (the deadline), not the start date.
@@ -1430,13 +1898,19 @@ def _parse_korean_date(text: str | None) -> str | None:
         return None
     text = text.strip()
 
+    def _normalise_year(y: str) -> int:
+        year = int(y)
+        if len(y) == 2:
+            return 2000 + year if year < 70 else 1900 + year
+        return year
+
     # Date range: "2026.02.26 ~ 2026.03.08" → use the LAST date (deadline)
-    all_matches = re.findall(r"(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})", text)
+    all_matches = re.findall(r"(\d{2,4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})", text)
     if all_matches:
         # Use the last date in the string (= deadline / end date)
         y, m, d = all_matches[-1]
         try:
-            dt = datetime(int(y), int(m), int(d))
+            dt = datetime(_normalise_year(y), int(m), int(d))
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             pass
@@ -1451,4 +1925,4 @@ def _parse_korean_date(text: str | None) -> str | None:
         except ValueError:
             pass
 
-    return None
+    return _parse_date_string_fallback(text)

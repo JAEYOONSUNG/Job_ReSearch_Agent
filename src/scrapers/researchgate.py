@@ -36,6 +36,7 @@ SEARCH_TERMS = [
 ]
 
 MAX_PAGES = 3
+DETAIL_ENRICH_LIMIT = 40
 
 
 class ResearchGateScraper(BaseScraper):
@@ -165,8 +166,8 @@ class ResearchGateScraper(BaseScraper):
             html_text = fetch_page(
                 url,
                 wait_selector="div.job-description, div.job-details-nova, script[type='application/ld+json']",
-                wait_ms=5000,
-                timeout=40000,
+                wait_ms=2500,
+                timeout=18000,
             )
         except Exception:
             self.logger.debug("Playwright detail fetch failed for %s", url)
@@ -369,7 +370,12 @@ class ResearchGateScraper(BaseScraper):
                 seen_urls: set[str] = set()
                 for term in SEARCH_TERMS[:4]:  # cap at 4 terms (RG returns same results)
                     url = f"{JOBS_URL}?query={term.replace(' ', '+')}&page=1"
-                    html = fetch_page(url, wait_selector="div[class*='entity-item'], div.search-result-item", wait_ms=8000)
+                    html = fetch_page(
+                        url,
+                        wait_selector="div[class*='entity-item'], div.search-result-item",
+                        wait_ms=3500,
+                        timeout=18000,
+                    )
                     if html:
                         page_jobs = self._parse_listing_page(html)
                         if page_jobs:
@@ -393,7 +399,10 @@ class ResearchGateScraper(BaseScraper):
 
         # Parallel detail-page enrichment (skip already-in-DB)
         filtered = self._parallel_enrich(
-            candidates, self._enrich_from_detail, max_workers=3,
+            candidates,
+            self._enrich_from_detail,
+            max_workers=1,
+            limit=DETAIL_ENRICH_LIMIT,
         )
 
         self.logger.info(

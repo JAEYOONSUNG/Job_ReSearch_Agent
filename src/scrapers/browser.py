@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor, Future
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError as FutureTimeoutError
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -24,11 +26,59 @@ logger = logging.getLogger(__name__)
 
 # Single-threaded executor ensures all sync Playwright calls happen on one thread.
 _EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_EXECUTOR_TIMEOUT_SLACK_SECONDS = 8
+_RECENT_FAILURE_TTL_SECONDS = 12 * 60
+_SELECTOR_WAIT_TIMEOUT_MS = 5000
+_RECENT_BROWSER_FAILURES: dict[str, float] = {}
+_SYNC_RESET_LOCK = threading.Lock()
 
 # These globals are only accessed from the worker thread.
 _BROWSER = None
 _CONTEXT = None
 _PW = None
+
+
+def _remember_browser_failure(url: str) -> None:
+    if url:
+        _RECENT_BROWSER_FAILURES[url] = time.time()
+
+
+def _clear_browser_failure(url: str) -> None:
+    if url:
+        _RECENT_BROWSER_FAILURES.pop(url, None)
+
+
+def _recent_browser_failure(url: str) -> bool:
+    if not url:
+        return False
+    failed_at = _RECENT_BROWSER_FAILURES.get(url)
+    if failed_at is None:
+        return False
+    if time.time() - failed_at > _RECENT_FAILURE_TTL_SECONDS:
+        _RECENT_BROWSER_FAILURES.pop(url, None)
+        return False
+    return True
+
+
+def _reset_sync_runtime() -> None:
+    """Rotate the sync executor/browser after a stuck fetch.
+
+    ``future.cancel()`` does not stop a running Playwright call inside the worker
+    thread. Replacing the executor prevents later requests from queueing behind a
+    poisoned worker. The old worker may finish in the background; we intentionally
+    orphan its browser handles and build a fresh runtime for new requests.
+    """
+    global _EXECUTOR, _BROWSER, _CONTEXT, _PW
+    with _SYNC_RESET_LOCK:
+        old_executor = _EXECUTOR
+        _EXECUTOR = ThreadPoolExecutor(max_workers=1)
+        _BROWSER = None
+        _CONTEXT = None
+        _PW = None
+        try:
+            old_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
 
 def _init_browser():
@@ -123,7 +173,7 @@ def _do_fetch(url: str, wait_selector: str, wait_ms: int, timeout: int = 30000) 
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             if wait_selector:
                 try:
-                    page.wait_for_selector(wait_selector, timeout=8000)
+                    page.wait_for_selector(wait_selector, timeout=_SELECTOR_WAIT_TIMEOUT_MS)
                 except Exception:
                     pass
             if wait_ms:
@@ -184,11 +234,28 @@ def fetch_page(
     str or None
         The page HTML, or None on failure.
     """
+    if _recent_browser_failure(url):
+        logger.debug("Skipping browser fetch for recently failed URL: %s", url)
+        return None
+
     future: Future = _EXECUTOR.submit(_do_fetch, url, wait_selector, wait_ms, timeout)
     try:
-        return future.result(timeout=timeout / 1000 + 120)
-    except Exception:
+        html = future.result(timeout=max(timeout / 1000 + _EXECUTOR_TIMEOUT_SLACK_SECONDS, 5))
+        if html:
+            _clear_browser_failure(url)
+        else:
+            _remember_browser_failure(url)
+        return html
+    except FutureTimeoutError:
+        future.cancel()
+        _remember_browser_failure(url)
+        _reset_sync_runtime()
         logger.warning("fetch_page timed out waiting for executor: %s", url)
+        return None
+    except Exception:
+        _remember_browser_failure(url)
+        _reset_sync_runtime()
+        logger.warning("fetch_page failed waiting for executor: %s", url)
         return None
 
 
@@ -333,6 +400,10 @@ async def async_fetch_page(
     str or None
         The page HTML, or None on failure.
     """
+    if _recent_browser_failure(url):
+        logger.debug("Skipping async browser fetch for recently failed URL: %s", url)
+        return None
+
     page, ctx = await _get_page()
     if page is None:
         # Fallback: try sync version in executor
@@ -353,15 +424,17 @@ async def async_fetch_page(
         await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         if wait_selector:
             try:
-                await page.wait_for_selector(wait_selector, timeout=8000)
+                await page.wait_for_selector(wait_selector, timeout=_SELECTOR_WAIT_TIMEOUT_MS)
             except Exception:
                 pass
         if wait_ms:
             await page.wait_for_timeout(wait_ms)
         content = await page.content()
+        _clear_browser_failure(url)
         await _return_page(page)
         return content
     except Exception:
+        _remember_browser_failure(url)
         logger.exception("Async browser fetch failed: %s", url)
         try:
             await page.close()

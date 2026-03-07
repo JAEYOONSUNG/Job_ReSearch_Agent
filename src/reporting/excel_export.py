@@ -50,14 +50,10 @@ PI_COLUMNS = [
 
 _MAX_EXCEL_CELL_LEN = 32000
 _WRAPPED_TEXT_COLUMNS = {
-    "Position Summary",
-    "Responsibilities",
-    "Preferred Qualifications",
-    "Requirements (Full)",
-    "Conditions (Full)",
-    "Application Materials",
     "Description",
 }
+_DEFAULT_DATA_ROW_HEIGHT = 16
+_MAX_EXPANDED_ROW_HEIGHT = 16
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +166,7 @@ def _clean_list(text: str | None, max_len: int = 400) -> str:
 
 
 def _estimate_row_height(row_values: dict[str, object], width_map: dict[str, int]) -> int | None:
-    """Estimate a useful Excel row height for wrapped long-text cells."""
+    """Estimate a capped row height for a small set of wrapped long-text cells."""
     max_lines = 1
     for column in _WRAPPED_TEXT_COLUMNS:
         value = row_values.get(column)
@@ -192,7 +188,7 @@ def _estimate_row_height(row_values: dict[str, object], width_map: dict[str, int
 
     if max_lines <= 1:
         return None
-    return min(18 * max_lines, 180)
+    return min(_DEFAULT_DATA_ROW_HEIGHT * max_lines, _MAX_EXPANDED_ROW_HEIGHT)
 
 
 # ---------------------------------------------------------------------------
@@ -811,9 +807,8 @@ def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) 
             worksheet.set_column(i, i, width, default_fmt)
 
     for row_idx, row in enumerate(df.to_dict("records"), start=1):
-        row_height = _estimate_row_height(row, width_map)
-        if row_height:
-            worksheet.set_row(row_idx, row_height)
+        row_height = _estimate_row_height(row, width_map) or _DEFAULT_DATA_ROW_HEIGHT
+        worksheet.set_row(row_idx, row_height)
 
     # Auto-filter on all columns
     if len(df) > 0:
@@ -1971,7 +1966,7 @@ def _write_paper_links_openpyxl(ws, row_idx: int, job: dict) -> None:
 
 
 def _apply_wrapped_text_openpyxl(ws, row_idx: int) -> None:
-    """Wrap long-text cells and expand the row height for readability."""
+    """Wrap only the long description cell and keep row heights capped."""
     from openpyxl.styles import Alignment
 
     row_values: dict[str, object] = {}
@@ -1983,9 +1978,8 @@ def _apply_wrapped_text_openpyxl(ws, row_idx: int) -> None:
         cell.alignment = Alignment(wrap_text=True, vertical="top")
         row_values[col_name] = cell.value
 
-    row_height = _estimate_row_height(row_values, _HEADER_WIDTH_MAP)
-    if row_height:
-        ws.row_dimensions[row_idx].height = row_height
+    row_height = _estimate_row_height(row_values, _HEADER_WIDTH_MAP) or _DEFAULT_DATA_ROW_HEIGHT
+    ws.row_dimensions[row_idx].height = row_height
 
 
 def _style_new_row_openpyxl(ws, row_idx: int, job: dict) -> None:
@@ -2532,6 +2526,7 @@ def _rebuild_pi_sheet_openpyxl(wb, rec_pis: list[dict]) -> None:
                     cell.font = link_font
             if col_name == "Tier" and val:
                 _apply_tier_format_openpyxl(cell, val)
+        ws.row_dimensions[row_idx].height = _DEFAULT_DATA_ROW_HEIGHT
 
     # Auto-filter
     if ws.max_row and ws.max_row > 1:

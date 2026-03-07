@@ -66,8 +66,8 @@ class JobSpyScraper(BaseScraper):
     """
 
     rate_limit: float = 3.0  # jobspy does its own internal pacing
-    _LINKEDIN_ENRICH_LIMIT = 90
-    _INDEED_ENRICH_LIMIT = 25
+    _LINKEDIN_ENRICH_LIMIT = 75
+    _INDEED_ENRICH_LIMIT = 12
 
     @property
     def name(self) -> str:
@@ -180,8 +180,8 @@ class JobSpyScraper(BaseScraper):
             html = fetch_page(
                 url,
                 wait_selector="div.description__text, div.show-more-less-html__markup, div[class*='description']",
-                wait_ms=5000,
-                timeout=20000,
+                wait_ms=2500,
+                timeout=15000,
             )
             if not html:
                 return None
@@ -236,8 +236,8 @@ class JobSpyScraper(BaseScraper):
         self,
         url: str,
         wait_selector: str,
-        wait_ms: int = 5000,
-        timeout: int = 20000,
+        wait_ms: int = 2500,
+        timeout: int = 15000,
     ) -> str | None:
         """Fetch page HTML via Playwright when HTTP metadata extraction is blocked."""
         try:
@@ -402,8 +402,8 @@ class JobSpyScraper(BaseScraper):
         html = self._fetch_html_browser(
             job["url"],
             wait_selector="#jobDescriptionText, div[data-testid='jobsearch-JobComponent-description'], div[data-testid='jobsearch-OtherJobDetailsContainer']",
-            wait_ms=4000,
-            timeout=25000,
+            wait_ms=2000,
+            timeout=15000,
         )
         if not html:
             return job
@@ -506,10 +506,10 @@ class JobSpyScraper(BaseScraper):
     def _needs_indeed_enrichment(job: dict[str, Any]) -> bool:
         """Return True if an Indeed row is worth a browser enrichment pass."""
         desc = job.get("description") or ""
-        return any(
-            not job.get(key)
-            for key in ("application_materials", "contact_email")
-        ) or len(desc) < 500
+        missing_contact_bundle = not job.get("application_materials") and not job.get("contact_email")
+        missing_description = len(desc) < 400
+        missing_conditions = not job.get("conditions")
+        return missing_description or missing_contact_bundle or (missing_conditions and len(desc) < 800)
 
     def scrape(self) -> list[dict[str, Any]]:
         try:
@@ -587,6 +587,14 @@ class JobSpyScraper(BaseScraper):
             and self._needs_linkedin_enrichment(job)
         ]
         if linkedin_targets:
+            linkedin_targets = sorted(
+                linkedin_targets,
+                key=lambda job: (
+                    bool(job.get("application_materials")),
+                    bool(job.get("contact_email")),
+                    len(job.get("description") or ""),
+                ),
+            )
             enriched = self._parallel_enrich(
                 linkedin_targets,
                 self._enrich_linkedin_detail,
@@ -602,10 +610,19 @@ class JobSpyScraper(BaseScraper):
             and self._needs_indeed_enrichment(job)
         ]
         if indeed_targets:
+            indeed_targets = sorted(
+                indeed_targets,
+                key=lambda job: (
+                    bool(job.get("application_materials")),
+                    bool(job.get("contact_email")),
+                    bool(job.get("conditions")),
+                    len(job.get("description") or ""),
+                ),
+            )
             enriched = self._parallel_enrich(
                 indeed_targets,
                 self._enrich_indeed_detail,
-                max_workers=2,
+                max_workers=1,
                 limit=self._INDEED_ENRICH_LIMIT,
             )
             by_url = {job.get("url"): job for job in enriched if job.get("url")}

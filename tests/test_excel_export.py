@@ -6,7 +6,13 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from src.db import dismiss_urls, get_connection, upsert_job
-from src.reporting.excel_export import _is_excluded, _job_to_row, export_to_excel
+from src.reporting.excel_export import (
+    _DEFAULT_DATA_ROW_HEIGHT,
+    _MAX_EXPANDED_ROW_HEIGHT,
+    _is_excluded,
+    _job_to_row,
+    export_to_excel,
+)
 
 
 def _sheet_urls(workbook_path, sheet_name: str) -> list[str]:
@@ -51,8 +57,8 @@ def test_full_refresh_excludes_dismissed_jobs(
         assert status == "dismissed"
 
 
-def test_korea_export_wraps_long_cells_and_fills_structured_columns(test_db, tmp_path):
-    """Korean rows should populate structured fields and preserve wrapped display."""
+def test_korea_export_wraps_only_description_and_caps_row_height(test_db, tmp_path):
+    """Korean rows should keep rich description readable without over-expanding rows."""
     korean_job = {
         "title": "KRIBB 박사후연구원 모집",
         "pi_name": "김철수",
@@ -104,7 +110,9 @@ def test_korea_export_wraps_long_cells_and_fills_structured_columns(test_db, tmp
 
         desc_col = headers.index("Description") + 1
         assert ws.cell(row=2, column=desc_col).alignment.wrapText is True
-        assert (ws.row_dimensions[2].height or 0) > 20
+        responsibilities_col = headers.index("Responsibilities") + 1
+        assert ws.cell(row=2, column=responsibilities_col).alignment.wrapText is not True
+        assert (ws.row_dimensions[2].height or 0) == _DEFAULT_DATA_ROW_HEIGHT == _MAX_EXPANDED_ROW_HEIGHT
     finally:
         wb.close()
 

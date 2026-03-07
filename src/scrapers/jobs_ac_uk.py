@@ -42,6 +42,8 @@ SEARCH_KEYWORDS = [
 ]
 
 MAX_PAGES = 2
+DETAIL_ENRICH_LIMIT = 20
+MAX_CONSECUTIVE_BROWSER_FAILURES = 3
 
 
 class JobsAcUkScraper(BaseScraper):
@@ -56,7 +58,26 @@ class JobsAcUkScraper(BaseScraper):
     def _fetch_with_browser(self, url: str) -> str | None:
         """Fetch URL using Playwright headless browser."""
         from src.scrapers.browser import fetch_page
-        return fetch_page(url, wait_selector="div.j-search-result, div.search-results, article", wait_ms=5000, timeout=30000)
+        return fetch_page(
+            url,
+            wait_selector="div.j-search-result, div.search-results, article",
+            wait_ms=2500,
+            timeout=18000,
+        )
+
+    def _fetch_detail_page(self, url: str) -> str | None:
+        """Fetch a detail page cheaply over HTTP, falling back to browser only if needed."""
+        try:
+            resp = self.fetch(url, timeout=20)
+            if resp.status_code == 200 and (
+                "job-description" in resp.text
+                or "j-advert-details__first-col" in resp.text
+                or "j-advert-details__second-col" in resp.text
+            ):
+                return resp.text
+        except Exception:
+            self.logger.debug("HTTP detail fetch failed for %s", url)
+        return self._fetch_with_browser(url)
 
     def _parse_listing_page(self, html: str) -> list[dict[str, Any]]:
         """Parse a jobs.ac.uk search results page."""
@@ -146,7 +167,7 @@ class JobsAcUkScraper(BaseScraper):
         if not url:
             return job
 
-        html = self._fetch_with_browser(url)
+        html = self._fetch_detail_page(url)
         if not html:
             return job
 
@@ -224,6 +245,7 @@ class JobsAcUkScraper(BaseScraper):
 
     def scrape(self) -> list[dict[str, Any]]:
         all_jobs: list[dict[str, Any]] = []
+        consecutive_browser_failures = 0
 
         for keyword in SEARCH_KEYWORDS:
             self.logger.info("jobs.ac.uk search: %s", keyword)
@@ -240,7 +262,9 @@ class JobsAcUkScraper(BaseScraper):
                 html = self._fetch_with_browser(search_url)
                 if not html:
                     self.logger.warning("Browser fetch failed for '%s' page %d", keyword, page + 1)
+                    consecutive_browser_failures += 1
                     break
+                consecutive_browser_failures = 0
 
                 page_jobs = self._parse_listing_page(html)
                 if not page_jobs:
@@ -254,6 +278,13 @@ class JobsAcUkScraper(BaseScraper):
                 import time
                 time.sleep(2.0)
 
+            if consecutive_browser_failures >= MAX_CONSECUTIVE_BROWSER_FAILURES:
+                self.logger.warning(
+                    "jobs.ac.uk browser unstable; stopping after %d consecutive failures",
+                    consecutive_browser_failures,
+                )
+                break
+
         # Keyword filter
         filtered: list[dict[str, Any]] = []
         for job in all_jobs:
@@ -263,7 +294,7 @@ class JobsAcUkScraper(BaseScraper):
 
         # Enrich top results with detail pages (parallel, skip already-in-DB)
         enriched = self._parallel_enrich(
-            filtered, self._enrich_from_detail, max_workers=2, limit=30,
+            filtered, self._enrich_from_detail, max_workers=1, limit=DETAIL_ENRICH_LIMIT,
         )
 
         self.logger.info("jobs.ac.uk: %d total, %d after filter, %d enriched", len(all_jobs), len(filtered), len(enriched))

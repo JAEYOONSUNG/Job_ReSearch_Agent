@@ -1,7 +1,9 @@
 """Focused tests for US/EU scraper detail enrichment."""
 
+import time
 from types import SimpleNamespace
 
+from src.scrapers import browser
 from src.scrapers.academicpositions import AcademicPositionsScraper
 from src.scrapers.euraxess import EuraxessScraper
 from src.scrapers.institutional import InstitutionalPortalScraper
@@ -11,28 +13,34 @@ from src.scrapers.jobs_ac_uk import JobsAcUkScraper
 
 def test_jobs_ac_uk_detail_enrichment_extracts_metadata():
     scraper = JobsAcUkScraper()
-    scraper._fetch_with_browser = lambda url: """
-        <html><body>
-          <div id="job-description">
-            <p>About the Role</p>
-            <p>Lead spatial transcriptomics analyses.</p>
-            <p>About You</p>
-            <p>PhD in computational biology.</p>
-            <p>How To Apply</p>
-            <p>Please submit a CV, cover letter, and publication list. Contact jobs@example.ac.uk</p>
-          </div>
-          <div class="j-advert-details__first-col">
-            <div>Location:</div><div>Oxford, United Kingdom</div>
-            <div>Salary:</div><div>£39,424 to £47,779 per annum</div>
-            <div>Hours:</div><div>Full Time</div>
-            <div>Contract Type:</div><div>Fixed-Term/Contract</div>
-          </div>
-          <div class="j-advert-details__second-col">
-            <div>Placed On:</div><div>25th February 2026</div>
-            <div>Closes:</div><div>16th March 2026</div>
-          </div>
-        </body></html>
-    """
+    scraper.fetch = lambda url, **kwargs: SimpleNamespace(
+        status_code=200,
+        text="""
+            <html><body>
+              <div id="job-description">
+                <p>About the Role</p>
+                <p>Lead spatial transcriptomics analyses.</p>
+                <p>About You</p>
+                <p>PhD in computational biology.</p>
+                <p>How To Apply</p>
+                <p>Please submit a CV, cover letter, and publication list. Contact jobs@example.ac.uk</p>
+              </div>
+              <div class="j-advert-details__first-col">
+                <div>Location:</div><div>Oxford, United Kingdom</div>
+                <div>Salary:</div><div>£39,424 to £47,779 per annum</div>
+                <div>Hours:</div><div>Full Time</div>
+                <div>Contract Type:</div><div>Fixed-Term/Contract</div>
+              </div>
+              <div class="j-advert-details__second-col">
+                <div>Placed On:</div><div>25th February 2026</div>
+                <div>Closes:</div><div>16th March 2026</div>
+              </div>
+            </body></html>
+        """,
+    )
+    scraper._fetch_with_browser = lambda url: (_ for _ in ()).throw(
+        AssertionError("browser fallback should not run when HTTP detail page is usable")
+    )
 
     enriched = scraper._enrich_from_detail({"url": "https://example.com/job/DQQ699"})
 
@@ -236,3 +244,58 @@ def test_jobspy_linkedin_detail_enrichment_extracts_guest_metadata():
     assert "Employment type: Full-time" in enriched["conditions"]
     assert enriched["application_materials"] == "CV; Cover letter"
     assert enriched["contact_email"] == "lab@genentech.org"
+
+
+def test_browser_skips_recently_failed_urls(monkeypatch):
+    url = "https://example.com/timed-out"
+
+    class DummyExecutor:
+        def submit(self, *args, **kwargs):
+            raise AssertionError("executor should not be called for recently failed URLs")
+
+    monkeypatch.setattr(browser, "_EXECUTOR", DummyExecutor())
+    monkeypatch.setattr(browser, "_RECENT_BROWSER_FAILURES", {url: time.time()})
+
+    assert browser.fetch_page(url, timeout=5000) is None
+
+
+def test_browser_timeout_resets_sync_runtime(monkeypatch):
+    url = "https://example.com/hung"
+
+    class DummyFuture:
+        cancelled = False
+
+        def result(self, timeout):
+            raise browser.FutureTimeoutError()
+
+        def cancel(self):
+            self.cancelled = True
+
+    class OldExecutor:
+        def __init__(self):
+            self.future = DummyFuture()
+            self.shutdown_called = False
+
+        def submit(self, *args, **kwargs):
+            return self.future
+
+        def shutdown(self, wait=False, cancel_futures=False):
+            self.shutdown_called = True
+
+    class NewExecutor:
+        pass
+
+    old_executor = OldExecutor()
+    new_executor = NewExecutor()
+
+    monkeypatch.setattr(browser, "_EXECUTOR", old_executor)
+    monkeypatch.setattr(browser, "_RECENT_BROWSER_FAILURES", {})
+    monkeypatch.setattr(browser, "_BROWSER", object())
+    monkeypatch.setattr(browser, "_CONTEXT", object())
+    monkeypatch.setattr(browser, "_PW", object())
+    monkeypatch.setattr(browser, "ThreadPoolExecutor", lambda max_workers: new_executor)
+
+    assert browser.fetch_page(url, timeout=5000) is None
+    assert browser._EXECUTOR is new_executor
+    assert old_executor.shutdown_called is True
+    assert old_executor.future.cancelled is True

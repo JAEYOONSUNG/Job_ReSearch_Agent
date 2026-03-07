@@ -178,3 +178,30 @@ def test_job_to_row_infers_doctorate_from_postdoc_title():
 def test_is_excluded_drops_old_year_titles():
     past_year = date.today().year - 1
     assert _is_excluded({"title": f"{past_year}년 제1차 박사후연구원 채용공고"})
+
+
+def test_job_to_row_handles_pipe_delimited_us_sections_without_contract_false_positive():
+    row = _job_to_row({
+        "title": "Postdoctoral Research Assistant in Spatial Biology",
+        "country": "United Kingdom",
+        "region": "EU",
+        "description": (
+            "About Us | We build spatial transcriptomics tools. | "
+            "Responsibilities to include | Build imaging pipelines | "
+            "Required Qualifications | PhD in computational biology | "
+            "Preferred Qualifications | Experience with Python | "
+            "Shift/Salary/Benefits | Full Time | Fixed-Term/Contract | "
+            "£39,424 to £47,779 per annum | internal equity reviews after 6 months | "
+            "How To Apply | Submit CV, cover letter, and publication list"
+        ),
+        "url": "https://example.com/jobs/jobs-ac-uk-1",
+    })
+
+    assert row["Position Summary"].startswith("We build spatial transcriptomics tools")
+    assert "Build imaging pipelines" in row["Responsibilities"]
+    assert row["Preferred Qualifications"] == "Experience with Python"
+    assert row["Requirements (Full)"] == "PhD in computational biology"
+    assert row["Contract Type"] == "Full-time, Fixed-term"
+    assert row["Salary"] == "£39,424 to £47,779 per annum"
+    assert row["Duration"] == ""
+    assert row["Contact Email"] == ""

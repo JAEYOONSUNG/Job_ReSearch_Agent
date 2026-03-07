@@ -22,6 +22,12 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
+from src.matching.job_parser import (
+    extract_application_materials,
+    extract_contact_email,
+    extract_pi_name,
+    infer_field,
+)
 from src.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -633,6 +639,40 @@ class InstitutionalPortalScraper(BaseScraper):
 
     # ── MPG detail enrichment ─────────────────────────────────────────
 
+    @staticmethod
+    def _merge_condition_text(existing: str | None, *parts: str | None) -> str:
+        """Merge condition fragments without duplicates."""
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in (existing, *parts):
+            cleaned = (item or "").strip().strip("|")
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+        return " | ".join(merged)
+
+    @staticmethod
+    def _extract_labeled_blocks(text: str, labels: list[str]) -> dict[str, str]:
+        """Extract multiline label/value blocks from plain-text job descriptions."""
+        if not text:
+            return {}
+        label_group = "|".join(re.escape(label) for label in labels)
+        found: dict[str, str] = {}
+        for label in labels:
+            match = re.search(
+                rf"(?ims)^\s*{re.escape(label)}\s*:?\s*(.+?)(?=^\s*(?:{label_group})\s*:?\s*|\Z)",
+                text,
+            )
+            if match:
+                value = re.sub(r"\s+", " ", match.group(1)).strip()
+                if value:
+                    found[label] = value
+        return found
+
     def _enrich_mpg_detail(self, job: dict[str, Any]) -> dict[str, Any]:
         """Fetch MPG detail page and extract full description + metadata."""
         url = job.get("url")
@@ -681,7 +721,6 @@ class InstitutionalPortalScraper(BaseScraper):
                 contact = soup.select_one(sel)
                 if contact and not job.get("pi_name"):
                     contact_text = contact.get_text(separator=" ", strip=True)
-                    from src.matching.job_parser import extract_pi_name
                     pi = extract_pi_name(contact_text)
                     if pi:
                         job["pi_name"] = pi
@@ -697,16 +736,81 @@ class InstitutionalPortalScraper(BaseScraper):
                             job["department"] = dept
                         break
 
-            # Extract application materials from full description
             enriched_desc = job.get("description") or ""
-            if enriched_desc and not job.get("application_materials"):
-                from src.matching.job_parser import extract_application_materials
-                app_mat = extract_application_materials(enriched_desc)
-                if app_mat:
-                    job["application_materials"] = app_mat
+            if enriched_desc:
+                labeled = self._extract_labeled_blocks(
+                    enriched_desc,
+                    [
+                        "Application Round",
+                        "Project title",
+                        "City",
+                        "Specific field of research",
+                        "Max Planck Institute",
+                        "Broad field of research",
+                        "Short description",
+                        "Qualifications",
+                        "Additional information",
+                        "Requirements",
+                        "Additional requirements for the application",
+                        "Principal Investigator",
+                        "Email",
+                        "Contact person",
+                    ],
+                )
+
+                if labeled.get("Specific field of research") and not job.get("field"):
+                    job["field"] = labeled["Specific field of research"]
+                elif labeled.get("Broad field of research") and not job.get("field"):
+                    field = infer_field(labeled["Broad field of research"]) or labeled["Broad field of research"]
+                    job["field"] = field
+
+                if labeled.get("Max Planck Institute"):
+                    current_inst = (job.get("institute") or "").strip()
+                    if not current_inst or current_inst == "Max Planck Society":
+                        job["institute"] = labeled["Max Planck Institute"]
+
+                if labeled.get("City"):
+                    job["conditions"] = self._merge_condition_text(
+                        job.get("conditions"),
+                        f"City: {labeled['City']}",
+                    )
+
+                req_parts: list[str] = []
+                if labeled.get("Qualifications"):
+                    req_parts.append(f"Qualifications: {labeled['Qualifications']}")
+                if labeled.get("Requirements"):
+                    req_parts.append(f"Requirements: {labeled['Requirements']}")
+                if req_parts and not job.get("requirements"):
+                    job["requirements"] = "\n".join(req_parts)[:5000]
+
+                if labeled.get("Principal Investigator") and not job.get("pi_name"):
+                    pi = extract_pi_name(labeled["Principal Investigator"]) or labeled["Principal Investigator"]
+                    job["pi_name"] = pi
+                if not job.get("pi_name") and labeled.get("Contact person"):
+                    pi = extract_pi_name(labeled["Contact person"])
+                    if pi:
+                        job["pi_name"] = pi
+
+                if labeled.get("Email") and not job.get("contact_email"):
+                    job["contact_email"] = labeled["Email"]
+                if not job.get("contact_email"):
+                    contact = extract_contact_email(enriched_desc)
+                    if contact:
+                        job["contact_email"] = contact
+
+                if labeled.get("Additional requirements for the application") and not job.get("application_materials"):
+                    app_mat = extract_application_materials(
+                        labeled["Additional requirements for the application"]
+                    )
+                    if app_mat:
+                        job["application_materials"] = app_mat
+                if not job.get("application_materials"):
+                    app_mat = extract_application_materials(enriched_desc)
+                    if app_mat:
+                        job["application_materials"] = app_mat
 
         except Exception:
-            self.logger.debug("Failed to enrich MPG detail: %s", url)
+            self.logger.debug("Failed to enrich MPG detail: %s", url, exc_info=True)
         return job
 
     # ── Generic detail enrichment ─────────────────────────────────────

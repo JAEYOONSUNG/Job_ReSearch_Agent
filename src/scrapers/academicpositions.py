@@ -24,6 +24,14 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 
 from src.config import CV_KEYWORDS
+from src.matching.job_parser import (
+    extract_application_materials,
+    extract_contact_email,
+    extract_deadline,
+    extract_department,
+    extract_pi_name,
+    infer_field,
+)
 from src.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -154,8 +162,29 @@ class AcademicPositionsScraper(BaseScraper):
             return job
 
         try:
-            resp = self.fetch(url)
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html = None
+            try:
+                resp = self.fetch(url)
+                html = resp.text
+            except Exception:
+                html = None
+
+            if not html or "Attention Required! | Cloudflare" in html:
+                try:
+                    from src.scrapers.browser import fetch_page
+                    html = fetch_page(
+                        url,
+                        wait_selector="div.editor.ck-content, div.ck-content, div.font-weight-bold",
+                        wait_ms=4000,
+                        timeout=30000,
+                    )
+                except Exception:
+                    html = None
+
+            if not html:
+                return job
+
+            soup = BeautifulSoup(html, "html.parser")
 
             # ── Description ──────────────────────────────────────────────
             # The main job description lives in a div with classes
@@ -211,6 +240,24 @@ class AcademicPositionsScraper(BaseScraper):
                 raw_dl = metadata["Application deadline"]
                 if raw_dl.lower() not in ("unspecified", "not specified", "n/a", ""):
                     job["deadline"] = self._parse_date(raw_dl)
+            if not job.get("posted_date") and metadata.get("Published"):
+                posted = self._parse_date(metadata["Published"])
+                if posted:
+                    job["posted_date"] = posted
+            if metadata.get("Job type"):
+                job["conditions"] = self._merge_condition_text(
+                    job.get("conditions"),
+                    f"Job type: {metadata['Job type']}",
+                )
+            if metadata.get("Start date"):
+                job["conditions"] = self._merge_condition_text(
+                    job.get("conditions"),
+                    f"Start: {metadata['Start date']}",
+                )
+            if metadata.get("Location") and not job.get("country"):
+                job["country"] = self._extract_country(metadata["Location"])
+            if metadata.get("Department") and not job.get("department"):
+                job["department"] = metadata["Department"]
 
             if not job.get("field") and metadata.get("Field"):
                 # Field value may have commas and "and N more" suffix
@@ -225,8 +272,35 @@ class AcademicPositionsScraper(BaseScraper):
                         cleaned.append(p)
                 job["field"] = ", ".join(cleaned[:5]) if cleaned else raw_field
 
+            desc = job.get("description") or ""
+            if desc:
+                if not job.get("department"):
+                    dept = extract_department(desc)
+                    if dept:
+                        job["department"] = dept
+                if not job.get("pi_name"):
+                    pi = extract_pi_name(desc)
+                    if pi:
+                        job["pi_name"] = pi
+                if not job.get("field"):
+                    field = infer_field(desc)
+                    if field:
+                        job["field"] = field
+                if not job.get("deadline"):
+                    deadline = extract_deadline(desc)
+                    if deadline:
+                        job["deadline"] = deadline
+                if not job.get("application_materials"):
+                    app_materials = extract_application_materials(desc)
+                    if app_materials:
+                        job["application_materials"] = app_materials
+                if not job.get("contact_email"):
+                    contact = extract_contact_email(desc)
+                    if contact:
+                        job["contact_email"] = contact
+
         except Exception:
-            self.logger.debug("Could not fetch detail: %s", url)
+            self.logger.debug("Could not fetch detail: %s", url, exc_info=True)
 
         return job
 
@@ -237,25 +311,44 @@ class AcademicPositionsScraper(BaseScraper):
         Returns a dict like ``{"Application deadline": "2026-03-01", ...}``.
         """
         meta: dict[str, str] = {}
-        for label_div in soup.find_all("div", class_="font-weight-bold"):
-            label = label_div.get_text(strip=True)
-            if label not in (
-                "Title", "Employer", "Location", "Published",
-                "Application deadline", "Job type", "Field",
-            ):
+        known_labels = {
+            "Title", "Employer", "Location", "Published", "Application deadline",
+            "Job type", "Field", "Start date", "Department", "Reference number",
+        }
+        for row in soup.select("div.row.mb-3, div.row"):
+            label_div = row.select_one("div.font-weight-bold")
+            if not label_div:
                 continue
-            # Walk up: label_div -> col div -> row div
-            col = label_div.parent
-            if not col:
+            label = label_div.get_text(strip=True).rstrip(":")
+            if label not in known_labels:
                 continue
-            row = col.parent
-            if not row:
-                continue
-            # The value is in the second col child
-            value_div = row.select_one("div.col-auto.col-md-8, div.col-md-8")
+            value_div = None
+            for candidate in row.select("div.col-auto.col-md-8, div.col-md-8, div.col-12.col-md-8"):
+                if label_div in candidate.descendants:
+                    continue
+                value_div = candidate
+                break
             if value_div:
-                meta[label] = value_div.get_text(strip=True)
+                value = value_div.get_text(separator=" ", strip=True)
+                if value:
+                    meta[label] = value
         return meta
+
+    @staticmethod
+    def _merge_condition_text(existing: str | None, *parts: str | None) -> str:
+        """Merge condition snippets without duplicates."""
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in (existing, *parts):
+            cleaned = (item or "").strip().strip("|")
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+        return " | ".join(merged)
 
     # ── Main scrape ───────────────────────────────────────────────────────
 
@@ -342,6 +435,7 @@ class AcademicPositionsScraper(BaseScraper):
         if not raw:
             return None
         raw = raw.strip()
+        raw = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", raw)
         # Try direct date formats first
         for fmt in (
             "%Y-%m-%d",

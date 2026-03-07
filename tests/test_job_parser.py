@@ -504,6 +504,22 @@ class TestParseStructuredDescription:
         assert "NGS" in result["preferred"]
         assert "연봉" in result["conditions"]
 
+    def test_parses_pipe_delimited_jobspy_sections(self):
+        text = (
+            "About Us | Our center develops genome engineering tools. | "
+            "Responsibilities to include | Lead CRISPR assay development | "
+            "Required Qualifications | PhD in molecular biology | "
+            "Preferred Qualifications | Experience with Python | "
+            "Shift/Salary/Benefits | Full Time | £39,424 to £47,779 per annum | "
+            "How To Apply | Submit a CV and cover letter"
+        )
+        result = parse_structured_description(text)
+        assert result["summary"].startswith("Our center develops")
+        assert "CRISPR assay development" in result["responsibilities"]
+        assert "PhD in molecular biology" in result["requirements"]
+        assert "Experience with Python" in result["preferred"]
+        assert "£39,424 to £47,779" in result["conditions"]
+
 
 class TestExtractApplicationMaterials:
     def test_extracts_korean_application_materials(self):

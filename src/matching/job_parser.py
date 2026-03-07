@@ -135,6 +135,8 @@ _FALSE_POSITIVE_NAMES = {
 _REQUIREMENTS_HEADERS = [
     r"requirements?\s*[:.]",
     r"qualifications?\s*[:.]",
+    r"required\s+qualifications?\s*[:.]?",
+    r"about\s+you\s*[:.]?",
     r"(?:required|desired|preferred)\s+(?:qualifications?|skills?|experience)\s*[:.]",
     r"(?:we|the candidate|applicants?)\s+(?:should|must|are expected to)\s+(?:have|possess|hold)",
     r"what (?:we(?:'re| are) looking for|you(?:'ll)? (?:need|bring))\s*[:.]",
@@ -154,6 +156,7 @@ _REQUIREMENTS_HEADERS = [
 ]
 
 _PREFERRED_HEADERS = [
+    r"preferred\s+qualifications?\s*[:.]?",
     r"preferred\s+(?:experience|education|skills|qualifications?)\s*[:.]?",
     r"(?:nice to have|desired|bonus|assets?|advantages?|plus)\s*[:.]?",
     r"(?:desired|preferred)\s+(?:criteria|competencies)\s*[:.]?",
@@ -162,6 +165,8 @@ _PREFERRED_HEADERS = [
 ]
 
 _RESPONSIBILITIES_HEADERS = [
+    r"role\s+expectations?/responsibilities\s*[:.]?",
+    r"responsibilities?\s+to\s+include\s*[:.]?",
     r"(?:position |key |primary )?responsibilities\s*[:.]?",
     r"(?:key |major )?(?:duties|tasks)\s*[:.]?",
     r"what (?:you'll|you will) do\s*[:.]?",
@@ -176,6 +181,8 @@ _RESPONSIBILITIES_HEADERS = [
 ]
 
 _CONDITIONS_HEADERS = [
+    r"shift/salary/benefits\s*[:.]?",
+    r"conditions?\s+of\s+employment\s*[:.]?",
     r"(?:we )?offer\s*[:.]",
     r"(?:salary|compensation|remuneration|pay)\s*[:.]",
     r"(?:contract|appointment|position)\s+(?:type|details?|duration|terms?)\s*[:.]",
@@ -196,6 +203,8 @@ _CONDITIONS_HEADERS = [
 ]
 
 _DESCRIPTION_HEADERS = [
+    r"about\s+us\s*[:.]?",
+    r"about\s+the\s+role\s*[:.]?",
     r"(?:job|position|role)\s+(?:description|summary|overview)\s*[:.]",
     r"(?:about|description of)\s+(?:the )?(?:position|role|project|lab(?:oratory)?|group|research)\s*[:.]",
     r"(?:project|research)\s+(?:description|summary|overview)\s*[:.]",
@@ -771,6 +780,8 @@ def extract_section(text: str, header_patterns: list[str], max_chars: int = 5000
     if not text:
         return None
 
+    text = _normalize_structured_text(clean_linkedin_description(text))
+
     for pattern in header_patterns:
         m = re.search(pattern, text, re.IGNORECASE)
         if not m:
@@ -785,7 +796,11 @@ def extract_section(text: str, header_patterns: list[str], max_chars: int = 5000
             r"\n\s*(?:Requirements?|Qualifications?|We offer|Salary|How to apply|"
             r"Application|About|Contact|Deadline|Duration|Benefits?|"
             r"Responsibilities?|Key tasks?|Your (?:profile|tasks?)|"
-            r"What we offer|The position|Starting date)\s*[:.]",
+            r"What we offer|The position|Starting date|About the Role|About You|"
+            r"Role Expectations/Responsibilities|Responsibilities to include|"
+            r"Required Qualifications|Preferred Qualifications|"
+            r"Shift/Salary/Benefits|Conditions of Employment|"
+            r"Required Documents|Additional Information|Other Information)\s*[:.]",
             # Korean section boundaries
             r"\n\s*(?:자격\s*(?:요건|조건)|지원\s*자격|우대\s*사항|제출\s*서류|"
             r"급여|보수|처우|근무\s*조건|접수\s*방법|지원\s*방법|문의|연락처|"
@@ -860,6 +875,8 @@ _APPLICATION_HEADERS = [
     r"how\s+to\s+apply\s*[:.]?",
     r"application\s+procedure\s*[:.]?",
     r"required\s+documents?\s*[:.]?",
+    r"application\s+requirements?\s*[:.]?",
+    r"additional\s+requirements?\s+for\s+the\s+application\s*[:.]?",
     r"your\s+application\s+should\s+include\s*[:.]?",
     r"please\s+(?:submit|send|include)\s+the\s+following\s*[:.]?",
     r"application\s+(?:documents?|materials?|package)\s*[:.]?",
@@ -920,6 +937,51 @@ _APPLICATION_CONTEXT = re.compile(
     r"제출|접수|첨부|업로드|송부|지원)",
     re.IGNORECASE,
 )
+
+_INLINE_HEADER_BREAKS = [
+    r"About Us",
+    r"About the Role",
+    r"About You",
+    r"Role Expectations/Responsibilities",
+    r"Responsibilities to include",
+    r"Responsibilities",
+    r"Required Qualifications",
+    r"Preferred Qualifications",
+    r"Shift/Salary/Benefits",
+    r"Conditions of Employment",
+    r"What We Offer",
+    r"How To Apply",
+    r"Required Documents",
+    r"Application Materials",
+    r"Additional Information",
+    r"Other Information",
+]
+
+_INLINE_HEADER_RE = re.compile(
+    r"(?<!\n)(?<!^)\s*(?P<header>"
+    + "|".join(_INLINE_HEADER_BREAKS)
+    + r")\s*[:.]?\s*(?=(?:[A-Z(]|[0-9]|[-•]))",
+    re.IGNORECASE,
+)
+
+
+def _normalize_structured_text(text: str) -> str:
+    """Insert line breaks around flattened section headers and pipe delimiters."""
+    if not text:
+        return ""
+
+    text = re.sub(r"\r\n?", "\n", text)
+
+    # Indeed / JobSpy often flattens section blocks into pipe-delimited text.
+    if text.count("|") >= 4:
+        text = re.sub(r"\s*\|\s*", "\n", text)
+
+    text = _INLINE_HEADER_RE.sub(
+        lambda m: f"\n\n{m.group('header')}:\n",
+        text,
+    )
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def extract_application_materials(text: str) -> Optional[str]:
@@ -1013,6 +1075,8 @@ _LINKEDIN_NOISE = re.compile(
 _STRUCTURED_SECTIONS = {
     "summary": re.compile(
         r"^(?:Position |Job )?Summary\s*[:.]?\s*$|"
+        r"^About Us\s*[:.]?\s*$|"
+        r"^About the Role\s*[:.]?\s*$|"
         r"^About (?:the |this )?(?:Position|Role|Opportunity)\s*[:.]?\s*$|"
         r"^Overview\s*[:.]?\s*$|"
         r"^Description\s*[:.]?\s*$|"
@@ -1030,6 +1094,8 @@ _STRUCTURED_SECTIONS = {
         re.IGNORECASE | re.MULTILINE,
     ),
     "responsibilities": re.compile(
+        r"^Role Expectations/Responsibilities\s*[:.]?\s*$|"
+        r"^Responsibilities to include\s*[:.]?\s*$|"
         r"^(?:Position |Key |Primary )?Responsibilities\s*[:.]?\s*$|"
         r"^(?:Key |Major )?(?:Duties|Tasks)\s*[:.]?\s*$|"
         r"^What (?:you'll|you will) do\s*[:.]?\s*$|"
@@ -1046,6 +1112,8 @@ _STRUCTURED_SECTIONS = {
         re.IGNORECASE | re.MULTILINE,
     ),
     "requirements": re.compile(
+        r"^Required Qualifications\s*[:.]?\s*$|"
+        r"^About You\s*[:.]?\s*$|"
         r"^(?:Position |Minimum )?(?:Requirements?|Qualifications?)\s*[:.]?\s*$|"
         r"^(?:Required |Minimum )?(?:Education|Experience|Skills)(?: and Experience)?\s*[:.]?\s*$|"
         r"^What (?:you'll|you will) (?:need|bring)\s*[:.]?\s*$|"
@@ -1064,6 +1132,7 @@ _STRUCTURED_SECTIONS = {
         re.IGNORECASE | re.MULTILINE,
     ),
     "preferred": re.compile(
+        r"^Preferred Qualifications\s*[:.]?\s*$|"
         r"^Preferred\s+(?:Experience|Education|Skills|Qualifications?)\s*[:.]?\s*$|"
         r"^(?:Nice to have|Desired|Bonus)\s*[:.]?\s*$|"
         r"^Additional (?:Skills|Qualifications?)\s*[:.]?\s*$|"
@@ -1076,6 +1145,8 @@ _STRUCTURED_SECTIONS = {
         re.IGNORECASE | re.MULTILINE,
     ),
     "conditions": re.compile(
+        r"^Shift/Salary/Benefits\s*[:.]?\s*$|"
+        r"^Conditions of Employment\s*[:.]?\s*$|"
         r"^(?:Compensation|Salary|Pay|Benefits?|What we offer)\s*[:.]?\s*$|"
         r"^(?:Contract|Employment) (?:Type|Details?|Terms?)\s*[:.]?\s*$|"
         # EURAXESS / AcademicPositions patterns
@@ -1136,7 +1207,7 @@ def clean_linkedin_description(text: str) -> str:
 
     # Collapse excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return _normalize_structured_text(text)
 
 
 def parse_structured_description(text: str) -> dict[str, str]:
@@ -1148,7 +1219,7 @@ def parse_structured_description(text: str) -> dict[str, str]:
     if not text:
         return {}
 
-    text = clean_linkedin_description(text)
+    text = _normalize_structured_text(clean_linkedin_description(text))
 
     result: dict[str, str] = {}
 

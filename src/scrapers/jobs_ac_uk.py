@@ -11,6 +11,12 @@ from urllib.parse import urljoin, urlencode
 from bs4 import BeautifulSoup, Tag
 
 from src.config import CV_KEYWORDS
+from src.matching.job_parser import (
+    extract_application_materials,
+    extract_contact_email,
+    extract_deadline,
+    extract_department,
+)
 from src.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -167,31 +173,49 @@ class JobsAcUkScraper(BaseScraper):
             # Parse detail columns for structured info
             first_col = soup.select_one("div.j-advert-details__first-col")
             if first_col:
-                col_text = first_col.get_text(separator=" | ", strip=True)
-                # Location
-                loc_match = re.search(r"Location:\s*\|\s*(.+?)(?:\s*\||\s*$)", col_text)
-                if loc_match and not job.get("country"):
-                    location = loc_match.group(1).strip()
+                fields = self._extract_labeled_details(first_col.get_text(separator="\n", strip=True))
+                location = fields.get("Location")
+                if location and not job.get("country"):
                     job["country"] = self._extract_country(location)
-                # Salary
-                sal_match = re.search(r"Salary:\s*\|\s*(.+?)(?:\s*\||\s*$)", col_text)
-                if sal_match and not job.get("conditions"):
-                    salary = re.sub(r"\s+", " ", sal_match.group(1).strip())
-                    job["conditions"] = f"Salary: {salary}"
-                # Contract type
-                ct_match = re.search(r"Contract Type:\s*\|\s*(.+?)(?:\s*\||\s*$)", col_text)
-                if ct_match:
-                    contract = ct_match.group(1).strip()
-                    cond = job.get("conditions", "")
-                    job["conditions"] = f"{cond}; {contract}" if cond else contract
+                cond_parts = []
+                if fields.get("Salary"):
+                    salary = re.sub(r"\s+", " ", fields["Salary"]).strip()
+                    cond_parts.append(f"Salary: {salary}")
+                if fields.get("Hours"):
+                    cond_parts.append(f"Hours: {fields['Hours']}")
+                if fields.get("Contract Type"):
+                    cond_parts.append(f"Contract Type: {fields['Contract Type']}")
+                if cond_parts:
+                    existing = job.get("conditions") or ""
+                    joined = " | ".join(cond_parts)
+                    job["conditions"] = f"{existing} | {joined}".strip(" |")
 
             second_col = soup.select_one("div.j-advert-details__second-col")
             if second_col:
-                col_text = second_col.get_text(separator=" | ", strip=True)
-                # Deadline
-                close_match = re.search(r"Closes:\s*\|\s*(.+?)(?:\s*\||\s*$)", col_text)
-                if close_match and not job.get("deadline"):
-                    job["deadline"] = self._parse_date(close_match.group(1).strip())
+                fields = self._extract_labeled_details(second_col.get_text(separator="\n", strip=True))
+                if fields.get("Placed On") and not job.get("posted_date"):
+                    job["posted_date"] = self._parse_date(fields["Placed On"])
+                if fields.get("Closes") and not job.get("deadline"):
+                    job["deadline"] = self._parse_date(fields["Closes"])
+
+            desc = job.get("description") or ""
+            if desc:
+                if not job.get("department"):
+                    dept = extract_department(desc)
+                    if dept:
+                        job["department"] = dept
+                if not job.get("application_materials"):
+                    app_materials = extract_application_materials(desc)
+                    if app_materials:
+                        job["application_materials"] = app_materials
+                if not job.get("contact_email"):
+                    contact = extract_contact_email(desc)
+                    if contact:
+                        job["contact_email"] = contact
+                if not job.get("deadline"):
+                    deadline = extract_deadline(desc)
+                    if deadline:
+                        job["deadline"] = deadline
 
         except Exception:
             self.logger.debug("Could not enrich detail: %s", url)
@@ -264,6 +288,40 @@ class JobsAcUkScraper(BaseScraper):
             return "United Kingdom"
         parts = [p.strip() for p in location.split(",")]
         return parts[-1] if parts else None
+
+    @staticmethod
+    def _extract_labeled_details(text: str) -> dict[str, str]:
+        """Parse label/value metadata blocks from jobs.ac.uk detail columns."""
+        lines = [
+            re.sub(r"\s+", " ", line).strip(" |")
+            for line in text.splitlines()
+            if line.strip()
+        ]
+        known = {"Location", "Salary", "Hours", "Contract Type", "Placed On", "Closes", "Job Ref"}
+        fields: dict[str, str] = {}
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            label = ""
+            value = ""
+            if ":" in line:
+                maybe_label, maybe_value = [part.strip() for part in line.split(":", 1)]
+                if maybe_label in known:
+                    label = maybe_label
+                    value = maybe_value
+                    if not value and i + 1 < len(lines):
+                        value = lines[i + 1].strip()
+                        i += 1
+            elif line.rstrip(":") in known:
+                label = line.rstrip(":")
+                if i + 1 < len(lines):
+                    value = lines[i + 1].strip()
+                    i += 1
+
+            if label:
+                fields[label] = value
+            i += 1
+        return fields
 
     @staticmethod
     def _parse_date(raw: str | None) -> str | None:

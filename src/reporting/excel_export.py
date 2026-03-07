@@ -18,7 +18,12 @@ from src.config import (
 from src.db import _AGGREGATOR_INSTITUTES, get_all_pis, get_jobs, get_recommended_pis
 from src.matching.job_parser import (
     extract_application_materials,
+    extract_contact_email,
     extract_conditions,
+    extract_deadline,
+    extract_department,
+    extract_pi_from_title,
+    extract_pi_name,
     extract_preferred_qualifications,
     extract_requirements,
     extract_responsibilities,
@@ -227,12 +232,18 @@ def _parse_salary(conditions: str, description: str) -> str:
     """Extract salary info from conditions or description."""
     blob = f"{conditions} {description}"
     patterns = [
-        r"(?:salary|stipend|compensation|remuneration)\s*(?:of|is|:)?\s*([\$€£]?\s*\d[\d,]*(?:\.\d+)?(?:\s*[-–]\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?)\s*(?:k|K|per\s+(?:year|annum|month)|/\s*(?:yr|year|annum|month(?:ly)?)|euros?(?:/month)?)?",
-        r"([\$€£]\s*\d[\d,]*(?:\.\d+)?(?:\s*[-–]\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?)\s*(?:k|K)?\s*(?:per\s+(?:year|annum)|/\s*(?:yr|year|annum|yearly))",
+        r"(?:salary|stipend|compensation|remuneration|pay\s+range)\s*(?:of|is|:)?\s*"
+        r"([\$€£]?\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:[-–]|to)\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?"
+        r"(?:\s*(?:per\s+(?:year|annum|month|hour)|/\s*(?:yr|year|annum|month(?:ly)?|hour(?:ly)?)))?)",
+        r"([\$€£]\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:[-–]|to)\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?"
+        r"(?:\s*(?:per\s+(?:year|annum|month|hour)|/\s*(?:yr|year|annum|month(?:ly)?|hour(?:ly)?)))?)",
+        r"(?:expected\s+pay\s+range.*?is\s*)"
+        r"([\$€£]?\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:[-–]|to)\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?"
+        r"(?:\s*(?:per\s+(?:year|annum|month|hour)|/\s*(?:yr|year|annum|month(?:ly)?|hour(?:ly)?)))?)",
         r"(TV-?L\s*E?\s*1[3-5](?:\s*/\s*E?\s*1[3-5])?)",
         r"(NIH\s+(?:scale|salary))",
         r"(Grade\s+\d+|Band\s+\d+|Scale\s+\d+)",
-        r"Salary:\s*([\$€£]?\d[\d,.]*(?:\s*[-–]\s*[\$€£]?\d[\d,.]*)?(?:/\w+)?)",
+        r"Salary:\s*([\$€£]?\d[\d,.]*(?:\s*(?:[-–]|to)\s*[\$€£]?\d[\d,.]*)?(?:/\w+)?)",
         r"(\d[\d.]*,\d{2}\s*€)",  # EU format: "42.185,28 €"
         r"((?:\\|₩)\s*\d[\d,]*(?:\s*[~\-–]\s*(?:\\|₩)?\s*\d[\d,]*)?)",
         r"((?:연봉|월급|급여|보수|시급)\s*[:：]?\s*\d[\d,]*(?:\.\d+)?\s*(?:만원|천원|원|억원))",
@@ -251,11 +262,14 @@ def _parse_duration(conditions: str, description: str) -> str:
     """Extract duration/contract length."""
     blob = f"{conditions} {description}"
     patterns = [
-        r"(\d+(?:\s*[-–]\s*\d+)?)\s*(?:year|yr)s?\s*(?:position|appointment|contract|renewable)?",
-        r"(\d+(?:\s*[-–]\s*\d+)?)\s*months?\s*(?:position|appointment|contract)?",
+        r"(?:duration|length|term)\s*(?:of|:)?\s*((?:\d+(?:\s*[-–]\s*\d+)?)\s*(?:years?|yrs?|months?))",
+        r"(?:contract|appointment|position|role|fellowship|post)\s*(?:is|for|of|:)?\s*"
+        r"((?:\d+(?:\s*[-–]\s*\d+)?)\s*(?:years?|yrs?|months?))",
+        r"((?:\d+(?:\s*[-–]\s*\d+)?)\s*(?:years?|yrs?|months?))\s*"
+        r"(?:fixed[- ]term|contract|appointment|position|post|role|fellowship|term)",
         r"(?:up to|minimum|at least|initially)\s+(\d+)\s+(?:year|yr|month)s?",
-        r"(?:duration|length|term)\s*(?:of|:)\s*(\d+\s*(?:year|yr|month)s?)",
-        r"Contract:\s*(\w[\w\s,-]*)",
+        r"(?:defined\s+term|renewable\s+for)\s*((?:\d+(?:\s*[-–]\s*\d+)?)\s*(?:years?|months?))",
+        r"Duration:\s*(until\s+\d{4}-\d{2}-\d{2})",
         r"(?:계약|근무|임용)\s*기간\s*[:：]?\s*(\d+\s*년(?:\s*\d+\s*개월)?|\d+\s*개월)",
         r"(\d+\s*년(?:\s*\d+\s*개월)?)",
         r"(\d+\s*개월)",
@@ -263,31 +277,47 @@ def _parse_duration(conditions: str, description: str) -> str:
     for p in patterns:
         m = re.search(p, blob, re.IGNORECASE)
         if m:
-            return (m.group(1).strip() if m.lastindex else m.group(0).strip())[:60]
+            value = (m.group(1).strip() if m.lastindex else m.group(0).strip())[:60]
+            if re.search(r"(?:years?\s+of\s+(?:postdoc|research|experience)|months?\s+after)", value, re.IGNORECASE):
+                continue
+            window = blob[max(0, m.start() - 40): min(len(blob), m.end() + 40)]
+            if re.fullmatch(r"\d+\s*(?:years?|yrs?|months?|년(?:\s*\d+\s*개월)?|개월)", value, re.IGNORECASE):
+                if not re.search(
+                    r"(?:duration|term|contract|appointment|position|role|fellowship|post|"
+                    r"renewable|defined\s+term|fixed[- ]term|계약|근무|임용)",
+                    window,
+                    re.IGNORECASE,
+                ):
+                    continue
+            return value
     return ""
 
 
 def _parse_contract_type(conditions: str, description: str) -> str:
     """Extract contract type (full-time, fixed-term, etc)."""
-    blob = f"{conditions} {description}".lower()
+    blob = f"{conditions} {description}"
     types = []
-    if "full-time" in blob or "full time" in blob or "fulltime" in blob:
+
+    def _has(pattern: str) -> bool:
+        return bool(re.search(pattern, blob, re.IGNORECASE))
+
+    if _has(r"\bfull(?:[\s-]?time)\b"):
         types.append("Full-time")
-    elif "part-time" in blob or "part time" in blob:
+    elif _has(r"\bpart(?:[\s-]?time)\b"):
         types.append("Part-time")
-    if "fixed-term" in blob or "fixed term" in blob or "temporary" in blob:
+    if _has(r"\bfixed(?:[\s-]?term)\b|\btemporary\b|\bcontract\b"):
         types.append("Fixed-term")
-    elif "permanent" in blob or "tenure" in blob:
+    elif _has(r"\bpermanent\b|\btenure(?:-track)?\b"):
         types.append("Permanent")
-    if "정규직" in blob:
+    if _has(r"정규직"):
         types.append("Permanent")
-    if any(token in blob for token in ("계약직", "계약제", "기간제", "임시직")):
+    if _has(r"계약직|계약제|기간제|임시직"):
         types.append("Fixed-term")
-    if any(token in blob for token in ("인턴", "intern")):
+    if _has(r"인턴|\bintern(ship)?\b"):
         types.append("Intern")
-    if any(token in blob for token in ("시간제", "파트타임")) and "Part-time" not in types:
+    if _has(r"시간제|파트타임") and "Part-time" not in types:
         types.append("Part-time")
-    if any(token in blob for token in ("전일제", "상근", "전임")) and "Full-time" not in types:
+    if _has(r"전일제|상근|전임") and "Full-time" not in types:
         types.append("Full-time")
     # Preserve stable order
     ordered = []
@@ -303,6 +333,7 @@ def _parse_start_date(conditions: str, description: str) -> str:
     patterns = [
         r"(?:start(?:ing)?\s*(?:date)?|commencement|begin(?:ning)?)\s*[:=]?\s*(\w+\s+\d{1,2},?\s+\d{4})",
         r"(?:start(?:ing)?\s*(?:date)?|commencement|begin(?:ning)?)\s*[:=]?\s*(\w+\s*-\s*\d{1,2}\s*-\s*\d{4})",
+        r"(?:offer\s+starting\s+date|available\s+from|anticipated\s+start(?:\s+date)?)\s*[:=]?\s*(\w+\s+\d{1,2},?\s+\d{4})",
         r"(?:start(?:ing)?|available|begin)\s*(?:date)?\s*[:=]?\s*((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})",
         r"(?:start(?:ing)?)\s*[:=]?\s*(\d{4}-\d{2}-\d{2})",
         r"(?:as soon as possible|immediately|ASAP)",
@@ -608,12 +639,16 @@ def _job_to_row(job: dict) -> dict:
     conditions_full = _format_salary_number(_clean_list(cond, 4000))
     description_full = _clean_text(desc, _MAX_EXCEL_CELL_LEN, preserve_newlines=True)
     field = job.get("field") or infer_field(" ".join(part for part in (title, desc[:500]) if part)) or ""
+    department = job.get("department") or extract_department(desc) or ""
+    pi_name = job.get("pi_name") or extract_pi_name(desc) or extract_pi_from_title(title) or ""
+    contact_email = job.get("contact_email") or extract_contact_email(desc) or ""
+    deadline = job.get("deadline") or extract_deadline(desc) or ""
 
     return {
         "Title": title,
-        "PI Name": job.get("pi_name") or "",
+        "PI Name": pi_name,
         "Institute": institute,
-        "Department": job.get("department") or "",
+        "Department": department,
         "Tier": _format_tier(tier, institute),
         "Country": job.get("country") or "",
         "Region": job.get("region") or "",
@@ -636,7 +671,7 @@ def _job_to_row(job: dict) -> dict:
         "Conditions (Full)": conditions_full,
         # Dates
         "Posted Date": job.get("posted_date") or "",
-        "Deadline": job.get("deadline") or "",
+        "Deadline": deadline,
         "Application Materials": _clean_list(app_materials, 3000),
         # Description
         "Description": description_full,
@@ -644,7 +679,7 @@ def _job_to_row(job: dict) -> dict:
         **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
         **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
         # Contact & info
-        "Contact Email": job.get("contact_email") or "",
+        "Contact Email": contact_email,
         **_info_urls_to_columns(job.get("info_urls")),
         # Links
         "Job URL": job.get("url") or "",

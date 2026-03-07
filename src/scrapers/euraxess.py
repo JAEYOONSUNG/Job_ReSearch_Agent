@@ -31,6 +31,14 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 
 from src.config import CV_KEYWORDS
+from src.matching.job_parser import (
+    extract_application_materials,
+    extract_contact_email,
+    extract_deadline,
+    extract_department,
+    extract_pi_name,
+    infer_field,
+)
 from src.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -232,6 +240,13 @@ class EuraxessScraper(BaseScraper):
                     job["country"] = job_info["Country"]
                 if not job.get("field") and job_info.get("Research Field"):
                     job["field"] = self._clean_research_field(job_info["Research Field"])
+                if not job.get("posted_date"):
+                    for key in ("Posted on", "Posting Date", "Offer Posted Date"):
+                        if job_info.get(key):
+                            posted = self._parse_date_text(job_info[key])
+                            if posted:
+                                job["posted_date"] = posted
+                                break
 
                 # Deadline from <time datetime="..."> element
                 if not job.get("deadline"):
@@ -258,8 +273,10 @@ class EuraxessScraper(BaseScraper):
                         start_str = time_el["datetime"] if time_el else dd.get_text(strip=True)
                         start_date = self._parse_date_text(start_str)
                         if start_date:
-                            existing = job.get("conditions") or ""
-                            job["conditions"] = f"{existing} | Start: {start_date}".strip(" |")
+                            job["conditions"] = self._merge_condition_text(
+                                job.get("conditions"),
+                                f"Start: {start_date}",
+                            )
 
                 # Contract type + job status → conditions
                 cond_parts = []
@@ -274,9 +291,10 @@ class EuraxessScraper(BaseScraper):
                     ).rstrip(", ")
                     cond_parts.append(f"Profile: {profile}")
                 if cond_parts:
-                    existing = job.get("conditions") or ""
-                    new_cond = " | ".join(cond_parts)
-                    job["conditions"] = f"{existing} | {new_cond}".strip(" |")
+                    job["conditions"] = self._merge_condition_text(
+                        job.get("conditions"),
+                        *cond_parts,
+                    )
 
             # === Full description ===
             # Regular jobs use h2#offer-description; hosting offers use h2#description
@@ -355,20 +373,112 @@ class EuraxessScraper(BaseScraper):
                             if content_div:
                                 content = content_div.get_text(separator=" ", strip=True)
                                 if content and len(content) > 10:
-                                    existing = job.get("conditions") or ""
-                                    job["conditions"] = f"{existing} | {label}: {content[:2000]}".strip(" |")
+                                    job["conditions"] = self._merge_condition_text(
+                                        job.get("conditions"),
+                                        f"{label}: {content[:2000]}",
+                                    )
 
             # === Parse PI from description ===
             desc = job.get("description") or ""
+            if desc:
+                offer_meta = self._extract_labeled_blocks(
+                    desc,
+                    [
+                        "Locations",
+                        "Time type",
+                        "Job Title",
+                        "Department",
+                        "Posting End Date",
+                        "Job End Date",
+                        "Offer Starting Date",
+                    ],
+                )
+                if offer_meta.get("Department") and not job.get("department"):
+                    job["department"] = offer_meta["Department"]
+                if offer_meta.get("Locations") and not job.get("country"):
+                    country = self._extract_country_from_locations(offer_meta["Locations"])
+                    if country:
+                        job["country"] = country
+                if offer_meta.get("Posting End Date") and not job.get("deadline"):
+                    parsed = self._parse_date_text(offer_meta["Posting End Date"])
+                    if not parsed:
+                        dm = re.search(
+                            r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},\s+\d{4})",
+                            offer_meta["Posting End Date"],
+                        )
+                        if dm:
+                            parsed = self._parse_date_text(dm.group(0))
+                    if parsed:
+                        job["deadline"] = parsed
+                if offer_meta.get("Offer Starting Date"):
+                    parsed = self._parse_date_text(offer_meta["Offer Starting Date"])
+                    if not parsed:
+                        dm = re.search(
+                            r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},\s+\d{4})",
+                            offer_meta["Offer Starting Date"],
+                        )
+                        if dm:
+                            parsed = self._parse_date_text(dm.group(0))
+                    if parsed:
+                        job["conditions"] = self._merge_condition_text(
+                            job.get("conditions"),
+                            f"Start: {parsed}",
+                        )
+                if offer_meta.get("Job End Date"):
+                    parsed = self._parse_date_text(offer_meta["Job End Date"])
+                    if not parsed:
+                        dm = re.search(
+                            r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},\s+\d{4})",
+                            offer_meta["Job End Date"],
+                        )
+                        if dm:
+                            parsed = self._parse_date_text(dm.group(0))
+                    if parsed:
+                        job["conditions"] = self._merge_condition_text(
+                            job.get("conditions"),
+                            f"Duration: until {parsed}",
+                        )
+                if offer_meta.get("Time type"):
+                    job["conditions"] = self._merge_condition_text(
+                        job.get("conditions"),
+                        f"Hours: {offer_meta['Time type']}",
+                    )
+
+                salary_match = re.search(
+                    r"(?:expected\s+pay\s+range.*?is|salary(?:\s+range)?\s*[:])\s*"
+                    r"([\$€£]?\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:[-–]|to)\s*[\$€£]?\s*\d[\d,]*(?:\.\d+)?)?"
+                    r"(?:\s*(?:per\s+(?:year|annum|month|hour)|/\s*(?:yr|year|annum|month(?:ly)?|hour(?:ly)?)))?)",
+                    desc,
+                    re.IGNORECASE,
+                )
+                if salary_match:
+                    job["conditions"] = self._merge_condition_text(
+                        job.get("conditions"),
+                        f"Salary: {salary_match.group(1).strip()}",
+                    )
+                if not job.get("department"):
+                    dept = extract_department(desc)
+                    if dept:
+                        job["department"] = dept
+                if not job.get("application_materials"):
+                    app_materials = extract_application_materials(desc)
+                    if app_materials:
+                        job["application_materials"] = app_materials
+                if not job.get("contact_email"):
+                    contact = extract_contact_email(desc)
+                    if contact:
+                        job["contact_email"] = contact
+                if not job.get("deadline"):
+                    deadline = extract_deadline(desc)
+                    if deadline:
+                        job["deadline"] = deadline
             if desc and not job.get("pi_name"):
-                from src.matching.job_parser import extract_pi_name
                 pi = extract_pi_name(desc)
                 if pi:
                     job["pi_name"] = pi
 
             # === Infer field from description if still missing ===
             if desc and not job.get("field"):
-                from src.matching.job_parser import infer_field
                 field = infer_field(desc)
                 if field:
                     job["field"] = field
@@ -510,6 +620,40 @@ class EuraxessScraper(BaseScraper):
             if term.lower() in dt.get_text(strip=True).lower():
                 return dt
         return None
+
+    @staticmethod
+    def _merge_condition_text(existing: str | None, *parts: str | None) -> str:
+        """Merge condition fragments without duplicating text."""
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in (existing, *parts):
+            cleaned = (item or "").strip().strip("|")
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+        return " | ".join(merged)
+
+    @staticmethod
+    def _extract_labeled_blocks(text: str, labels: list[str]) -> dict[str, str]:
+        """Extract multiline label/value blocks from flattened detail text."""
+        if not text:
+            return {}
+        pattern = "|".join(re.escape(label) for label in labels)
+        found: dict[str, str] = {}
+        for label in labels:
+            match = re.search(
+                rf"(?ims)^\s*{re.escape(label)}\s*:?\s*(.+?)(?=^\s*(?:{pattern})\s*:?\s*|\Z)",
+                text,
+            )
+            if match:
+                value = re.sub(r"\s+", " ", match.group(1)).strip()
+                if value:
+                    found[label] = value
+        return found
 
     @staticmethod
     def _extract_country_from_locations(text: str) -> str | None:

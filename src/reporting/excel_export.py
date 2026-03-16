@@ -1266,19 +1266,21 @@ def _write_summary_dashboard(
             "name": "Jobs by Region",
             "categories": ["Summary Dashboard", region_start, 1, region_end, 1],
             "values": ["Summary Dashboard", region_start, 2, region_end, 2],
-            "data_labels": {"percentage": True, "category": True,
+            "data_labels": {"category": True, "value": True, "percentage": True,
+                            "separator": " ",
+                            "series_name": False,
                             "font": {"name": "Calibri", "size": 10, "color": TEXT_PRIMARY}},
             "points": [{"fill": {"color": c}} for c in region_colors],
         })
         chart.set_title({"name": "Jobs by Region",
                          "name_font": {"name": "Calibri", "size": 12,
                                        "color": NAVY, "bold": True}})
-        chart.set_size({"width": 530, "height": 280})
+        chart.set_size({"width": 530, "height": 300})
+        chart.set_hole_size(48)
         chart.set_legend({"position": "bottom",
                           "font": {"name": "Calibri", "size": 9}})
         chart.set_chartarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
         chart.set_plotarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
-        # Position one row below section title (row 13, 0-based), col E (4)
         ws.insert_chart(13, 4, chart, {"x_offset": 0, "y_offset": 0})
 
     # ══════════════════════════════════════════════════════════════════
@@ -1371,10 +1373,8 @@ def _write_summary_dashboard(
         fields_row += 1
     field_end = fields_row - 1
 
-    # Save the section title row for chart positioning
-    fields_section_row = fields_row - len(top_fields) - 2
-
     if top_fields:
+        n_fields = len(top_fields)
         chart2 = workbook.add_chart({"type": "bar"})
         vivid_blues = [
             "#0037B3", "#0044CC", "#0055E6", "#0066FF", "#1A75FF",
@@ -1384,22 +1384,31 @@ def _write_summary_dashboard(
             "name": "Jobs by Field",
             "categories": ["Summary Dashboard", field_start, 1, field_end, 1],
             "values": ["Summary Dashboard", field_start, 2, field_end, 2],
-            "points": [{"fill": {"color": vivid_blues[i % len(vivid_blues)]}}
-                       for i in range(len(top_fields))],
-            "gap": 80,
+            "points": [{"fill": {"color": vivid_blues[i % len(vivid_blues)]},
+                        "border": {"none": True}}
+                       for i in range(n_fields)],
+            "gap": 40,
+            "data_labels": {"value": True, "series_name": False, "category": False,
+                            "legend_key": False,
+                            "font": {"name": "Calibri", "size": 9,
+                                     "bold": True, "color": NAVY}},
         })
-        chart2.set_title({"name": "Top Research Fields",
-                          "name_font": {"name": "Calibri", "size": 12,
-                                        "color": NAVY, "bold": True}})
-        chart2.set_size({"width": 530, "height": 320})
+        chart2.set_title({"none": True})
+        chart2.set_size({"width": 530, "height": n_fields * 20})
         chart2.set_legend({"none": True})
         chart2.set_chartarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
         chart2.set_plotarea({"fill": {"color": LIGHT_BG}, "border": {"none": True}})
-        chart2.set_y_axis({"num_font": {"name": "Calibri", "size": 9, "color": TEXT_SECONDARY}})
-        chart2.set_x_axis({"num_font": {"name": "Calibri", "size": 9, "color": TEXT_SECONDARY},
-                           "major_gridlines": {"visible": True, "line": {"color": SUBTLE_BORDER}}})
-        # Position one row below section title, col E
-        ws.insert_chart(fields_section_row + 1, 4, chart2, {"x_offset": 0, "y_offset": 0})
+        chart2.set_y_axis({"reverse": True,
+                           "num_font": {"size": 1, "color": LIGHT_BG},
+                           "line": {"none": True},
+                           "major_tick_mark": "none"})
+        chart2.set_x_axis({"crossing": 0,
+                           "num_font": {"size": 1, "color": LIGHT_BG},
+                           "line": {"none": True},
+                           "major_tick_mark": "none",
+                           "major_gridlines": {"visible": False}})
+        # Start at first data row
+        ws.insert_chart(field_start, 4, chart2, {"x_offset": 0, "y_offset": 0})
 
     # ══════════════════════════════════════════════════════════════════
     # TOP INSTITUTIONS TABLE (right of fields chart)
@@ -2323,7 +2332,18 @@ def _rebuild_summary_dashboard_openpyxl(
             series.data_points.append(pt)
 
         chart.width = 14
-        chart.height = 7
+        chart.height = 8.5
+        try:
+            chart.holeSize = 48
+        except (AttributeError, TypeError):
+            pass
+        from openpyxl.chart.label import DataLabelList
+        chart.dataLabels = DataLabelList()
+        chart.dataLabels.showVal = True
+        chart.dataLabels.showPercent = True
+        chart.dataLabels.showCatName = True
+        chart.dataLabels.showSerName = False
+        chart.dataLabels.separator = " "
         ws.add_chart(chart, "E14")
 
     # ═══════════════════════════════════════════════════════════════════
@@ -2408,21 +2428,24 @@ def _rebuild_summary_dashboard_openpyxl(
         _write_tbl_row(fields_start + 2 + i, 2, 3,
                        field[:40], count, alt=bool(i % 2))
 
-    # Bar chart — spans cols E-I (2nd+3rd box), vivid blue gradient
+    # Horizontal bar chart — vivid blue gradient
     if top_fields:
         from openpyxl.chart.series import DataPoint
-        from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
-        from copy import deepcopy
+        from openpyxl.chart.label import DataLabelList
 
+        n_fields = len(top_fields)
         chart2 = BarChart()
         chart2.type = "bar"
-        chart2.title = "Top Research Fields"
-        chart2.style = 10
-        data_ref = Reference(ws, min_col=3, min_row=fields_start + 1,
-                             max_row=fields_start + 1 + len(top_fields))
+        chart2.grouping = "clustered"
+        chart2.title = None
+        chart2.style = 2
+        chart2.gapWidth = 30  # tight bars to fill each row
+
+        data_ref = Reference(ws, min_col=3, min_row=fields_start + 2,
+                             max_row=fields_start + 1 + n_fields)
         cats_ref = Reference(ws, min_col=2, min_row=fields_start + 2,
-                             max_row=fields_start + 1 + len(top_fields))
-        chart2.add_data(data_ref, titles_from_data=True)
+                             max_row=fields_start + 1 + n_fields)
+        chart2.add_data(data_ref)
         chart2.set_categories(cats_ref)
 
         vivid_blues = [
@@ -2430,15 +2453,45 @@ def _rebuild_summary_dashboard_openpyxl(
             "3385FF", "4D94FF", "66A3FF", "80B3FF", "99C2FF",
         ]
         series = chart2.series[0]
-        for i in range(len(top_fields)):
+        for i in range(n_fields):
             pt = DataPoint(idx=i)
             pt.graphicalProperties.solidFill = vivid_blues[i % len(vivid_blues)]
+            pt.graphicalProperties.line.noFill = True
             series.data_points.append(pt)
 
-        chart2.width = 14
-        chart2.height = 8
+        series.dLbls = DataLabelList()
+        series.dLbls.showVal = True
+        series.dLbls.showSerName = False
+        series.dLbls.showCatName = False
+        series.dLbls.showLegendKey = False
+
         chart2.legend = None
-        ws.add_chart(chart2, f"E{fields_start + 1}")
+        if chart2.x_axis:
+            chart2.x_axis.scaling.orientation = "maxMin"
+            chart2.x_axis.delete = True
+        if chart2.y_axis:
+            chart2.y_axis.crossesAt = 0
+            chart2.y_axis.delete = True
+            chart2.y_axis.majorGridlines = None
+
+        # plotArea fills entire chart area — set BEFORE add_chart
+        from openpyxl.chart.layout import Layout, ManualLayout
+        chart2.layout = Layout(
+            manualLayout=ManualLayout(
+                x=0.01, y=0.01, w=0.99, h=0.99,
+                xMode='edge', yMode='edge',
+            )
+        )
+
+        # TwoCellAnchor: pin chart exactly to data cell range
+        from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
+        data_row_start = fields_start + 2  # row 30 (1-indexed)
+        data_row_end = data_row_start + n_fields  # row 40
+        anchor = TwoCellAnchor()
+        anchor._from = AnchorMarker(col=4, row=data_row_start - 1, colOff=0, rowOff=0)
+        anchor.to = AnchorMarker(col=9, row=data_row_end - 1, colOff=0, rowOff=0)
+        ws.add_chart(chart2, f"E{data_row_start}")
+        ws._charts[-1].anchor = anchor
 
     # ═══════════════════════════════════════════════════════════════════
     # TOP INSTITUTIONS TABLE (right side, cols K-L, row 28+)

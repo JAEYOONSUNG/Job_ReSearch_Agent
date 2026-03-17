@@ -472,9 +472,6 @@ JOB_COLUMNS = [
     "Application Materials",
     # Description
     "Description",
-    # PI Papers — individual columns
-    *[f"Recent Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
-    *[f"Top Cited Paper {i+1}" for i in range(_MAX_PAPER_COLS)],
     # Contact & info
     "Contact Email",
     "Info URL 1",
@@ -506,8 +503,6 @@ _JOB_COLUMN_WIDTHS = {
     "Posted Date": 11, "Deadline": 11,
     "Application Materials": 42,
     "Description": 72,
-    **{f"Recent Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
-    **{f"Top Cited Paper {i+1}": 35 for i in range(_MAX_PAPER_COLS)},
     "Contact Email": 25,
     **{f"Info URL {i+1}": 20 for i in range(_MAX_INFO_URLS)},
     "Job URL": 15, "Job URL 2": 15, "Lab URL": 15, "Scholar URL": 15, "Dept URL": 15,
@@ -672,8 +667,6 @@ def _job_to_row(job: dict) -> dict:
         # Description
         "Description": description_full,
         # PI Papers — individual columns (title text; hyperlinks added in _write_paper_links)
-        **_papers_to_columns("Recent Paper", _parse_papers(job.get("recent_papers"))),
-        **_papers_to_columns("Top Cited Paper", _parse_papers(job.get("top_cited_papers"))),
         # Contact & info
         "Contact Email": contact_email,
         **_info_urls_to_columns(job.get("info_urls")),
@@ -724,50 +717,7 @@ def _write_paper_links(
         "font_size": 9,
     })
 
-    # Build column index lookup for paper columns
-    paper_col_indices: dict[str, int] = {}
-    for col_name in df.columns:
-        if col_name.startswith("Recent Paper ") or col_name.startswith("Top Cited Paper "):
-            paper_col_indices[col_name] = df.columns.get_loc(col_name)
-
-    for row_idx, job in enumerate(jobs):
-        excel_row = row_idx + 1  # +1 for header row
-
-        # Recent papers
-        recent = _parse_papers(job.get("recent_papers"))
-        for i in range(min(_MAX_PAPER_COLS, len(recent))):
-            col_name = f"Recent Paper {i + 1}"
-            col_idx = paper_col_indices.get(col_name)
-            if col_idx is None:
-                continue
-            p = recent[i]
-            url = p.get("url", "")
-            year = p.get("year") or "?"
-            title = (p.get("title") or "Untitled")[:80]
-            cites = p.get("citation_count", 0)
-            display = f"({year}) {title} [{cites} cites]"
-            if url:
-                worksheet.write_url(excel_row, col_idx, url, link_fmt, display)
-            else:
-                worksheet.write(excel_row, col_idx, display)
-
-        # Top cited papers
-        top_cited = _parse_papers(job.get("top_cited_papers"))
-        for i in range(min(_MAX_PAPER_COLS, len(top_cited))):
-            col_name = f"Top Cited Paper {i + 1}"
-            col_idx = paper_col_indices.get(col_name)
-            if col_idx is None:
-                continue
-            p = top_cited[i]
-            url = p.get("url", "")
-            year = p.get("year") or "?"
-            title = (p.get("title") or "Untitled")[:80]
-            cites = p.get("citation_count", 0)
-            display = f"({year}) {title} [{cites} cites]"
-            if url:
-                worksheet.write_url(excel_row, col_idx, url, link_fmt, display)
-            else:
-                worksheet.write(excel_row, col_idx, display)
+    # (Paper columns removed — rarely populated, wasted 10 columns)
 
 
 def _style_worksheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
@@ -2033,8 +1983,6 @@ def _style_new_row_openpyxl(ws, row_idx: int, job: dict) -> None:
                 ws.cell(row=row_idx, column=col_idx).hyperlink = str(val)
                 ws.cell(row=row_idx, column=col_idx).font = link_font
 
-    # Paper hyperlinks
-    _write_paper_links_openpyxl(ws, row_idx, job)
     _apply_wrapped_text_openpyxl(ws, row_idx)
 
     # Citizenship restriction → red Institute

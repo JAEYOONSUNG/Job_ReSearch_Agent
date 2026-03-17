@@ -36,15 +36,68 @@ def _norm_inst(text: str) -> str:
     return text
 
 
+# English CV keyword → Korean synonyms for bilingual matching
+_CV_KEYWORD_KR: dict[str, list[str]] = {
+    "synthetic biology": ["합성생물학", "합성 생물학"],
+    "crispr": ["크리스퍼", "유전자가위", "유전자 가위"],
+    "cas9": ["크리스퍼"],
+    "cas12": ["크리스퍼"],
+    "protein engineering": ["단백질공학", "단백질 공학"],
+    "directed evolution": ["지향진화", "지향 진화"],
+    "extremophile": ["극한미생물", "극한 미생물"],
+    "thermophile": ["고온성 미생물", "호열균"],
+    "archaea": ["고세균"],
+    "metabolic engineering": ["대사공학", "대사 공학"],
+    "genome engineering": ["유전체공학", "유전체 공학"],
+    "gene editing": ["유전자편집", "유전자 편집"],
+    "microbiology": ["미생물학", "미생물"],
+    "molecular biology": ["분자생물학", "분자 생물학"],
+    "systems biology": ["시스템생물학", "시스템 생물학"],
+    "bioinformatics": ["생물정보학", "생물정보"],
+    "structural biology": ["구조생물학", "구조 생물학"],
+    "enzyme engineering": ["효소공학", "효소 공학"],
+    "genomics": ["유전체학", "유전체", "게노믹스"],
+    "proteomics": ["단백체학", "단백질체학", "프로테오믹스"],
+    "metagenomics": ["메타유전체", "메타지노믹스", "마이크로바이옴"],
+    "fermentation": ["발효"],
+    "bioprocess": ["바이오공정"],
+    "immunology": ["면역학", "면역"],
+    "neuroscience": ["신경과학", "뇌과학", "신경"],
+    "drug discovery": ["약학", "약물 발견", "신약"],
+    "pharmacology": ["약리학"],
+    "biochemistry": ["생화학"],
+    "biophysics": ["생물물리학"],
+    "chemical biology": ["화학생물학", "화학 생물학"],
+    "cell biology": ["세포생물학", "세포 생물학"],
+    "stem cell": ["줄기세포"],
+    "organoid": ["오가노이드"],
+    "epigenetics": ["후성유전학", "후성 유전학"],
+    "biotechnology": ["생명공학", "생명 공학", "바이오"],
+}
+
+
 def keyword_match_score(job_text: str, keywords: list[str] = None) -> float:
-    """Calculate keyword overlap score (0.0 - 1.0)."""
+    """Calculate keyword overlap score (0.0 - 1.0).
+
+    Supports bilingual matching: if an English keyword doesn't match,
+    tries Korean synonyms from ``_CV_KEYWORD_KR``.
+    """
     if keywords is None:
         keywords = CV_KEYWORDS
     if not keywords or not job_text:
         return 0.0
 
     text = _normalize(job_text)
-    matches = sum(1 for kw in keywords if kw.lower() in text)
+    matches = 0
+    for kw in keywords:
+        kw_lower = kw.lower()
+        if kw_lower in text:
+            matches += 1
+        else:
+            # Try Korean synonyms
+            kr_syns = _CV_KEYWORD_KR.get(kw_lower, [])
+            if any(syn in text for syn in kr_syns):
+                matches += 1
     return matches / len(keywords)
 
 

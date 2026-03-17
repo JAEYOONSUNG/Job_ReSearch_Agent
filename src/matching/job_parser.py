@@ -82,6 +82,17 @@ _PI_PATTERNS = [
 
 _PI_COMPILED = [re.compile(p, re.IGNORECASE) for p in _PI_PATTERNS]
 
+# Korean PI name patterns
+_PI_KOREAN_PATTERNS = [
+    # "연구책임자: 홍길동" / "지도교수 : 김철수" / "담당교수: 이영희"
+    r"(?:연구\s*책임자|지도\s*교수|담당\s*교수|PI)\s*[:\s]\s*([가-힣]{2,4})",
+    # "홍길동 교수(님)의 연구실/랩/Lab"
+    r"([가-힣]{2,4})\s*(?:교수|박사|연구원|선생)(?:님)?(?:의?\s*(?:연구실|랩|Lab))",
+    # English PI patterns embedded in Korean text
+    r"(?:PI|Supervisor|Prof\.?|Dr\.?)\s*[:\s]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
+]
+_PI_KOREAN_COMPILED = [re.compile(p) for p in _PI_KOREAN_PATTERNS]
+
 # Common false-positive names to filter out
 _FALSE_POSITIVE_NAMES = {
     "the university", "our group", "the lab", "the department",
@@ -145,12 +156,12 @@ _REQUIREMENTS_HEADERS = [
     r"you (?:should|must|will) have\s*[:.]",
     r"candidates? should\s*[:.]",
     r"(?:your )?profile\s*[:.]",
-    # Korean
-    r"자격\s*(?:요건|조건|사항)\s*[:.]?",
-    r"지원\s*자격\s*[:.]?",
-    r"우대\s*(?:사항|조건)\s*[:.]?",
-    r"필요\s*역량\s*[:.]?",
-    r"응시\s*자격\s*[:.]?",
+    # Korean (with optional numbered prefix: "7. 지원자격", "가. 자격요건", "□ 응시자격")
+    r"(?:(?:\d+|[가-힣])\.\s*|[□■▣]\s*)?자격\s*(?:요건|조건|사항)\s*[:.]?",
+    r"(?:(?:\d+|[가-힣])\.\s*|[□■▣]\s*)?지원\s*자격\s*[:.]?",
+    r"(?:(?:\d+|[가-힣])\.\s*|[□■▣]\s*)?우대\s*(?:사항|조건)\s*[:.]?",
+    r"(?:(?:\d+|[가-힣])\.\s*|[□■▣]\s*)?필요\s*역량\s*[:.]?",
+    r"(?:(?:\d+|[가-힣])\.\s*|[□■▣]\s*)?응시\s*자격\s*[:.]?",
     r"필수\s*(?:사항|역량|조건)\s*[:.]?",
     r"모집\s*대상\s*[:.]?",
 ]
@@ -252,6 +263,12 @@ _RESEARCH_KEYWORDS = [
     "Western blot", "PCR", "qPCR", "RT-PCR",
     "microscopy", "confocal", "cryo-EM",
     "cell culture", "animal model", "mouse model",
+    # Korean research keywords
+    "합성생물학", "유전체", "단백질공학", "유전자편집", "유전자가위",
+    "대사공학", "미생물", "효소공학", "분자생물학", "시스템생물학",
+    "생물정보학", "마이크로바이옴", "세포공학", "극한미생물", "고세균",
+    "발효", "나노바이오", "세포치료", "유전공학", "오믹스",
+    "생화학", "약학", "생명과학", "생명공학", "화학생물학", "구조생물학",
 ]
 
 # Duration/salary patterns
@@ -259,6 +276,8 @@ _DURATION_PATTERNS = [
     r"(\d+)\s*(?:-\s*\d+\s*)?(?:year|yr)s?",
     r"(\d+)\s*(?:-\s*\d+\s*)?months?",
     r"(?:up to|minimum|at least)\s+(\d+)\s+(?:year|yr|month)s?",
+    # Korean: "임기 2년", "계약기간 1년", "근무기간: 2년"
+    r"(?:임기|계약\s*기간|근무\s*기간|연구\s*기간)\s*[:.]?\s*(\d+)\s*(?:년|개월)",
 ]
 
 _SALARY_PATTERNS = [
@@ -266,6 +285,8 @@ _SALARY_PATTERNS = [
     r"[\$\u20ac\u00a3]\s*([\d,]+(?:\.\d+)?)\s*(?:k|K)?\s*(?:per\s+(?:year|annum)|/\s*(?:yr|year|annum))",
     r"(?:TV-?L\s*E?\s*1[3-5]|W\s*[123]|E\s*1[3-5])",  # German pay scale
     r"(?:Grade|Band|Scale)\s*\d+",
+    # Korean: "연봉 약 3,500만원", "월급 300만원", "급여: 4,000만원"
+    r"(?:연봉|월급|급여|보수|처우)\s*(?:약\s*)?([\d,]+)\s*만?\s*원",
 ]
 
 
@@ -276,62 +297,85 @@ _SALARY_PATTERNS = [
 # Maps keyword patterns (lowercased) to canonical field names.
 # Checked in order; first match wins. More specific patterns come first.
 _FIELD_MAPPING: list[tuple[list[str], str]] = [
-    (["crispr", "cas9", "cas12", "cas13", "gene editing", "genome editing"],
+    (["crispr", "cas9", "cas12", "cas13", "gene editing", "genome editing",
+      "유전자편집", "유전체편집", "유전자가위", "유전자 편집", "유전체 편집"],
      "Genome Engineering"),
-    (["synthetic biology", "synbio", "cell-free", "biofoundry", "genetic circuit"],
+    (["synthetic biology", "synbio", "cell-free", "biofoundry", "genetic circuit",
+      "합성생물학", "합성 생물학"],
      "Synthetic Biology"),
     (["protein engineering", "directed evolution", "enzyme engineering",
-      "enzyme design", "de novo protein", "protein design"],
+      "enzyme design", "de novo protein", "protein design",
+      "단백질공학", "단백질 공학", "효소공학", "효소 공학", "지향진화", "지향 진화"],
      "Protein Engineering"),
     (["metabolic engineering", "metabolic flux", "pathway engineering",
-      "fermentation", "bioprocess", "biomanufacturing"],
+      "fermentation", "bioprocess", "biomanufacturing",
+      "대사공학", "대사 공학", "발효"],
      "Metabolic Engineering"),
     (["extremophile", "thermophile", "hyperthermophile", "archaea",
-      "extremozyme", "thermus", "sulfolobus"],
+      "extremozyme", "thermus", "sulfolobus",
+      "극한미생물", "극한 미생물", "고세균"],
      "Extremophile Biology"),
     (["structural biology", "cryo-em", "x-ray crystallography",
-      "protein structure", "structural determination"],
+      "protein structure", "structural determination",
+      "구조생물학", "구조 생물학"],
      "Structural Biology"),
     (["machine learning", "deep learning", "ai-driven", "artificial intelligence",
       "computational biology", "computational design"],
      "Computational Biology / AI"),
     (["bioinformatics", "genomics", "transcriptomics", "proteomics",
-      "metabolomics", "multi-omics", "metagenomics"],
+      "metabolomics", "multi-omics", "metagenomics",
+      "생물정보", "생물정보학", "생물 정보학", "오믹스"],
      "Bioinformatics / Omics"),
     (["single-cell", "single cell", "scrna-seq", "spatial transcriptomics"],
      "Single-Cell Biology"),
     (["immunology", "antibody engineering", "car-t", "immune",
-      "immunotherapy", "antibody"],
+      "immunotherapy", "antibody",
+      "면역", "면역학"],
      "Immunology"),
     (["cancer biology", "oncology", "tumor", "tumour"],
      "Cancer Biology"),
     (["neuroscience", "neurobiology", "optogenetics", "neural",
-      "brain", "electrophysiology"],
+      "brain", "electrophysiology",
+      "신경", "신경과학", "뇌과학"],
      "Neuroscience"),
     (["stem cell", "organoid", "tissue engineering", "regenerative",
-      "ips cell", "ipsc"],
+      "ips cell", "ipsc",
+      "세포치료", "줄기세포"],
      "Stem Cell / Regenerative Medicine"),
     (["drug discovery", "pharmacology", "drug design",
-      "medicinal chemistry", "screening"],
+      "medicinal chemistry", "screening",
+      "약학", "약리학"],
      "Drug Discovery / Pharmacology"),
     (["plant biology", "agricultural biotechnology", "crop",
       "plant science", "plant genetics"],
      "Plant Biology"),
-    (["microfluidics", "biosensor", "bioelectronics", "lab-on-a-chip"],
+    (["microfluidics", "biosensor", "bioelectronics", "lab-on-a-chip",
+      "나노바이오"],
      "Bioengineering / Devices"),
     (["epigenetics", "chromatin", "histone", "dna methylation"],
      "Epigenetics"),
     (["rna biology", "mrna", "non-coding rna", "ribosome", "rna therapeutics"],
      "RNA Biology"),
-    (["microbiology", "bacteriology", "virology", "mycology", "microbiome"],
+    (["microbiology", "bacteriology", "virology", "mycology", "microbiome",
+      "미생물", "미생물학"],
      "Microbiology"),
-    (["biochemistry", "biophysics", "chemical biology", "bioorganic"],
+    (["biochemistry", "biophysics", "chemical biology", "bioorganic",
+      "화학생물학", "화학 생물학", "생화학"],
      "Biochemistry / Chemical Biology"),
-    (["cell biology", "cell signaling", "cell cycle", "membrane biology"],
+    (["cell biology", "cell signaling", "cell cycle", "membrane biology",
+      "세포생물학", "세포 생물학", "세포공학", "세포 공학"],
      "Cell Biology"),
     (["molecular biology", "gene expression", "gene regulation",
-      "cloning", "transformation"],
+      "cloning", "transformation",
+      "분자생물학", "분자 생물학"],
      "Molecular Biology"),
+    # Broad Korean catch-all (must be last — matches wide terms)
+    (["시스템생물학", "시스템 생물학"],
+     "Systems Biology"),
+    (["생명공학", "생명 공학"],
+     "Biotechnology"),
+    (["바이오", "생명과학", "생명 과학"],
+     "Life Sciences"),
 ]
 
 
@@ -348,6 +392,8 @@ _DEPARTMENT_PATTERNS = [
     re.compile(r"Faculty\s+of\s+([\w\s&,/()-]+?)(?:\s*[,.\n(]|\s+(?:at|in|is|and)\b)", re.IGNORECASE),
     # "Division of Applied Chemistry"
     re.compile(r"Division\s+of\s+([\w\s&,/()-]+?)(?:\s*[,.\n(]|\s+(?:at|in|is|and)\b)", re.IGNORECASE),
+    # Korean: "생명공학과", "화학생물학부", "바이오연구소", "미생물학연구실", "생명과학연구단"
+    re.compile(r"([가-힣]{2,15}(?:학과|학부|센터|연구소|연구실|연구단))"),
 ]
 
 # Map from pattern prefix keyword to human-readable prefix
@@ -377,6 +423,9 @@ def extract_department(text: str) -> str | None:
         name = m.group(1).strip().rstrip(",.")
         if len(name) < 3 or len(name) > 80:
             continue
+        # Korean department names are self-contained (e.g. "생명공학과")
+        if re.search(r"[가-힣]", name):
+            return name
         # Determine prefix from the matched text
         matched_prefix = m.group(0).split()[0].lower().rstrip(".")
         prefix = _DEPT_PREFIX_MAP.get(matched_prefix, "Department of")
@@ -520,6 +569,9 @@ def _is_valid_name(name: str) -> bool:
         return False
     if len(name) < 4:
         return False
+    # Korean full name: 2-4 hangul characters (no space needed — family+given)
+    if re.fullmatch(r"[가-힣]{2,4}", name):
+        return True
     # Must contain at least one space (first + last name)
     if " " not in name.strip():
         return False
@@ -637,6 +689,15 @@ def extract_pi_name(text: str) -> Optional[str]:
 
     # Normalize whitespace (newlines inside names break matching)
     norm = re.sub(r"\s+", " ", text)
+
+    # Pass 0: Korean PI patterns (연구책임자: 홍길동, 지도교수: 김철수, etc.)
+    for kp in _PI_KOREAN_COMPILED:
+        m = kp.search(norm)
+        if m:
+            name = m.group(1).strip()
+            # Korean full name (2-4 hangul chars) or English name
+            if re.fullmatch(r"[가-힣]{2,4}", name) or _is_valid_name(name):
+                return name
 
     # Pass 1: full-name patterns
     for pattern in _PI_COMPILED:

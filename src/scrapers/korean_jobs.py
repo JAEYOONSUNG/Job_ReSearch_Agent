@@ -205,11 +205,113 @@ class KoreanJobsScraper(BaseScraper):
             link_pattern=r"recruit.*do.*id=\d+|detail|view",
         )
 
+    # ── HiBrainNet login state ──
+    _hibrain_cookies: list[dict] | None = None
+
+    def _hibrain_login(self) -> bool:
+        """Login to HiBrainNet via Playwright and cache cookies.
+
+        Returns True if login succeeded.
+        """
+        if self._hibrain_cookies is not None:
+            return bool(self._hibrain_cookies)
+
+        from src.config import HIBRAIN_USERNAME, HIBRAIN_PASSWORD
+
+        if not HIBRAIN_USERNAME or not HIBRAIN_PASSWORD:
+            self.logger.debug("HiBrainNet credentials not configured, skipping login")
+            self._hibrain_cookies = []
+            return False
+
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as pw:
+                try:
+                    browser = pw.chromium.launch(headless=True, channel="chrome")
+                except Exception:
+                    browser = pw.chromium.launch(headless=True)
+                ctx = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = ctx.new_page()
+
+                page.goto(
+                    "https://www.hibrain.net/logins/signin",
+                    timeout=30000,
+                    wait_until="domcontentloaded",
+                )
+                page.wait_for_selector("input#userid", timeout=15000)
+
+                # Fill login form: input#userid + input#passwd + input#submit-btn
+                page.fill("input#userid", HIBRAIN_USERNAME)
+                page.fill("input#passwd", HIBRAIN_PASSWORD)
+                page.click("input#submit-btn")
+                page.wait_for_timeout(3000)
+
+                # Check login success — redirects away from signin page
+                url_after = page.url
+                content = page.content()
+                if "signin" not in url_after or "로그아웃" in content:
+                    self._hibrain_cookies = ctx.cookies()
+                    self.logger.info("HiBrainNet login successful (%d cookies)", len(self._hibrain_cookies))
+                    browser.close()
+                    return True
+                else:
+                    self.logger.warning("HiBrainNet login may have failed (still on %s)", url_after)
+                    self._hibrain_cookies = ctx.cookies()
+                    browser.close()
+                    return bool(self._hibrain_cookies)
+
+        except Exception as exc:
+            self.logger.warning("HiBrainNet login failed: %s", exc)
+            self._hibrain_cookies = []
+            return False
+
+    def _fetch_hibrain_detail(self, url: str) -> str:
+        """Fetch a HiBrainNet detail page using logged-in cookies."""
+        if not self._hibrain_cookies:
+            return ""
+
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as pw:
+                try:
+                    browser = pw.chromium.launch(headless=True, channel="chrome")
+                except Exception:
+                    browser = pw.chromium.launch(headless=True)
+                ctx = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                )
+                ctx.add_cookies(self._hibrain_cookies)
+                page = ctx.new_page()
+                page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+                html = page.content()
+                page.close()
+                browser.close()
+                return html
+        except Exception as exc:
+            self.logger.debug("HiBrainNet detail fetch failed: %s — %s", url, exc)
+            return ""
+
     def _scrape_hibrain(self) -> list[dict[str, Any]]:
         """HiBrainNet (hibrain.net) — professor/postdoc positions.
 
         HiBrainNet lists ALL professional positions (banks, government,
         factories, etc.), so we filter to bio/research-relevant titles.
+        If credentials are configured, logs in to access full detail pages.
         """
         jobs = self._scrape_board_site(
             base_url="https://www.hibrain.net/recruitment/recruits",
@@ -221,6 +323,38 @@ class KoreanJobsScraper(BaseScraper):
         jobs = [j for j in jobs if _is_bio_relevant_korean(j.get("title", ""))]
         if pre > len(jobs):
             self.logger.info("HiBrainNet bio filter: %d → %d", pre, len(jobs))
+
+        # ── Login & enrich detail pages (contact info + structured fields) ──
+        if jobs and self._hibrain_login():
+            enriched_count = 0
+            for job in jobs[:DETAIL_LIMIT]:
+                url = job.get("url")
+                if not url:
+                    continue
+                html = self._fetch_hibrain_detail(url)
+                if not html or len(html) < 500:
+                    continue
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Extract description (may be richer with login)
+                desc = self._extract_description_ralp(soup, html, "hibrain")
+                if desc and len(desc) > len(job.get("description") or ""):
+                    job["description"] = desc[:DETAIL_TEXT_LIMIT]
+
+                # Extract structured fields from HTML tables
+                _extract_korean_fields(soup, job)
+
+                # Extract contact info (login-gated on HiBrainNet)
+                _extract_hibrain_contact(soup, job)
+
+                enriched_count += 1
+
+            if enriched_count:
+                self.logger.info(
+                    "HiBrainNet login-enriched %d/%d detail pages",
+                    enriched_count, min(len(jobs), DETAIL_LIMIT),
+                )
+
         return jobs
 
     def _scrape_rpik(self) -> list[dict[str, Any]]:
@@ -1079,6 +1213,60 @@ class KoreanJobsScraper(BaseScraper):
 # ── Module-level helpers ──────────────────────────────────────────────────
 
 
+def _extract_hibrain_contact(soup: BeautifulSoup, job: dict[str, Any]) -> None:
+    """Extract contact email/phone from HiBrainNet detail page (login-gated).
+
+    HiBrainNet's contact section has a specific structure with
+    ``접수 및 문의처`` as the container.  We restrict extraction to that
+    section to avoid picking up site-wide footer emails.
+    """
+    # Find the 접수담당자 section (inside <section class="test-info">)
+    contact_section = None
+    for el in soup.find_all(string=re.compile(r"접수\s*담당자")):
+        # Walk up to find a section/div that contains the contact details
+        parent = el.parent
+        for _ in range(6):
+            if parent is None:
+                break
+            text_len = len(parent.get_text(strip=True))
+            if text_len > 30 and parent.name in ("section", "div", "dl", "table"):
+                contact_section = parent
+                break
+            parent = parent.parent
+
+    if not contact_section:
+        return
+
+    text = contact_section.get_text("\n", strip=True)
+
+    # Extract email (skip hibrain.net itself)
+    emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
+    for email in emails:
+        if "hibrain.net" not in email:
+            if not job.get("contact_email"):
+                job["contact_email"] = email
+            break
+
+    # Extract phone
+    phone_match = re.search(r"전화[^\d]*(\d[\d\-()]{6,20})", text)
+    if phone_match and not job.get("_contact_phone"):
+        phone = phone_match.group(1).strip()
+        # Append to conditions
+        existing = job.get("conditions") or ""
+        if phone not in existing:
+            job["conditions"] = f"{existing} | 연락처: {phone}".strip(" |") if existing else f"연락처: {phone}"
+
+    # Extract contact person name (Korean names: 2-4 hangul chars, or org names)
+    name_match = re.search(r"담당자\s*이름\n\s*([가-힣A-Za-z\s]{2,30}?)(?:\n|$)", text)
+    if name_match:
+        name = name_match.group(1).strip()
+        # Filter out navigation/boilerplate words
+        if name and 2 <= len(name) <= 25 and name not in ("전화", "이메일", "휴대폰", "접수방법"):
+            existing = job.get("conditions") or ""
+            if name not in existing:
+                job["conditions"] = f"{existing} | 담당자: {name}".strip(" |") if existing else f"담당자: {name}"
+
+
 def _extract_onclick_href(onclick: str) -> str | None:
     """Extract URL from onclick handlers like ``location.href='/path'`` or ``href='/path'``."""
     if not onclick:
@@ -1421,9 +1609,184 @@ def _append_structured_sections(job: dict[str, Any], sections: dict[str, list[st
         job["description"] = merged
 
 
+def _parse_korean_kv_from_text(text: str) -> dict[str, str]:
+    """Parse Korean key-value pairs from plain description text.
+
+    Handles formats commonly found in IBRIC, IBS, SNU, HiBrainNet:
+    - ``전공분야: 생명과학>생물학``
+    - ``담당업무1: 연구 수행``
+    - ``급여조건: 연봉 3000만원``
+    - ``□ 채용분야 및 인원``
+    - ``7. 지원 자격``
+    """
+    kv: dict[str, str] = {}
+    lines = text.split("\n")
+
+    # Pass 1: explicit "key: value" on a single line
+    for line in lines:
+        line = line.strip()
+        if len(line) < 4 or len(line) > 600:
+            continue
+        m = re.match(
+            r"^(?:[□■▣●○◆◇▪▸※★☆·\-\*]\s*)?([가-힣A-Za-z0-9/()\s]{2,30}?)\s*[:：]\s*(.+)$",
+            line,
+        )
+        if m:
+            key = m.group(1).strip()
+            val = m.group(2).strip()
+            if len(val) >= 2:
+                kv[key] = val
+
+    # Pass 2: numbered sections (1. 채용분야, 가. 지원자격, □ 응시자격)
+    # Collect section header → following content until next section
+    section_re = re.compile(
+        r"^(?:(?:\d+|[가-힣])\.\s*|[□■▣]\s*)([가-힣A-Za-z\s]{2,20})",
+    )
+    current_header = None
+    current_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        sm = section_re.match(stripped)
+        if sm:
+            # Save previous section
+            if current_header and current_lines:
+                content = "\n".join(current_lines).strip()
+                if content and current_header not in kv:
+                    kv[current_header] = content
+            current_header = sm.group(1).strip()
+            # Remainder of line after header
+            remainder = stripped[sm.end():].strip().lstrip(":：").strip()
+            current_lines = [remainder] if remainder else []
+        elif current_header and stripped:
+            current_lines.append(stripped)
+    # Save last section
+    if current_header and current_lines:
+        content = "\n".join(current_lines).strip()
+        if content and current_header not in kv:
+            kv[current_header] = content
+
+    return kv
+
+
+def _apply_korean_kv_fallbacks(job: dict[str, Any], kv: dict[str, str]) -> None:
+    """Fill missing job fields from parsed Korean key-value pairs.
+
+    Handles IBRIC keys (전공분야, 담당업무1, 급여조건, 소속책임자, etc.),
+    IBS/SNU numbered sections, and HiBrainNet structured metadata.
+    """
+
+    # FIELD from 전공분야, 연구분야, 모집분야
+    if not job.get("field"):
+        for key, val in kv.items():
+            if re.search(r"전공\s*분야|연구\s*분야|모집\s*분야|연구\s*영역", key):
+                # Clean IBRIC "생명과학>생명과학 기타" → "생명과학"
+                # Also "바이오·의료융합>바이오·의료융합 기타" → "바이오·의료융합"
+                val_clean = val.strip()
+                if ">" in val_clean:
+                    # Take last segment before "기타", or first meaningful segment
+                    parts = [p.strip() for p in val_clean.split(">")]
+                    val_clean = next(
+                        (p for p in reversed(parts) if p and "기타" not in p),
+                        parts[0].strip(),
+                    )
+                val_clean = re.sub(r"\s*기타$", "", val_clean).strip()
+                if val_clean and len(val_clean) < 100 and "\n" not in val_clean:
+                    job["field"] = val_clean[:200]
+                break
+
+    # REQUIREMENTS from 지원자격, 응시자격, 자격요건, 최종학력
+    if not job.get("requirements"):
+        req_parts: list[str] = []
+        for key, val in kv.items():
+            if re.search(r"지원\s*자격|응시\s*자격|자격\s*(?:요건|조건|사항)|필요\s*역량", key):
+                req_parts.append(val)
+            elif re.search(r"최종\s*학력", key) and val:
+                req_parts.append(f"학력: {val}")
+        if req_parts:
+            job["requirements"] = "\n".join(req_parts)[:6000]
+
+    # CONDITIONS from 급여조건, 급여, 채용방식, 채용형태, 근무지역, 계약기간
+    if not job.get("conditions"):
+        cond_parts: list[str] = []
+        for key, val in kv.items():
+            if re.search(r"^급여$|급여\s*조건|보수|연봉|처우|대우|salary", key, re.IGNORECASE):
+                cond_parts.append(f"급여: {val}")
+            elif re.search(r"계약\s*기간|근무\s*기간|임용\s*기간|고용\s*조건|근무\s*조건", key):
+                cond_parts.append(f"{key}: {val}")
+            elif re.search(r"채용\s*방식|근무\s*형태", key):
+                cond_parts.append(f"{key}: {val}")
+            elif re.search(r"채용\s*형태", key):
+                cond_parts.append(f"직종: {val}")
+            elif re.search(r"근무\s*지역|근무\s*장소|근무지", key):
+                cond_parts.append(f"근무지: {val}")
+            elif re.search(r"채용\s*인원", key):
+                cond_parts.append(f"인원: {val}")
+            elif re.search(r"복리\s*후생", key):
+                cond_parts.append(f"복리후생: {val}")
+        if cond_parts:
+            job["conditions"] = " | ".join(cond_parts)[:4000]
+
+    # RESPONSIBILITIES from 담당업무, 담당업무1, 채용업무, 수행업무, 연구내용
+    if not job.get("pi_research_summary"):
+        for key, val in kv.items():
+            if re.search(r"담당\s*업무|채용\s*업무|수행\s*업무|연구\s*내용|업무\s*내용|직무\s*내용", key):
+                if val and len(val) > 3:
+                    job["pi_research_summary"] = val[:4000]
+                    break
+
+    # DEPARTMENT from 부서, 소속부서, 학과, 연구단
+    if not job.get("department"):
+        for key, val in kv.items():
+            if re.search(r"부서|소속\s*부서|학과|전공|연구단|연구실", key):
+                if not re.search(r"책임자|담당자|contact|email|이메일", key, re.IGNORECASE):
+                    job["department"] = val[:250]
+                    break
+
+    # PI from 소속책임자, 책임교수, 지도교수, 담당교수
+    if not job.get("pi_name"):
+        for key, val in kv.items():
+            if re.search(r"소속\s*책임자|책임\s*교수|지도\s*교수|담당\s*교수", key):
+                # Split on common delimiters, take first name-like token
+                pi = re.split(r"[,;/\s(]", val)[0].strip()
+                # Accept Korean names (2-4 chars) or reasonable English names
+                if re.fullmatch(r"[가-힣]{2,4}", pi) or (
+                    len(pi) >= 4 and pi[0].isupper()
+                ):
+                    job["pi_name"] = pi
+                break
+
+    # APPLICATION MATERIALS from 제출서류, 전형방법
+    if not job.get("application_materials"):
+        app_parts: list[str] = []
+        for key, val in kv.items():
+            if re.search(r"제출\s*서류|지원\s*서류|구비\s*서류", key):
+                app_parts.append(val)
+            elif re.search(r"전형\s*방법", key):
+                app_parts.append(f"전형: {val}")
+        if app_parts:
+            job["application_materials"] = "\n".join(app_parts)[:3000]
+
+    # PREFERRED QUALIFICATIONS from 우대사항, 우대조건
+    for key, val in kv.items():
+        if re.search(r"우대\s*사항|우대\s*조건|가산점", key):
+            existing_req = job.get("requirements", "")
+            if existing_req:
+                job["requirements"] = f"{existing_req}\n\n[우대사항]\n{val}"[:6000]
+            else:
+                job["requirements"] = f"[우대사항]\n{val}"[:6000]
+            break
+
+
 def _apply_korean_fallbacks(job: dict[str, Any]) -> None:
     """Apply description/title-based fallbacks even when detail scraping is partial."""
     desc = job.get("description", "")
+
+    # ── Parse Korean key-value pairs from description text ──
+    if desc:
+        kv = _parse_korean_kv_from_text(desc)
+        if kv:
+            _apply_korean_kv_fallbacks(job, kv)
+
     if not job.get("requirements") and desc:
         req = extract_requirements(desc)
         if req:
@@ -1438,7 +1801,7 @@ def _apply_korean_fallbacks(job: dict[str, Any]) -> None:
             job["application_materials"] = app_materials[:3000]
 
     if not job.get("keywords") and desc:
-        kws = _extract_korean_keywords(desc)
+        kws = _extract_korean_keywords(f"{job.get('title', '')} {desc}")
         if kws:
             job["keywords"] = ", ".join(kws)
 
@@ -1804,6 +2167,13 @@ def _extract_korean_keywords(text: str) -> list[str]:
         "극한미생물", "고세균", "발효", "나노바이오", "세포치료",
         "유전공학", "NGS", "오믹스", "생화학", "약학", "생명과학",
         "생명공학", "화학생물학", "구조생물학",
+        # Additional Korean domain keywords
+        "줄기세포", "면역학", "면역", "신경과학", "뇌과학", "약리학",
+        "암연구", "종양", "재생의학", "조직공학", "화학공학",
+        "식품공학", "식품과학", "환경공학", "생태학", "의생명",
+        "의학", "한의학", "치의학", "수의학", "간호학", "보건학",
+        "나노기술", "바이오센서", "유전자가위", "크리스퍼",
+        "항체", "백신", "세포배양", "동물모델", "임상시험",
     ]
     text_lower = text.lower()
     for kw in keywords_kr:
@@ -1844,7 +2214,40 @@ def _extract_korean_pi(text: str) -> str | None:
 
 def _infer_korean_field(title: str, desc: str) -> str | None:
     """Infer research field from Korean title/description."""
-    blob = f"{title} {desc[:500]}".lower()
+    # Extract from explicit 전공분야 tag (IBRIC format)
+    m = re.search(r"전공\s*분야\s*[:：]\s*(.+?)(?:\n|$)", desc)
+    if m:
+        raw = m.group(1).strip()
+        # "생명과학>생물학 기타" → search within this value
+        # "생명공학/화학공학" → search within this value
+        blob_field = raw.lower()
+        field_map_field = [
+            (r"합성\s*생물", "Synthetic Biology"),
+            (r"단백질|효소", "Protein Engineering"),
+            (r"유전체|유전공학|유전자", "Genomics"),
+            (r"대사\s*공학", "Metabolic Engineering"),
+            (r"미생물", "Microbiology"),
+            (r"생물\s*정보|바이오인포", "Bioinformatics"),
+            (r"분자\s*생물", "Molecular Biology"),
+            (r"세포\s*생물", "Cell Biology"),
+            (r"구조\s*생물", "Structural Biology"),
+            (r"화학\s*생물", "Chemical Biology"),
+            (r"약학|약리", "Pharmacology"),
+            (r"면역", "Immunology"),
+            (r"신경|뇌", "Neuroscience"),
+            (r"화학공학|화학", "Chemistry / Chemical Engineering"),
+            (r"생명\s*공학|바이오텍", "Biotechnology"),
+            (r"생명\s*과학|생물학|biology", "Life Sciences"),
+            (r"의학|의생명", "Biomedical Science"),
+            (r"농학|농생명|식품", "Agricultural Science"),
+            (r"환경", "Environmental Science"),
+        ]
+        for pat, field in field_map_field:
+            if re.search(pat, blob_field, re.IGNORECASE):
+                return field
+
+    # Broader search: title + first 2000 chars of description
+    blob = f"{title} {desc[:2000]}".lower()
     field_map = [
         (r"합성\s*생물|synthetic\s*bio", "Synthetic Biology"),
         (r"단백질\s*공학|protein\s*eng", "Protein Engineering"),
@@ -1865,6 +2268,11 @@ def _infer_korean_field(title: str, desc: str) -> str | None:
         (r"면역|immun", "Immunology"),
         (r"신경|neuro", "Neuroscience"),
         (r"발효|ferment", "Fermentation"),
+        (r"의생명|의학|biomedical", "Biomedical Science"),
+        (r"화학공학|chemical\s*eng", "Chemistry / Chemical Engineering"),
+        (r"식품|food\s*sci", "Food Science"),
+        (r"환경|environment", "Environmental Science"),
+        (r"농학|농생명|agri", "Agricultural Science"),
         (r"바이오|bio", "Biology"),
     ]
     for pat, field in field_map:

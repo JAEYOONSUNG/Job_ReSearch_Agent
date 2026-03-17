@@ -37,6 +37,10 @@ REPORT_RECIPIENTS = [
 SEMANTIC_SCHOLAR_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
 SEMANTIC_SCHOLAR_RATE_LIMIT = 100  # requests per 5 minutes
 
+# ── HiBrainNet ────────────────────────────────────────────────────────────
+HIBRAIN_USERNAME = os.getenv("HIBRAIN_USERNAME", "")
+HIBRAIN_PASSWORD = os.getenv("HIBRAIN_PASSWORD", "")
+
 # ── Search Keywords ────────────────────────────────────────────────────────
 SEARCH_KEYWORDS = [
     # Field-specific

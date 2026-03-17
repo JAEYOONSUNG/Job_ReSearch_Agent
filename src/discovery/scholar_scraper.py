@@ -187,6 +187,51 @@ def _pick_best_match(
 
 
 # ---------------------------------------------------------------------------
+# Korean name romanization (top 20 surnames)
+# ---------------------------------------------------------------------------
+
+_KOREAN_SURNAME_ROMANIZE: dict[str, list[str]] = {
+    "김": ["Kim"],
+    "이": ["Lee", "Yi", "Li"],
+    "박": ["Park", "Pak"],
+    "최": ["Choi", "Choe"],
+    "정": ["Jung", "Jeong", "Chung"],
+    "강": ["Kang", "Gang"],
+    "조": ["Cho", "Jo"],
+    "윤": ["Yoon", "Yun"],
+    "장": ["Jang", "Chang"],
+    "임": ["Lim", "Im"],
+    "한": ["Han"],
+    "오": ["Oh"],
+    "서": ["Seo", "Suh"],
+    "신": ["Shin", "Sin"],
+    "권": ["Kwon"],
+    "황": ["Hwang"],
+    "안": ["Ahn", "An"],
+    "송": ["Song"],
+    "류": ["Ryu", "Yoo"],
+    "홍": ["Hong"],
+}
+
+
+def _romanize_korean_name(name: str) -> str:
+    """Convert a Korean full name (e.g. '홍길동') to the most common romanized surname.
+
+    Returns ``'{Surname}'`` only (e.g. ``'Hong'``), since given-name romanization
+    is highly variable.  The caller typically appends the institute for disambiguation.
+    """
+    name = name.strip()
+    if len(name) < 2:
+        return name
+
+    surname_char = name[0]
+    variants = _KOREAN_SURNAME_ROMANIZE.get(surname_char)
+    if variants:
+        return variants[0]  # most common romanization
+    return name  # fallback: return as-is
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -222,10 +267,11 @@ def search_scholar_author(
         if elapsed < delay:
             time.sleep(delay - elapsed)
 
-    # Build query
-    query = name
+    # Build query — romanize Korean names for Google Scholar
+    search_name = _romanize_korean_name(name) if re.fullmatch(r"[가-힣]{2,4}", name.strip()) else name
+    query = search_name
     if institute:
-        query = f"{name} {institute}"
+        query = f"{search_name} {institute}"
 
     url = f"{_GS_BASE}/citations?view_op=search_authors&mauthors={quote_plus(query)}&hl=en"
 

@@ -15,6 +15,7 @@ Fallback chain:
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -181,7 +182,9 @@ def lookup_pi_urls(
 
     # 2. Google Scholar direct scraping (with built-in circuit breaker)
     #    Skip single-name PIs (too ambiguous for Scholar search)
-    is_single_name = " " not in pi_name.strip()
+    #    Exception: Korean full names have no space (e.g. "홍길동") — not single-name
+    _is_korean_fullname = bool(re.fullmatch(r"[가-힣]{2,4}", pi_name.strip()))
+    is_single_name = " " not in pi_name.strip() and not _is_korean_fullname
     s2_author_id = cached.get("s2_author_id") if cached else None
 
     if not result.get("scholar_url") and not is_single_name:

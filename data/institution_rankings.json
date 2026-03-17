@@ -68,7 +68,8 @@
         "Broad Institute",
         "Howard Hughes Medical Institute",
         "Howard Hughes Medical Institute (HHMI)",
-        "HHMI"
+        "HHMI",
+        "Institute for Basic Science (IBS)"
       ]
     },
     "2": {
@@ -147,7 +148,11 @@
         "St. Jude Children's Research Hospital",
         "Mass General Brigham",
         "Technion - Israel Institute of Technology",
-        "Technion"
+        "Technion",
+        "Korea Institute of Science and Technology (KIST)",
+        "Korea University",
+        "Sungkyunkwan University",
+        "Korea Research Institute of Bioscience and Biotechnology (KRIBB)"
       ]
     },
     "3": {
@@ -283,7 +288,18 @@
         "Los Alamos National Laboratory",
         "Argonne National Laboratory",
         "Brookhaven National Laboratory",
-        "Sandia National Laboratories"
+        "Sandia National Laboratories",
+        "Ulsan National Institute of Science and Technology (UNIST)",
+        "Gwangju Institute of Science and Technology (GIST)",
+        "Hanyang University",
+        "Kyung Hee University",
+        "Ewha Womans University",
+        "Korea Research Institute of Chemical Technology (KRICT)",
+        "Korea Basic Science Institute (KBSI)",
+        "Korea Institute of Ocean Science and Technology (KIOST)",
+        "Korea Atomic Energy Research Institute (KAERI)",
+        "Korea Brain Research Institute (KBRI)",
+        "Chung-Ang University"
       ]
     },
     "4": {
@@ -373,7 +389,23 @@
         "Linkoping University",
         "Human Technopole",
         "Łukasiewicz Research Network",
-        "Polish Academy of Sciences"
+        "Polish Academy of Sciences",
+        "Chungnam National University",
+        "Chungbuk National University",
+        "Kyungpook National University",
+        "Chonnam National University",
+        "Jeonbuk National University",
+        "Pusan National University",
+        "Kangwon National University",
+        "Ajou University",
+        "Inha University",
+        "Dongguk University",
+        "Konkuk University",
+        "Chosun University",
+        "Korea Food Research Institute (KFRI)",
+        "World Institute of Kimchi (WIKIM)",
+        "Korea Institute of Machinery and Materials (KIMM)",
+        "Korea Institute of Industrial Technology (KITECH)"
       ]
     }
   },
@@ -583,6 +615,63 @@
     "UNSW": "University of New South Wales",
     "PSL": "Universite PSL",
     "MPI": "Max Planck",
-    "Technion": "Technion - Israel Institute of Technology"
+    "Technion": "Technion - Israel Institute of Technology",
+
+    "서울대학교": "Seoul National University",
+    "서울대": "Seoul National University",
+    "연세대학교": "Yonsei University",
+    "연세대": "Yonsei University",
+    "고려대학교": "Korea University",
+    "고려대": "Korea University",
+    "성균관대학교": "Sungkyunkwan University",
+    "성균관대": "Sungkyunkwan University",
+    "한양대학교": "Hanyang University",
+    "한양대": "Hanyang University",
+    "경희대학교": "Kyung Hee University",
+    "중앙대학교": "Chung-Ang University",
+    "이화여자대학교": "Ewha Womans University",
+    "이화여대": "Ewha Womans University",
+    "울산과학기술원": "Ulsan National Institute of Science and Technology (UNIST)",
+    "UNIST": "Ulsan National Institute of Science and Technology (UNIST)",
+    "광주과학기술원": "Gwangju Institute of Science and Technology (GIST)",
+    "GIST": "Gwangju Institute of Science and Technology (GIST)",
+    "충남대학교": "Chungnam National University",
+    "충북대학교": "Chungbuk National University",
+    "경북대학교": "Kyungpook National University",
+    "전남대학교": "Chonnam National University",
+    "전북대학교": "Jeonbuk National University",
+    "부산대학교": "Pusan National University",
+    "강원대학교": "Kangwon National University",
+    "아주대학교": "Ajou University",
+    "인하대학교": "Inha University",
+    "동국대학교": "Dongguk University",
+    "조선대학교": "Chosun University",
+    "건국대학교": "Konkuk University",
+
+    "기초과학연구원": "Institute for Basic Science (IBS)",
+    "IBS": "Institute for Basic Science (IBS)",
+    "한국과학기술연구원": "Korea Institute of Science and Technology (KIST)",
+    "KIST": "Korea Institute of Science and Technology (KIST)",
+    "한국생명공학연구원": "Korea Research Institute of Bioscience and Biotechnology (KRIBB)",
+    "KRIBB": "Korea Research Institute of Bioscience and Biotechnology (KRIBB)",
+    "한국화학연구원": "Korea Research Institute of Chemical Technology (KRICT)",
+    "KRICT": "Korea Research Institute of Chemical Technology (KRICT)",
+    "한국기초과학지원연구원": "Korea Basic Science Institute (KBSI)",
+    "KBSI": "Korea Basic Science Institute (KBSI)",
+    "한국해양과학기술원": "Korea Institute of Ocean Science and Technology (KIOST)",
+    "KIOST": "Korea Institute of Ocean Science and Technology (KIOST)",
+    "한국식품연구원": "Korea Food Research Institute (KFRI)",
+    "KFRI": "Korea Food Research Institute (KFRI)",
+    "한국원자력연구원": "Korea Atomic Energy Research Institute (KAERI)",
+    "KAERI": "Korea Atomic Energy Research Institute (KAERI)",
+    "한국뇌연구원": "Korea Brain Research Institute (KBRI)",
+    "KBRI": "Korea Brain Research Institute (KBRI)",
+    "세계김치연구소": "World Institute of Kimchi (WIKIM)",
+    "WIKIM": "World Institute of Kimchi (WIKIM)",
+    "한국기계연구원": "Korea Institute of Machinery and Materials (KIMM)",
+    "한국전자통신연구원": "Electronics and Telecommunications Research Institute (ETRI)",
+    "한국생산기술연구원": "Korea Institute of Industrial Technology (KITECH)",
+    "국가과학기술연구회": "National Research Council of Science & Technology (NST)",
+    "정부출연연구기관": "National Research Council of Science & Technology (NST)"
   }
 }
